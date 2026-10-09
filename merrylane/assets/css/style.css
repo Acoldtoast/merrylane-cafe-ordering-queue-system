@@ -1,0 +1,145 @@
+/* MerryOrder customer pages: mobile first */
+:root {
+    --green: #1F5C4A;
+    --green-dark: #174536;
+    --tint: #E3EEE9;
+    --ink: #1E1B18;
+    --muted: #4A4640;
+    --line: #DAD8D2;
+    --bg: #F5F5F2;
+    --white: #FFFFFF;
+    --cta: #B8431A;
+    --warn-bg: #FBE9E3;
+    --warn-ink: #7A2A12;
+    --font-body: 'DM Sans', system-ui, sans-serif;
+    --font-head: 'Sora', 'DM Sans', system-ui, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.4;
+}
+
+.app { max-width: 480px; margin: 0 auto; min-height: 100vh; background: var(--bg); }
+
+.visually-hidden {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* Header */
+.site-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; background: var(--green); color: var(--white);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-logo {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--white); color: var(--green);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-head); font-weight: 700; font-size: 20px;
+}
+.brand-name { font-family: var(--font-head); font-weight: 700; font-size: 18px; line-height: 1.2; }
+.brand-sub { font-size: 13px; opacity: 0.9; }
+.table-pill {
+    padding: 6px 12px; border: 1px solid var(--white); border-radius: 999px;
+    font-size: 13px; font-weight: 700;
+}
+
+/* Status chips */
+.status-list { display: flex; flex-direction: column; gap: 8px; padding: 16px 20px 0; }
+.status-chip {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px; border-radius: 12px; font-size: 14px; font-weight: 500;
+}
+.status-chip.is-ok { background: var(--tint); color: var(--green-dark); }
+.status-chip.is-plain { background: var(--white); border: 1px solid var(--line); }
+.status-chip.is-warn { background: var(--warn-bg); color: var(--warn-ink); }
+.icon { flex: none; }
+
+/* Sections */
+.section { padding: 28px 20px 8px; }
+.hero h1, .section h1 {
+    margin: 0 0 10px; font-family: var(--font-head); font-weight: 700;
+    font-size: 32px; line-height: 1.15;
+}
+.section h2 { margin: 0 0 14px; font-family: var(--font-head); font-weight: 600; font-size: 20px; }
+.lead { margin: 0 0 20px; font-size: 16px; line-height: 1.5; color: var(--muted); }
+.hint { margin: -8px 0 16px; font-size: 14px; color: var(--muted); }
+.muted { color: var(--muted); font-size: 14px; }
+.tag {
+    display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px;
+    background: var(--tint); color: var(--green-dark);
+    font-family: var(--font-body); font-size: 12px; font-weight: 700; vertical-align: middle;
+}
+
+/* Dine-in / take-out selector */
+.segmented { display: flex; gap: 8px; margin: 0 0 12px; padding: 0; border: 0; }
+.segmented input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.segmented label {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    height: 48px; border: 2px solid var(--green); border-radius: 12px;
+    background: var(--white); color: var(--green);
+    font-size: 16px; font-weight: 700; cursor: pointer;
+}
+.segmented input:checked + label { background: var(--green); color: var(--white); }
+.segmented input:focus-visible + label { outline: 3px solid var(--cta); outline-offset: 2px; }
+
+/* Buttons */
+.btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; border-radius: 12px; border: 2px solid transparent;
+    font-family: var(--font-body); font-weight: 700; text-decoration: none; cursor: pointer;
+}
+.btn:focus-visible, .chip-link:focus-visible { outline: 3px solid var(--cta); outline-offset: 2px; }
+.btn-cta { height: 56px; margin-bottom: 10px; background: var(--cta); color: var(--white); font-size: 18px; }
+.btn-cta:disabled { background: #CFCBC3; color: #5E5A53; cursor: not-allowed; }
+.btn-outline { height: 48px; border-color: var(--ink); background: transparent; color: var(--ink); font-size: 16px; }
+.btn-icon { height: 52px; background: var(--white); font-size: 15px; }
+
+/* Category chips */
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip-link {
+    display: inline-flex; align-items: center; height: 44px; padding: 0 18px;
+    border: 1px solid var(--green); border-radius: 999px; background: var(--white);
+    color: var(--green); font-size: 15px; font-weight: 700; text-decoration: none;
+}
+
+/* How it works */
+.steps { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.step {
+    display: flex; align-items: flex-start; gap: 14px; padding: 14px;
+    background: var(--white); border: 1px solid var(--line); border-radius: 12px;
+}
+.step-num {
+    flex: none; width: 32px; height: 32px; border-radius: 50%;
+    background: var(--green); color: var(--white);
+    display: flex; align-items: center; justify-content: center; font-weight: 700;
+}
+.step-title { font-weight: 700; }
+.step-text { font-size: 14px; color: var(--muted); line-height: 1.4; }
+
+/* Order status card */
+.card { padding: 16px; background: var(--white); border: 1px solid var(--line); border-radius: 12px; margin: 0 0 16px; }
+.card-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 14px; }
+.queue-no { font-family: var(--font-head); font-size: 18px; }
+.progress { display: flex; gap: 6px; }
+.progress-step { flex: 1; }
+.progress-step .bar { display: block; height: 8px; border-radius: 4px; background: var(--line); }
+.progress-step .label { display: block; margin-top: 6px; font-size: 13px; color: var(--muted); }
+.progress-step.is-done .bar { background: var(--green); }
+.progress-step.is-done .label { color: var(--ink); font-weight: 500; }
+.progress-step.is-current .label { color: var(--green); font-weight: 700; }
+
+/* Bottom actions */
+.actions { display: flex; gap: 10px; }
+.actions .btn { flex: 1; }
+
+/* Footer */
+.site-footer { padding: 28px 20px 32px; text-align: center; font-size: 13px; line-height: 1.5; color: var(--muted); }
+.footer-name { font-weight: 700; color: var(--ink); }
