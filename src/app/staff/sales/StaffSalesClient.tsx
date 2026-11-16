@@ -1,12 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PortalShell } from "@/components/PortalShell";
 import { staffNav } from "@/components/portalNav";
 import { Icon } from "@/components/Icons";
-import type { Order, OrderItem, SalesTransaction } from "@/lib/types";
-import { dateTimeLabel, orderTypeLabel, peso } from "@/lib/format";
+import { OrderDiscountDetails } from "@/components/OrderDiscountDetails";
+import { SkeletonLine, SkeletonPanel } from "@/components/PortalSkeletonPrimitives";
+import type {
+  Order,
+  OrderItem,
+  RejectedPayment,
+  SalesTransaction,
+} from "@/lib/types";
+import { dateTimeLabel, orderTypeLabel, peso, statusLabel } from "@/lib/format";
 import { orderItemMeta } from "@/lib/orderItems";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
+import { useRealtimeRefresh } from "@/lib/usePolling";
 
 function shiftDate(date: string, days: number) {
   const shifted = new Date(`${date}T00:00:00.000Z`);
@@ -43,6 +51,7 @@ export function StaffSalesClient({
   const [today] = useState(todayInManila);
   const [transactions, setTransactions] = useState<SalesTransaction[]>([]);
   const [cancelledOrders, setCancelledOrders] = useState<Order[]>([]);
+  const [rejectedPayments, setRejectedPayments] = useState<RejectedPayment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<SalesTransaction | null>(null);
@@ -67,7 +76,7 @@ export function StaffSalesClient({
     const currentRequest = ++requestId.current;
     setLoading(true);
     try {
-      const response = await fetch(
+      const response = await fetchPortalApi(
         `/api/staff/sales?date=${encodeURIComponent(date)}`,
         { cache: "no-store" }
       );
@@ -78,6 +87,7 @@ export function StaffSalesClient({
       if (currentRequest === requestId.current) {
         setTransactions(data.transactions || []);
         setCancelledOrders(data.cancelledOrders || []);
+        setRejectedPayments(data.rejectedPayments || []);
         setError("");
       }
     } catch (cause: unknown) {
@@ -87,6 +97,7 @@ export function StaffSalesClient({
         );
         setTransactions([]);
         setCancelledOrders([]);
+        setRejectedPayments([]);
       }
     } finally {
       if (currentRequest === requestId.current) setLoading(false);
@@ -96,6 +107,7 @@ export function StaffSalesClient({
   useEffect(() => {
     load();
   }, [load]);
+  useRealtimeRefresh(load, ["orders", "payments", "sales"]);
 
   const openDetails = useCallback(async (transaction: SalesTransaction) => {
     setSelected(transaction);
@@ -103,7 +115,7 @@ export function StaffSalesClient({
     setDetailError("");
     setDetailLoading(true);
     try {
-      const response = await fetch(
+      const response = await fetchPortalApi(
         `/api/staff/sales?date=${encodeURIComponent(date)}&transaction_id=${encodeURIComponent(transaction.transaction_id)}`,
         { cache: "no-store" }
       );
@@ -192,7 +204,9 @@ export function StaffSalesClient({
               {entries.map((entry) => (
                 <tr key={entry.transaction_id}>
                   <td data-label="">
-                    <strong>#{String(entry.order_id).padStart(3, "0")}</strong>
+                    <strong>
+                      #{String(entry.order_number ?? entry.order_id).padStart(3, "0")}
+                    </strong>
                     {entry.transaction_type === "additional" && (
                       <small className="daily-sales-additional">Additional payment</small>
                     )}
@@ -223,19 +237,8 @@ export function StaffSalesClient({
   );
 
   return (
-    <PortalShell
-      area="staff"
-      title="Sales."
-      subtitle="Review daily cash and GCash sales and open any verified order."
-      contextLabel="Service · Sales"
-      contextTitle={displayDate(date)}
-      nav={staffNav}
-    >
-      <div className="section-bar daily-sales-heading">
-        <div>
-          <h2>Daily sales</h2>
-          <p>Every verified payment is listed by day, separated into cash and GCash.</p>
-        </div>
+    <>
+      <div className="section-bar daily-sales-heading section-bar-actions-only">
         <div className="daily-sales-date-controls">
           <button
             type="button"
@@ -281,8 +284,21 @@ export function StaffSalesClient({
       <div className="daily-sales-date-label">{displayDate(date)}</div>
       {error && <div className="error-strip" role="alert">{error}</div>}
       {loading ? (
-        <div className="daily-sales-loading" role="status">
-          <span className="spinner" /> Loading daily sales…
+        <div role="status" aria-busy="true" aria-label="Loading daily sales">
+          <div className="daily-sales-totals portal-skeleton-sales-totals" aria-hidden="true">
+            {[1, 2, 3].map((total) => (
+              <div className="daily-sales-total" key={total}>
+                <SkeletonLine size="short" />
+                <SkeletonLine size="value" />
+                <SkeletonLine size="medium" />
+              </div>
+            ))}
+          </div>
+          <div className="daily-sales-lists portal-skeleton-sales-lists" aria-hidden="true">
+            <SkeletonPanel rows={5} />
+            <SkeletonPanel rows={5} />
+          </div>
+          <SkeletonPanel rows={4} />
         </div>
       ) : (
         <>
@@ -334,7 +350,7 @@ export function StaffSalesClient({
                   <tbody>
                     {cancelledOrders.map((cancelledOrder) => (
                       <tr key={cancelledOrder.id}>
-                        <td data-label=""><strong>#{String(cancelledOrder.id).padStart(3, "0")}</strong></td>
+                        <td data-label=""><strong>#{String(cancelledOrder.order_number ?? cancelledOrder.id).padStart(3, "0")}</strong></td>
                         <td data-label="Cancelled at">{dateTimeLabel(cancelledOrder.cancelled_at || "")}</td>
                         <td data-label="Table">{String(cancelledOrder.table_number).padStart(2, "0")}</td>
                         <td data-label="Customer">{cancelledOrder.customer_name || "Guest"}</td>
@@ -356,17 +372,91 @@ export function StaffSalesClient({
               </div>
             )}
           </section>
+          <section className="daily-sales-method">
+            <header className="daily-sales-method-head">
+              <div>
+                <span className="eyebrow">Rejected payments</span>
+                <strong>Rejected proof history · not included in sales totals</strong>
+              </div>
+              <b>{rejectedPayments.length}</b>
+            </header>
+            {rejectedPayments.length === 0 ? (
+              <div className="daily-sales-empty">
+                No rejected payments for this day.
+              </div>
+            ) : (
+              <div className="data-table-wrap">
+                <table className="data-table daily-sales-table data-table-stack">
+                  <thead>
+                    <tr>
+                      <th>Order</th>
+                      <th>Rejected at</th>
+                      <th>Table</th>
+                      <th>Customer</th>
+                      <th>Reference</th>
+                      <th>Rejected by</th>
+                      <th>Amount</th>
+                      <th>Proof</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rejectedPayments.map((rejection) => {
+                      const proofHref =
+                        rejection.proof_type === "inline"
+                          ? `/api/staff/sales/rejected-proof/${rejection.rejection_id}`
+                          : rejection.external_proof_url;
+                      return (
+                        <tr key={rejection.rejection_id}>
+                          <td data-label="">
+                            <strong>
+                              #{String(rejection.order_number).padStart(3, "0")}
+                            </strong>
+                          </td>
+                          <td data-label="Rejected at">
+                            {dateTimeLabel(rejection.rejected_at)}
+                          </td>
+                          <td data-label="Table">
+                            {String(rejection.table_number).padStart(2, "0")}
+                          </td>
+                          <td data-label="Customer">
+                            {rejection.customer_name || "Guest"}
+                          </td>
+                          <td data-label="Reference">
+                            {rejection.payment_reference || "—"}
+                          </td>
+                          <td data-label="Rejected by">
+                            {rejection.rejected_by || "Not recorded"}
+                          </td>
+                          <td data-label="Amount">
+                            {peso(rejection.amount)}
+                          </td>
+                          <td data-label="Proof">
+                            {proofHref ? (
+                              <a
+                                className="text-link"
+                                href={proofHref}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                View proof
+                              </a>
+                            ) : (
+                              "No proof uploaded"
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
         </>
       )}
 
       {selected && (
-        <div
-          className="modal-backdrop"
-          onClick={() => {
-            setSelected(null);
-            setOrder(null);
-          }}
-        >
+        <div className="modal-backdrop">
           <section
             className="modal payment-history-modal"
             role="dialog"
@@ -378,7 +468,7 @@ export function StaffSalesClient({
               <div>
                 <span className="eyebrow">Verified payment · {displayDate(date)}</span>
                 <h2 id="payment-history-detail-title">
-                  Order #{String(selected.order_id).padStart(3, "0")}
+                  Order #{String(selected.order_number ?? selected.order_id).padStart(3, "0")}
                 </h2>
               </div>
               <button
@@ -404,8 +494,10 @@ export function StaffSalesClient({
                   <div><span>Table</span><strong>{String(order.table_number).padStart(2, "0")}</strong></div>
                   <div><span>Paid at</span><strong>{dateTimeLabel(selected.paid_at)}</strong></div>
                   <div><span>Order type</span><strong>{orderTypeLabel(order.order_type)}</strong></div>
+                  <div><span>Order status</span><strong>{statusLabel(order.status)}</strong></div>
                   <div><span>Payment</span><strong>{selected.payment_method === "gcash" ? "GCash" : "Cash / counter"}</strong></div>
                   <div><span>{selected.transaction_type === "additional" ? "Additional payment" : "Verified amount"}</span><strong>{peso(selected.amount)}</strong></div>
+                  <div><span>Handled by</span><strong>{selected.handled_by || "Not recorded"}</strong></div>
                   {selected.payment_method === "gcash" && (
                     <div className="payment-history-reference">
                       <span>GCash reference</span>
@@ -446,6 +538,10 @@ export function StaffSalesClient({
                     </div>
                   ))}
                 </div>
+                <OrderDiscountDetails
+                  discounts={order.discounts}
+                  discountAmount={order.discount_amount}
+                />
                 <div className="payment-history-total">
                   <span>Order total</span><strong>{peso(order.total)}</strong>
                 </div>
@@ -454,6 +550,6 @@ export function StaffSalesClient({
           </section>
         </div>
       )}
-    </PortalShell>
+    </>
   );
 }

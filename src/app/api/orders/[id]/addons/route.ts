@@ -38,7 +38,7 @@ export async function POST(
       );
     }
 
-    const result = OrderModel.addStaffAddon({
+    const result = await OrderModel.addStaffAddon({
       orderId,
       orderItemId,
       addonId,
@@ -52,7 +52,7 @@ export async function POST(
       );
     }
 
-    const addon = AddonModel.byId(addonId);
+    const addon = await AddonModel.byId(addonId);
     logActivity(auth.user, {
       area: "Orders",
       action: "order.addon_added",

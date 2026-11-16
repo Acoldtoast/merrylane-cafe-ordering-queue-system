@@ -14,7 +14,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    if (CategoryModel.hasName(name)) {
+    if (await CategoryModel.hasName(name)) {
       return Response.json(
         { error: "A category with this name already exists.", success: false },
         { status: 409 }
@@ -28,8 +28,9 @@ export async function POST(request: Request) {
         .replace(/[\u0300-\u036f]/g, "")
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "") || `category-${Date.now()}`;
-    const id = CategoryModel.create(name, slug, CategoryModel.nextDisplayOrder());
-    const category = CategoryModel.byId(id);
+    const displayOrder = await CategoryModel.nextDisplayOrder();
+    const id = await CategoryModel.create(name, slug, displayOrder);
+    const category = await CategoryModel.byId(id);
     return Response.json({ category, success: true });
   } catch (error: any) {
     return Response.json(
@@ -64,7 +65,7 @@ export async function DELETE(request: Request) {
       );
     }
 
-    CategoryModel.remove(id, replacementId);
+    await CategoryModel.remove(id, replacementId);
     return Response.json({ success: true });
   } catch (error: any) {
     const status = /not found/i.test(error.message) ? 404 : 400;

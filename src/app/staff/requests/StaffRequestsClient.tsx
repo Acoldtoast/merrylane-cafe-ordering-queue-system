@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { PortalShell } from "@/components/PortalShell";
 import { staffNav } from "@/components/portalNav";
 import { Icon } from "@/components/Icons";
+import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
 import type { WaiterRequest } from "@/lib/types";
 import { relativeTime, smartDateTime } from "@/lib/format";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { usePolling } from "@/lib/usePolling";
 
 export function StaffRequestsClient() {
@@ -23,7 +24,7 @@ export function StaffRequestsClient() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch("/api/waiter", { cache: "no-store" });
+      const response = await fetchPortalApi("/api/waiter", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok || !data.success) {
         throw new Error(data.error || "Unable to load requests.");
@@ -38,7 +39,7 @@ export function StaffRequestsClient() {
     }
   }, []);
 
-  usePolling(load, 8000);
+  usePolling(load, 8000, { resources: ["requests", "waiter"] });
 
   const act = async (request: WaiterRequest, status: "acknowledged" | "resolved") => {
     setBusyId(request.id);
@@ -46,7 +47,7 @@ export function StaffRequestsClient() {
     const table = String(request.table_number).padStart(2, "0");
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/waiter", {
+        const response = await fetchPortalApi("/api/waiter", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: request.id, status }),
@@ -159,15 +160,10 @@ export function StaffRequestsClient() {
     </article>
   );
 
+  if (loading) return <PortalPageSkeleton area="staff" />;
+
   return (
-    <PortalShell
-      area="staff"
-      title="At your service."
-      subtitle="Every call from every table, so nobody has to wave anyone down."
-      contextLabel="Service · Waiter requests"
-      contextTitle={`${stats.pending} waiting`}
-      nav={staffNav}
-    >
+    <>
       {error && <div className="error-strip" style={{ marginBottom: 13 }}>{error}</div>}
 
       <div className="stat-grid">
@@ -191,22 +187,13 @@ export function StaffRequestsClient() {
         </div>
       </div>
 
-      <div className="section-bar">
-        <div>
-          <h2>Waiter requests</h2>
-        </div>
+      <div className="section-bar section-bar-actions-only">
         <button type="button" className="btn btn-soft btn-sm" onClick={load}>
           <Icon name="refresh" className="icon-sm" /> Refresh
         </button>
       </div>
 
-      {loading ? (
-        <div className="waiter-request-board">
-          {[1, 2].map((n) => (
-            <div className="skeleton" style={{ height: 250 }} key={n} />
-          ))}
-        </div>
-      ) : waiting.length + onTheWay.length === 0 ? (
+      {waiting.length + onTheWay.length === 0 ? (
         <div className="empty-panel">
           <div className="empty-icon">
             <Icon name="waiter" />
@@ -244,6 +231,6 @@ export function StaffRequestsClient() {
           </section>
         </div>
       )}
-    </PortalShell>
+    </>
   );
 }

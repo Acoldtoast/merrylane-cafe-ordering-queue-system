@@ -19,11 +19,11 @@ export async function POST(
     if (body.payment_method === "counter") {
       const auth = await requireStaff(request);
       if (auth.error) return auth.error;
-      const order = OrderModel.byId(orderId);
+      const order = await OrderModel.byId(orderId);
       if (!order) {
         return Response.json({ error: "Order not found.", success: false }, { status: 404 });
       }
-      const result = OrderModel.createBalancePayment({
+      const result = await OrderModel.createBalancePayment({
         orderId,
         method: "counter",
         amount: Number(order.balance_due),
@@ -51,7 +51,7 @@ export async function POST(
       );
     }
 
-    const order = OrderModel.byId(orderId);
+    const order = await OrderModel.byId(orderId);
     if (!order) {
       return Response.json({ error: "Order not found.", success: false }, { status: 404 });
     }
@@ -78,7 +78,7 @@ export async function POST(
         { status: 400 }
       );
     }
-    const result = OrderModel.createBalancePayment({
+    const result = await OrderModel.createBalancePayment({
       orderId,
       method: "gcash",
       amount: Number(order.balance_due),

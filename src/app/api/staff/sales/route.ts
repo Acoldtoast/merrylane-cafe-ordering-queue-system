@@ -23,8 +23,8 @@ export async function GET(request: Request) {
         { status: 400 }
       );
     }
-    const transactions = OrderModel.salesForDate(date);
-    const cancelledOrders = OrderModel.cancelledForDate(date);
+    const transactions = await OrderModel.salesForDate(date);
+    const cancelledOrders = await OrderModel.cancelledForDate(date);
     const transactionId = new URL(request.url).searchParams.get("transaction_id");
     if (transactionId) {
       const transaction = transactions.find(
@@ -36,7 +36,7 @@ export async function GET(request: Request) {
           { status: 404 }
         );
       }
-      const order = OrderModel.byId(transaction.order_id);
+      const order = await OrderModel.byId(transaction.order_id);
       if (!order) {
         return Response.json(
           { error: "The order for this payment could not be found.", success: false },
@@ -46,7 +46,14 @@ export async function GET(request: Request) {
       return Response.json({ date, order, transaction, success: true });
     }
 
-    return Response.json({ date, transactions, cancelledOrders, success: true });
+    const rejectedPayments = await OrderModel.rejectedPaymentsForDate(date);
+    return Response.json({
+      date,
+      transactions,
+      cancelledOrders,
+      rejectedPayments,
+      success: true,
+    });
   } catch (error: unknown) {
     return Response.json(
       {

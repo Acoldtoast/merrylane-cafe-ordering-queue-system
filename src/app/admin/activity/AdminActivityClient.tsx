@@ -1,15 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PortalShell } from "@/components/PortalShell";
-import { adminNav } from "@/components/portalNav";
-import { Icon } from "@/components/Icons";
 import { ActivityRow, type ActivityLogItem } from "@/components/ActivityFeed";
+import { ActivityDetailsDialog } from "@/components/ActivityDetailsDialog";
+import { SkeletonRows } from "@/components/PortalSkeletonPrimitives";
 import {
   calendarDate,
   dayHeading,
   localDayKey,
 } from "@/lib/format";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
+import { usePolling } from "@/lib/usePolling";
 
 const AREAS = [
   "Payments",
@@ -24,22 +25,26 @@ const AREAS = [
 ];
 
 export function AdminActivityClient() {
+  const todayKey = localDayKey(new Date());
   const [logs, setLogs] = useState<ActivityLogItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
-  const [date, setDate] = useState("");
+  const [date, setDate] = useState(todayKey);
   const [area, setArea] = useState("");
+  const [selectedActivity, setSelectedActivity] = useState<{
+    log: ActivityLogItem;
+    trigger: HTMLButtonElement;
+  } | null>(null);
   const requestId = useRef(0);
-  const todayKey = localDayKey(new Date());
 
   const fetchPage = useCallback(
-    async (nextPage: number, append: boolean) => {
+    async (nextPage: number, append: boolean, preserveLoaded = false) => {
       const id = ++requestId.current;
       if (append) setLoadingMore(true);
-      else setLoading(true);
+      else if (!preserveLoaded) setLoading(true);
       try {
         const params = new URLSearchParams({
           page: String(nextPage),
@@ -47,7 +52,7 @@ export function AdminActivityClient() {
         });
         if (date) params.set("date", date);
         if (area) params.set("area", area);
-        const response = await fetch(`/api/activity?${params.toString()}`, {
+        const response = await fetchPortalApi(`/api/activity?${params.toString()}`, {
           cache: "no-store",
         });
         const data = await response.json();
@@ -56,9 +61,17 @@ export function AdminActivityClient() {
         }
         if (id !== requestId.current) return;
         const incoming = (data.logs || []) as ActivityLogItem[];
-        setLogs((current) => (append ? [...current, ...incoming] : incoming));
+        setLogs((current) => {
+          if (append) {
+            const existingIds = new Set(current.map((log) => log.id));
+            return [...current, ...incoming.filter((log) => !existingIds.has(log.id))];
+          }
+          if (!preserveLoaded) return incoming;
+          const incomingIds = new Set(incoming.map((log) => log.id));
+          return [...incoming, ...current.filter((log) => !incomingIds.has(log.id))];
+        });
         setTotal(Number(data.total) || 0);
-        setPage(nextPage);
+        if (!preserveLoaded) setPage(nextPage);
         setError("");
       } catch (err: unknown) {
         if (id === requestId.current) {
@@ -70,8 +83,8 @@ export function AdminActivityClient() {
         }
       } finally {
         if (id === requestId.current) {
-          setLoading(false);
-          setLoadingMore(false);
+          if (!preserveLoaded) setLoading(false);
+          if (append) setLoadingMore(false);
         }
       }
     },
@@ -81,6 +94,19 @@ export function AdminActivityClient() {
   useEffect(() => {
     void fetchPage(1, false);
   }, [fetchPage]);
+
+  const refreshLatest = useCallback(() => {
+    if (loading || loadingMore) return;
+    return fetchPage(1, false, true);
+  }, [fetchPage, loading, loadingMore]);
+
+  usePolling(refreshLatest, 15_000, { immediate: false });
+
+  const openDetails = (log: ActivityLogItem, trigger: HTMLButtonElement) => {
+    setSelectedActivity({ log, trigger });
+  };
+
+  const closeDetails = () => setSelectedActivity(null);
 
   const groups = useMemo(() => {
     const ordered: {
@@ -113,41 +139,16 @@ export function AdminActivityClient() {
   }, [logs]);
 
   return (
-    <PortalShell
-      area="admin"
-      title="A record of what happens."
-      subtitle="Payments, orders, stock, and people — newest first."
-      contextLabel="Admin · Activity"
-      contextTitle="Every recorded action"
-      nav={adminNav}
-    >
+    <>
       {error && (
         <div className="error-strip" style={{ marginBottom: 13 }}>
           {error}
         </div>
       )}
 
-      <div className="section-bar">
-        <div>
-          <h2>Activity log</h2>
-          <p>
-            {total} event{total === 1 ? "" : "s"}{" "}
-            {date
-              ? `on ${calendarDate(`${date}T12:00:00`)}`
-              : "across every day"}{" "}
-            · newest first
-          </p>
-        </div>
+      <div className="section-bar activity-section-bar">
         <div className="section-bar-tools">
           <div className="segmented" role="group" aria-label="Activity day">
-            <button
-              type="button"
-              className={date === "" ? "active" : ""}
-              aria-pressed={date === ""}
-              onClick={() => setDate("")}
-            >
-              All days
-            </button>
             <button
               type="button"
               className={date === todayKey ? "active" : ""}
@@ -155,6 +156,14 @@ export function AdminActivityClient() {
               onClick={() => setDate(todayKey)}
             >
               Today
+            </button>
+            <button
+              type="button"
+              className={date === "" ? "active" : ""}
+              aria-pressed={date === ""}
+              onClick={() => setDate("")}
+            >
+              All days
             </button>
           </div>
           <input
@@ -166,7 +175,7 @@ export function AdminActivityClient() {
             onChange={(event) => setDate(event.target.value)}
           />
           <select
-            className="select"
+            className="select activity-area-filter"
             value={area}
             aria-label="Filter by area"
             onChange={(event) => setArea(event.target.value)}
@@ -178,22 +187,17 @@ export function AdminActivityClient() {
               </option>
             ))}
           </select>
-          <button
-            type="button"
-            className="btn btn-soft btn-sm"
-            onClick={() => void fetchPage(1, false)}
-            disabled={loading}
-          >
-            <Icon name="refresh" className="icon-sm" /> Refresh
-          </button>
         </div>
+        <p className="activity-event-count">
+          {total} event{total === 1 ? "" : "s"}
+        </p>
       </div>
 
       <div className="panel">
         <div className="panel-body tight">
           {loading && logs.length === 0 ? (
-            <div className="loading-block">
-              <span className="spinner" /> Reading the log…
+            <div role="status" aria-busy="true" aria-label="Loading activity log">
+              <SkeletonRows count={4} />
             </div>
           ) : logs.length === 0 ? (
             <div className="empty-panel" style={{ border: 0 }}>
@@ -211,7 +215,11 @@ export function AdminActivityClient() {
                   </header>
                   <ul className="activity-list">
                     {group.logs.map((log) => (
-                      <ActivityRow key={log.id} log={log} />
+                      <ActivityRow
+                        key={log.id}
+                        log={log}
+                        onSelect={openDetails}
+                      />
                     ))}
                   </ul>
                 </section>
@@ -238,6 +246,13 @@ export function AdminActivityClient() {
           )}
         </div>
       </div>
-    </PortalShell>
+      {selectedActivity && (
+        <ActivityDetailsDialog
+          log={selectedActivity.log}
+          onClose={closeDetails}
+          returnFocusTo={selectedActivity.trigger}
+        />
+      )}
+    </>
   );
 }

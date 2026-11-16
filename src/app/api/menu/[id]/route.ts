@@ -8,7 +8,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const item = MenuItemModel.byId(Number(id));
+  const item = await MenuItemModel.byId(Number(id));
   if (!item) {
     return Response.json({ error: "Menu item not found.", success: false }, { status: 404 });
   }
@@ -28,7 +28,7 @@ export async function PATCH(
     if (!Number.isInteger(itemId) || itemId <= 0) {
       return Response.json({ error: "Menu item not found.", success: false }, { status: 404 });
     }
-    const existing = MenuItemModel.byId(itemId);
+    const existing = await MenuItemModel.byId(itemId);
     if (!existing) {
       return Response.json({ error: "Menu item not found.", success: false }, { status: 404 });
     }
@@ -98,23 +98,34 @@ export async function PATCH(
         );
       }
     }
-    MenuItemModel.update(itemId, {
+    await MenuItemModel.update(itemId, {
       ...body,
       stock_count: finalStockCount,
       stock_tracking_enabled: trackingEnabled,
       stock_status: finalStockStatus,
     });
     if (variants !== undefined) {
-      MenuItemModel.setVariants(itemId, variants);
+      await MenuItemModel.setVariants(itemId, variants);
     }
     if (Array.isArray(body.addonIds)) {
-      AddonModel.setForItem(itemId, body.addonIds);
+      await AddonModel.setForItem(itemId, body.addonIds);
     }
-    const updated = MenuItemModel.byId(itemId);
+    const updated = await MenuItemModel.byId(itemId);
+    const changed = [];
+    if (body.name !== undefined && body.name !== existing.name) changed.push("name");
+    if (body.price !== undefined && Number(body.price) !== Number(existing.price)) changed.push(`price ${existing.price} → ${body.price}`);
+    if (body.category_id !== undefined && Number(body.category_id) !== Number(existing.category_id)) changed.push("category");
+    if (body.is_best_seller !== undefined && Boolean(body.is_best_seller) !== Boolean(existing.is_best_seller)) changed.push("best seller");
+    if (body.is_active !== undefined && Boolean(body.is_active) !== Boolean(existing.is_active)) changed.push("availability");
+    if (trackingEnabled !== Boolean(existing.stock_tracking_enabled)) changed.push("stock tracking");
+    if (finalStockStatus !== existing.stock_status) changed.push(`stock status ${existing.stock_status} → ${finalStockStatus}`);
+    if (trackingEnabled && Number(finalStockCount) !== Number(existing.stock_count)) changed.push(`stock count ${existing.stock_count ?? 0} → ${finalStockCount ?? 0}`);
+    if (variants !== undefined) changed.push("variants");
+    if (Array.isArray(body.addonIds)) changed.push("add-ons");
     logActivity(auth.user, {
       area: "Menu",
       action: "menu.updated",
-      summary: `Updated menu item ${updated?.name || `#${itemId}`}`,
+      summary: `Updated menu item ${updated?.name || `#${itemId}`}${changed.length ? ` · changed: ${changed.join(", ")}` : ""}`,
       entity_type: "menu_item",
       entity_id: itemId,
     });
@@ -136,8 +147,8 @@ export async function DELETE(
     if (auth.error) return auth.error;
     const { id } = await params;
     const itemId = Number(id);
-    const item = MenuItemModel.byId(itemId);
-    MenuItemModel.delete(itemId);
+    const item = await MenuItemModel.byId(itemId);
+    await MenuItemModel.delete(itemId);
     logActivity(auth.user, {
       area: "Menu",
       action: "menu.deleted",

@@ -7,7 +7,7 @@ export async function GET(
 ) {
   const { id } = await params;
   const orderId = Number(id);
-  const owner = OrderModel.guestOwner(orderId);
+  const owner = await OrderModel.guestOwner(orderId);
   const guestId = await getGuestId();
   if (owner && owner !== guestId) {
     return Response.json(
@@ -15,7 +15,7 @@ export async function GET(
       { status: 404 }
     );
   }
-  const order = OrderModel.byId(orderId);
+  const order = await OrderModel.byId(orderId);
   if (!order) {
     return Response.json(
       { error: "Order not found.", success: false },
@@ -24,7 +24,7 @@ export async function GET(
   }
   return Response.json({
     order,
-    review: ReviewModel.byOrder(order.id) || null,
+    review: (await ReviewModel.byOrder(order.id)) || null,
     success: true,
   });
 }
@@ -43,15 +43,15 @@ export async function DELETE(
   }
 
   const guestId = await getGuestId();
-  if (!guestId || OrderModel.guestOwner(orderId) !== guestId) {
+  if (!guestId || (await OrderModel.guestOwner(orderId)) !== guestId) {
     return Response.json(
       { error: "Order not found.", success: false },
       { status: 404 }
     );
   }
 
-  if (!OrderModel.cancelUnpaidForGuest(orderId, guestId)) {
-    const order = OrderModel.byId(orderId);
+  if (!(await OrderModel.cancelUnpaidForGuest(orderId, guestId))) {
+    const order = await OrderModel.byId(orderId);
     if (!order) {
       return Response.json(
         { error: "Order not found.", success: false },
@@ -68,7 +68,7 @@ export async function DELETE(
   }
 
   return Response.json({
-    order: OrderModel.byId(orderId),
+    order: await OrderModel.byId(orderId),
     success: true,
     message: "Order cancelled.",
   });

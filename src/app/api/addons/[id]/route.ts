@@ -12,7 +12,7 @@ export async function PATCH(
 
     const { id } = await params;
     const addonId = Number(id);
-    const addon = AddonModel.byId(addonId);
+    const addon = await AddonModel.byId(addonId);
     if (!addon) {
       return Response.json(
         { error: "Add-on not found.", success: false },
@@ -28,7 +28,7 @@ export async function PATCH(
       );
     }
 
-    AddonModel.update(addonId, {
+    await AddonModel.update(addonId, {
       name: body.name !== undefined ? String(body.name).trim() : undefined,
       price_modifier:
         body.price_modifier !== undefined ? Number(body.price_modifier) : undefined,
@@ -36,7 +36,7 @@ export async function PATCH(
       display_order:
         body.display_order !== undefined ? Number(body.display_order) : undefined,
     });
-    const updated = AddonModel.byId(addonId);
+    const updated = await AddonModel.byId(addonId);
     logActivity(auth.user, {
       area: "Add-ons",
       action: "addon.updated",
@@ -69,8 +69,8 @@ export async function DELETE(
 
     const { id } = await params;
     const addonId = Number(id);
-    const addon = AddonModel.byId(addonId);
-    AddonModel.remove(addonId);
+    const addon = await AddonModel.byId(addonId);
+    await AddonModel.remove(addonId);
     logActivity(auth.user, {
       area: "Add-ons",
       action: "addon.deleted",

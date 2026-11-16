@@ -10,11 +10,17 @@ import { useCustomer } from "@/components/CustomerProvider";
 import type { Category, MenuItem } from "@/lib/types";
 import type { OrderingWindow } from "@/lib/models";
 import { peso, timeLabel, timeOfDay } from "@/lib/format";
+import { preloadPortalRouteCode } from "@/lib/preloadPortalRouteCode";
 
 interface MenuResponse {
   categories: Category[];
   items: MenuItem[];
 }
+
+type AddButtonFeedback = {
+  itemId: number;
+  status: "adding" | "added" | "opening";
+};
 
 export function MenuClient({
   initialTable,
@@ -39,6 +45,8 @@ export function MenuClient({
   const items = initialItems;
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<number | "all">("all");
+  const [addButtonFeedback, setAddButtonFeedback] =
+    useState<AddButtonFeedback | null>(null);
   const open = initialOpen;
   const closingTime = initialClosingTime;
   const reopenLabel = initialOrdering?.next_opening
@@ -53,9 +61,33 @@ export function MenuClient({
     setTable(initialTable);
   }, [initialTable, setTable]);
 
+  useEffect(() => {
+    if (!addButtonFeedback) return;
+    const timer = window.setTimeout(
+      () => {
+        setAddButtonFeedback((current) => {
+          if (current?.itemId !== addButtonFeedback.itemId) return current;
+          if (current.status === "adding") {
+            return { itemId: current.itemId, status: "added" };
+          }
+          return null;
+        });
+      },
+      addButtonFeedback.status === "adding"
+        ? 180
+        : addButtonFeedback.status === "added"
+          ? 900
+          : 15000
+    );
+    return () => window.clearTimeout(timer);
+  }, [addButtonFeedback]);
+
   // Keep the cart rail honest about how many portions are actually left.
   const cartItemsRef = useRef(cartItems);
-  cartItemsRef.current = cartItems;
+  useEffect(() => {
+    cartItemsRef.current = cartItems;
+  }, [cartItems]);
+
   useEffect(() => {
     if (!ready) return;
     const limits: Record<number, number | null> = {};
@@ -113,10 +145,23 @@ export function MenuClient({
     }
     return groups;
   }, [categories, filtered]);
+  const normalizedSearch = search.trim();
+  const activeCategoryName =
+    activeCategory === "all"
+      ? null
+      : categories.find((category) => category.id === activeCategory)?.name || null;
 
   const openItem = (item: MenuItem) => {
     if (item.stock_status === "out") return;
+    setAddButtonFeedback({ itemId: item.id, status: "opening" });
     router.push(`/customer/item/${item.id}?table=${initialTable}`);
+  };
+
+  const warmItemRoute = (item: MenuItem) => {
+    if (item.stock_status === "out") return;
+    const href = `/customer/item/${item.id}?table=${initialTable}`;
+    router.prefetch(href);
+    void preloadPortalRouteCode("customer", href);
   };
 
   const stockLimitFor = (item: MenuItem) =>
@@ -134,6 +179,7 @@ export function MenuClient({
   };
 
   const quickAdd = (item: MenuItem) => {
+    if (!ready) return;
     if (item.stock_status === "out") {
       feedback.warning(`${item.name} is sold out`, {
         eyebrow: "Sold out today",
@@ -160,6 +206,7 @@ export function MenuClient({
       );
       return;
     }
+    setAddButtonFeedback({ itemId: item.id, status: "adding" });
     addItem({
       menuItemId: item.id,
       name: item.name,
@@ -245,7 +292,13 @@ export function MenuClient({
 
           {grouped.length === 0 ? (
             <div className="menu-empty">
-              No drinks or pastries match “{search}”. Try a different search.
+              {normalizedSearch ? (
+                `No menu items${activeCategoryName ? ` in ${activeCategoryName}` : ""} match “${normalizedSearch}”. Try a different search${activeCategoryName ? " or category" : ""}.`
+              ) : activeCategoryName ? (
+                `No menu items are available in ${activeCategoryName} right now.`
+              ) : (
+                "No menu items are available right now."
+              )}
             </div>
           ) : (
             grouped.map((group) => (
@@ -257,12 +310,34 @@ export function MenuClient({
                 <div className="menu-grid">
                   {group.items.map((item, index) => {
                     const out = item.stock_status === "out";
+                    const addState =
+                      addButtonFeedback?.itemId === item.id
+                        ? addButtonFeedback.status
+                        : null;
+                    const isAdding =
+                      !ready || addState === "adding" || addState === "opening";
+                    const isAdded = addState === "added";
+                    const addButtonLabel = !ready
+                      ? `Loading cart for ${item.name}`
+                      : addState === "opening"
+                        ? `Opening ${item.name} options`
+                        : addState === "adding"
+                          ? `Adding ${item.name}`
+                          : isAdded
+                            ? `${item.name} added`
+                            : out
+                              ? "Sold out"
+                              : remainingFor(item) <= 0
+                                ? `No more ${item.name} left`
+                                : `Add ${item.name}`;
                     return (
                       <div
                         key={item.id}
                         className={`menu-card ${out ? "is-out" : ""}`}
                         role="button"
                         tabIndex={0}
+                        onMouseEnter={() => warmItemRoute(item)}
+                        onFocus={() => warmItemRoute(item)}
                         onClick={() => openItem(item)}
                         onKeyDown={(event) => {
                           if (event.key === "Enter" || event.key === " ") openItem(item);
@@ -310,21 +385,32 @@ export function MenuClient({
                             </div>
                             <button
                               type="button"
-                              className="menu-add"
-                              disabled={out || !open || remainingFor(item) <= 0}
-                              aria-label={
-                                out
-                                  ? "Sold out"
-                                  : remainingFor(item) <= 0
-                                    ? `No more ${item.name} left`
-                                    : `Add ${item.name}`
+                              className={`menu-add ${isAdded ? "is-added" : ""}`}
+                              disabled={
+                                out ||
+                                !open ||
+                                isAdding ||
+                                remainingFor(item) <= 0
                               }
+                              aria-busy={isAdding}
+                              aria-label={addButtonLabel}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 quickAdd(item);
                               }}
                             >
-                              <Icon name={out ? "x" : "plus"} />
+                              {isAdding ? (
+                                <span
+                                  className="spinner menu-add-spinner"
+                                  aria-hidden="true"
+                                />
+                              ) : (
+                                <Icon
+                                  name={
+                                    isAdded ? "check" : out ? "x" : "plus"
+                                  }
+                                />
+                              )}
                             </button>
                           </div>
                         </div>

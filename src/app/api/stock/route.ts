@@ -6,7 +6,7 @@ export async function GET(request: Request) {
   try {
     const auth = await requireStaff(request);
     if (auth.error) return auth.error;
-    return Response.json({ items: MenuItemModel.all(), success: true });
+    return Response.json({ items: await MenuItemModel.all(), success: true });
   } catch (error: any) {
     return Response.json(
       { error: error.message, success: false },
@@ -29,7 +29,7 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const existing = MenuItemModel.byId(id);
+    const existing = await MenuItemModel.byId(id);
     if (!existing) {
       return Response.json(
         { error: "Menu item not found.", success: false },
@@ -101,7 +101,7 @@ export async function PATCH(request: Request) {
       );
     }
 
-    StockModel.update(
+    await StockModel.update(
       id,
       {
         stock_status: requestedStatus,
@@ -115,7 +115,7 @@ export async function PATCH(request: Request) {
       auth.user!.id
     );
 
-    const item = MenuItemModel.byId(id);
+    const item = await MenuItemModel.byId(id);
     const stockLabel =
       item?.stock_status === "out"
         ? "sold out"

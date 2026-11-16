@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { CoffeeArt, artKindForCategory } from "./CoffeeArt";
 import { Icon } from "./Icons";
 import { useCustomer } from "./CustomerProvider";
@@ -15,6 +16,7 @@ export function CartPanel({
   showContinue?: boolean;
 }) {
   const router = useRouter();
+  const [navigating, setNavigating] = useState(false);
   const {
     items,
     count,
@@ -140,9 +142,19 @@ export function CartPanel({
               <button
                 type="button"
                 className="btn btn-primary btn-block"
-                onClick={() => router.push(`/customer/cart?table=${table}`)}
+                disabled={navigating}
+                onClick={() => {
+                  setNavigating(true);
+                  router.push(`/customer/cart?table=${table}`);
+                }}
               >
-                Continue <Icon name="arrow-right" className="icon-sm" />
+                {navigating ? (
+                  <span className="spinner spinner-light" style={{ width: 14, height: 14 }} />
+                ) : (
+                  <>
+                    Continue <Icon name="arrow-right" className="icon-sm" />
+                  </>
+                )}
               </button>
               <div className="cart-panel-note">
                 <Icon name="info" />
@@ -161,16 +173,30 @@ export function CartPanel({
 
 export function MobileCartBar() {
   const { count, subtotal, table } = useCustomer();
+  const [navigating, setNavigating] = useState(false);
+  const router = useRouter();
   if (count === 0) return null;
   return (
     <div className="mobile-cart-bar">
-      <Link href={`/customer/cart?table=${table}`} className="btn btn-primary">
+      <button
+        type="button"
+        className="btn btn-primary"
+        disabled={navigating}
+        onClick={() => {
+          setNavigating(true);
+          router.push(`/customer/cart?table=${table}`);
+        }}
+      >
         <span className="mobile-cart-count">
-          <Icon name="bag" className="icon-sm" />
+          {navigating ? (
+            <span className="spinner spinner-light" style={{ width: 14, height: 14 }} />
+          ) : (
+            <Icon name="bag" className="icon-sm" />
+          )}
           View order <b>{count}</b>
         </span>
         <span>{peso(subtotal)}</span>
-      </Link>
+      </button>
     </div>
   );
 }

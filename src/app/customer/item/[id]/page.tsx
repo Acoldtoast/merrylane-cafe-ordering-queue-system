@@ -20,7 +20,7 @@ export default async function ItemPage({
 
   let ordering: OrderingWindow | null = null;
   try {
-    ordering = SettingsModel.orderingWindow();
+    ordering = await SettingsModel.orderingWindow();
   } catch {
     // Keep customizing available if settings cannot be read.
   }
@@ -28,7 +28,7 @@ export default async function ItemPage({
     return <ClosedShop ordering={ordering} table={table} />;
   }
 
-  const item = MenuItemModel.byId(Number(id));
+  const item = await MenuItemModel.byId(Number(id));
   if (!item || !item.is_active) notFound();
   return (
     <ItemClient

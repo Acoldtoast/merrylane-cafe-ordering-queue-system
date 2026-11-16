@@ -7,13 +7,18 @@
     "build": "next build --webpack",
     "start": "next start --hostname 0.0.0.0 -p 3112",
     "lint": "eslint",
-    "postinstall": "node scripts/fix-next-dev-debug-stream.js",
-    "db:init": "node scripts/init-db.js",
-    "db:migrate": "node scripts/migrate-addons.js"
+    "test:email": "node --experimental-strip-types --experimental-loader ./scripts/test-ts-loader.mjs --test scripts/email-schedule.test.mjs scripts/email-subscriptions.test.mjs scripts/email-diagnostics.test.mjs scripts/email-password-crypto.test.mjs scripts/email-outbox.test.mjs",
+    "test:email-schedule": "node --experimental-strip-types --test scripts/email-schedule.test.mjs",
+    "test:pglite-adapter": "node --experimental-strip-types --test scripts/pglite-db.test.mjs",
+    "test:models-pglite": "node --experimental-strip-types --experimental-loader ./scripts/test-ts-loader.mjs --test scripts/models-pglite.test.mjs",
+    "test:orders": "node --experimental-strip-types --experimental-loader ./scripts/test-ts-loader.mjs --test scripts/order-lifecycle.test.mjs scripts/models-pglite.test.mjs",
+    "postinstall": "node scripts/fix-next-dev-debug-stream.js"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.16",
     "jose": "^6.2.13",
     "next": "16.4.3",
+    "nodemailer": "^10.5.0",
     "qrcode": "^1.5.4",
     "react": "19.3.0",
     "react-dom": "19.3.0"
@@ -21,6 +26,7 @@
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^20",
+    "@types/nodemailer": "^8.0.2",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",

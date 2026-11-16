@@ -1,0 +1,478 @@
+import { getDb } from "@/lib/db";
+import { MenuItemModel, SettingsModel } from "@/lib/models";
+import { buildAnalyticsReportForEmail } from "./emailAnalyticsReport";
+import { sendConfiguredEmail, type EmailMessage } from "./emailDelivery";
+import { diagnoseEmailDeliveryFailure } from "./emailDiagnostics";
+import { ensureEmailOutbox } from "./emailOutbox";
+import {
+  getSmtpConfiguration,
+  smtpIsReady,
+  type EmailNotificationConfig,
+} from "./emailSettings";
+import { reportWindow, type EmailCadence } from "./emailSchedule";
+import {
+  FIRST_EMAIL_RETRY_DELAY_MINUTES,
+  MAX_AUTOMATIC_EMAIL_ATTEMPTS,
+  shouldRetryEmailAutomatically,
+} from "./emailRetryPolicy";
+
+const STOCK_SNAPSHOT_KEY = "email_stock_alert_snapshot";
+const POLL_INTERVAL_MS = 30_000;
+const MAX_SENDS_PER_TICK = 5;
+const STALE_SEND_TIMEOUT_MINUTES = 10;
+
+interface StockSnapshotItem {
+  id: number;
+  name: string;
+  stock_count: number;
+  low_stock_threshold: number;
+  stock_status: "available" | "low" | "out";
+  updated_at: string;
+}
+
+interface QueuedEmail extends EmailMessage {
+  id: number;
+  attempts: number;
+  recipientEmail: string | null;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function peso(value: number) {
+  return new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency: "PHP",
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+async function enqueueEmail(
+  eventKey: string,
+  recipientEmail: string,
+  message: EmailMessage
+): Promise<boolean> {
+  const result = await getDb()
+    .prepare(
+      `INSERT INTO email_notification_outbox
+         (event_key, recipient_email, subject, text_body, html_body)
+       VALUES (?, ?, ?, ?, ?) ON CONFLICT(event_key) DO NOTHING`
+    )
+    .run(eventKey, recipientEmail, message.subject, message.text, message.html);
+  return Number(result.changes) > 0;
+}
+
+async function hasDelivery(eventKey: string): Promise<boolean> {
+  return Boolean(
+    await getDb()
+      .prepare(
+        "SELECT 1 FROM email_notification_outbox WHERE event_key = ? LIMIT 1"
+      )
+      .get(eventKey)
+  );
+}
+
+async function reportMessage(
+  kind: "sales" | "analytics",
+  start: string,
+  end: string
+): Promise<EmailMessage> {
+  const report = await buildAnalyticsReportForEmail(start, end);
+  const { summary, products, insights } = report;
+  const title =
+    kind === "sales" ? "Sales summary" : "Cafe analytics report";
+  const productRows = products
+    .slice(0, 5)
+    .map(
+      (item) =>
+        `<tr><td>${escapeHtml(item.name)}</td><td>${item.quantity_sold}</td><td>${peso(item.revenue)}</td></tr>`
+    )
+    .join("");
+  const topProducts = products.length
+    ? `<table><thead><tr><th>Item</th><th>Sold</th><th>Sales</th></tr></thead><tbody>${productRows}</tbody></table>`
+    : "<p>No confirmed item sales were recorded in this period.</p>";
+  const common = [
+    `Reporting period: ${start} to ${end}`,
+    `Confirmed sales: ${peso(summary.revenue)}`,
+    `Confirmed orders: ${summary.order_count}`,
+    `Average order value: ${peso(summary.average_order_value)}`,
+    "",
+    "Top items:",
+    ...products.slice(0, 5).map(
+      (item) =>
+        `- ${item.name}: ${item.quantity_sold} sold, ${peso(item.revenue)}`
+    ),
+  ];
+  const analyticsDetails =
+    kind === "analytics"
+      ? [
+          "",
+          insights.revenue_trend,
+          insights.leading_product,
+          insights.busiest_hour,
+          `Average rating: ${summary.average_rating.toFixed(1)} / 5 (${summary.review_count} reviews)`,
+          `Items currently out of stock: ${summary.items_out_of_stock}`,
+          `Cancelled orders: ${summary.cancelled_orders}`,
+        ]
+      : [];
+  const detailMarkup =
+    kind === "analytics"
+      ? `<p>${escapeHtml(insights.revenue_trend)}</p>
+         <p>${escapeHtml(insights.leading_product)}</p>
+         <p>${escapeHtml(insights.busiest_hour)}</p>
+         <p>Average rating: ${summary.average_rating.toFixed(1)} / 5 (${summary.review_count} reviews)</p>
+         <p>Items currently out of stock: ${summary.items_out_of_stock}</p>
+         <p>Cancelled orders: ${summary.cancelled_orders}</p>`
+      : "";
+
+  return {
+    subject: `Merrylane Cafe ${title} · ${start} to ${end}`,
+    text: `${title}\n${start} to ${end}\n\n${common.join("\n")}${analyticsDetails.join("\n")}`,
+    html: `<main style="font-family:Arial,sans-serif;color:#2c211a;line-height:1.55">
+      <h1>${title}</h1>
+      <p>Reporting period: ${start} to ${end}</p>
+      <p><strong>Confirmed sales:</strong> ${peso(summary.revenue)}<br>
+      <strong>Confirmed orders:</strong> ${summary.order_count}<br>
+      <strong>Average order value:</strong> ${peso(summary.average_order_value)}</p>
+      ${detailMarkup}
+      <h2>Top items</h2>${topProducts}
+      <p style="color:#8a7b6d;font-size:12px">Automatically generated by Merrylane Cafe.</p>
+    </main>`,
+  };
+}
+
+async function queueReport(
+  subscription: EmailNotificationConfig["subscriptions"][number],
+  kind: "sales" | "analytics",
+  cadence: EmailCadence,
+  sendTime: string,
+  now: Date
+): Promise<void> {
+  const window = reportWindow(cadence, now, sendTime, kind);
+  if (!window) return;
+  const eventKey = `${window.key}:${encodeURIComponent(subscription.email)}`;
+  if (await hasDelivery(eventKey)) return;
+  await enqueueEmail(
+    eventKey,
+    subscription.email,
+    await reportMessage(kind, window.start, window.end)
+  );
+}
+
+function stockAlertMessage(
+  item: StockSnapshotItem,
+  status: "low" | "out"
+): EmailMessage {
+  const isOut = status === "out";
+  const title = isOut ? `${item.name} is out of stock` : `${item.name} is low on stock`;
+  const detail = isOut
+    ? "This item has no portions available."
+    : `${item.stock_count} portion${item.stock_count === 1 ? "" : "s"} remain (low-stock threshold: ${item.low_stock_threshold}).`;
+  return {
+    subject: `Merrylane Cafe stock alert · ${title}`,
+    text: `${title}\n${detail}`,
+    html: `<main style="font-family:Arial,sans-serif;color:#2c211a;line-height:1.55">
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(detail)}</p>
+      <p>Update stock in the Merrylane Cafe staff console.</p>
+    </main>`,
+  };
+}
+
+async function currentStockSnapshot(): Promise<StockSnapshotItem[]> {
+  return (await MenuItemModel.stockSnapshot()).map((item) => ({
+    id: item.id,
+    name: item.name,
+    stock_count: Number(item.stock_count),
+    low_stock_threshold: Number(item.low_stock_threshold),
+    stock_status: item.stock_status,
+    updated_at: item.updated_at,
+  }));
+}
+
+async function checkStockTransitions(config: EmailNotificationConfig) {
+  const current = await currentStockSnapshot();
+  const stored = await SettingsModel.get(STOCK_SNAPSHOT_KEY);
+  const previous = stored
+    ? (JSON.parse(stored) as Record<string, StockSnapshotItem>)
+    : null;
+
+  if (previous) {
+    for (const item of current) {
+      const before = previous[String(item.id)];
+      if (!before) continue;
+
+      const alertStatus =
+        item.stock_status === "out" && before.stock_status !== "out"
+          ? "out"
+          : item.stock_status === "low" && before.stock_status === "available"
+            ? "low"
+            : null;
+      if (!alertStatus) continue;
+
+      for (const subscription of config.subscriptions) {
+        if (
+          (alertStatus === "out" && !subscription.noStockAlerts) ||
+          (alertStatus === "low" && !subscription.lowStockAlerts)
+        ) {
+          continue;
+        }
+        const eventKey = `stock:${item.id}:${alertStatus}:${item.updated_at}:${encodeURIComponent(subscription.email)}`;
+        await enqueueEmail(
+          eventKey,
+          subscription.email,
+          stockAlertMessage(item, alertStatus)
+        );
+      }
+    }
+  }
+
+  await SettingsModel.set(
+    STOCK_SNAPSHOT_KEY,
+    JSON.stringify(
+      Object.fromEntries(current.map((item) => [String(item.id), item]))
+    )
+  );
+}
+
+async function claimNextEmail(): Promise<QueuedEmail | undefined> {
+  const db = getDb();
+  return db.transaction(async () => {
+    const row = (await db
+      .prepare(
+        `SELECT id, recipient_email, subject, text_body, html_body, attempts
+         FROM email_notification_outbox
+         WHERE status = 'pending'
+            OR (
+              status = 'failed'
+              AND last_error_transient = TRUE
+              AND attempts < ?
+              AND updated_at::timestamp <= NOW() -
+                (INTERVAL '${FIRST_EMAIL_RETRY_DELAY_MINUTES} minutes' * POWER(2, attempts - 1))
+            )
+            OR (
+              status = 'sending'
+              AND attempts < ?
+              AND updated_at::timestamp <= NOW() -
+                INTERVAL '${STALE_SEND_TIMEOUT_MINUTES} minutes'
+            )
+         ORDER BY id
+         LIMIT 1`
+      )
+      .get(MAX_AUTOMATIC_EMAIL_ATTEMPTS, MAX_AUTOMATIC_EMAIL_ATTEMPTS)) as
+      | {
+          id: number;
+          recipient_email: string | null;
+          subject: string;
+          text_body: string;
+          html_body: string;
+          attempts: number;
+        }
+      | undefined;
+    if (!row) {
+      return undefined;
+    }
+    await db
+      .prepare(
+        `UPDATE email_notification_outbox
+         SET status = 'sending', attempts = attempts + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      )
+      .run(row.id);
+    return {
+      id: row.id,
+      recipientEmail: row.recipient_email,
+      subject: row.subject,
+      text: row.text_body,
+      html: row.html_body,
+      attempts: row.attempts + 1,
+    };
+  });
+}
+
+async function deliverPendingEmails(config: EmailNotificationConfig & {
+  smtpPassword: string;
+}) {
+  if (!smtpIsReady(config)) return;
+  for (let count = 0; count < MAX_SENDS_PER_TICK; count += 1) {
+    const email = await claimNextEmail();
+    if (!email) return;
+    try {
+      await sendConfiguredEmail(
+        email,
+        email.recipientEmail ? [email.recipientEmail] : undefined
+      );
+      await getDb()
+        .prepare(
+          `UPDATE email_notification_outbox
+           SET status = 'sent', updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        )
+        .run(email.id);
+    } catch (error: unknown) {
+      const diagnosis = diagnoseEmailDeliveryFailure(error, [
+        config.smtpUser,
+        config.smtpPassword,
+      ]);
+      const retryable = shouldRetryEmailAutomatically(
+        email.attempts,
+        diagnosis.transient
+      );
+      const failure = JSON.stringify({
+        title: diagnosis.title,
+        details: diagnosis.server ?? null,
+        fix: diagnosis.fix,
+      });
+      await getDb()
+        .prepare(
+          `UPDATE email_notification_outbox
+           SET status = 'failed', updated_at = CURRENT_TIMESTAMP,
+               last_error = ?, last_error_transient = ?
+           WHERE id = ?`
+        )
+        .run(failure, retryable, email.id);
+      console.error(
+        `Email notification delivery failed (attempt ${email.attempts}/${MAX_AUTOMATIC_EMAIL_ATTEMPTS}).`,
+        diagnosis.title,
+        diagnosis.server ?? ""
+      );
+    }
+  }
+}
+
+async function removePendingEmailsForRemovedRecipients(
+  subscriptions: EmailNotificationConfig["subscriptions"]
+): Promise<void> {
+  const db = getDb();
+  const recipients = subscriptions.map((subscription) => subscription.email);
+  if (recipients.length === 0) {
+    await db
+      .prepare(
+        `DELETE FROM email_notification_outbox
+         WHERE status = 'pending'`
+      )
+      .run();
+    return;
+  }
+
+  const placeholders = recipients.map(() => "?").join(", ");
+  await db
+    .prepare(
+      `DELETE FROM email_notification_outbox
+       WHERE recipient_email IS NOT NULL
+         AND recipient_email NOT IN (${placeholders})
+       AND status = 'pending'`
+    )
+    .run(...recipients);
+
+  for (const subscription of subscriptions) {
+    const disabledTypes: string[] = [];
+    if (subscription.salesCadence === "off") {
+      disabledTypes.push("sales:%");
+    }
+    if (subscription.analyticsCadence === "off") {
+      disabledTypes.push("analytics:%");
+    }
+    if (!subscription.noStockAlerts) {
+      disabledTypes.push("stock:%:out:%");
+    }
+    if (!subscription.lowStockAlerts) {
+      disabledTypes.push("stock:%:low:%");
+    }
+    if (disabledTypes.length === 0) continue;
+
+    await db
+      .prepare(
+        `DELETE FROM email_notification_outbox
+         WHERE recipient_email = ?
+           AND status = 'pending'
+           AND (${disabledTypes.map(() => "event_key LIKE ?").join(" OR ")})`
+      )
+      .run(subscription.email, ...disabledTypes);
+  }
+}
+
+async function runEmailSchedulerTick() {
+  await ensureEmailOutbox();
+  const config = await getSmtpConfiguration();
+  await getDb()
+    .prepare(
+      `UPDATE email_notification_outbox
+       SET status = 'failed', updated_at = CURRENT_TIMESTAMP,
+           last_error = ?, last_error_transient = FALSE
+       WHERE status = 'sending'
+         AND attempts >= ?
+         AND updated_at::timestamp <= NOW() -
+           INTERVAL '${STALE_SEND_TIMEOUT_MINUTES} minutes'`
+    )
+    .run(
+      JSON.stringify({
+        title: "The email send timed out after the final automatic attempt.",
+        details: null,
+        fix: "Check the SMTP configuration and retry this email from the delivery log.",
+      }),
+      MAX_AUTOMATIC_EMAIL_ATTEMPTS
+    );
+  await removePendingEmailsForRemovedRecipients(config.subscriptions);
+  const isReady = smtpIsReady(config);
+  const now = new Date();
+
+  await checkStockTransitions(config);
+  if (isReady) {
+    for (const subscription of config.subscriptions) {
+      await queueReport(
+        subscription,
+        "sales",
+        subscription.salesCadence,
+        subscription.reportSendTime,
+        now
+      );
+      await queueReport(
+        subscription,
+        "analytics",
+        subscription.analyticsCadence,
+        subscription.reportSendTime,
+        now
+      );
+    }
+  }
+  await deliverPendingEmails(config);
+}
+
+declare global {
+  var __merrylaneEmailSchedulerTimer: NodeJS.Timeout | undefined;
+  var __merrylaneEmailSchedulerRunning: boolean | undefined;
+}
+
+export function startEmailNotificationScheduler() {
+  if (globalThis.__merrylaneEmailSchedulerTimer) return;
+
+  const tick = async () => {
+    if (globalThis.__merrylaneEmailSchedulerRunning) return;
+    globalThis.__merrylaneEmailSchedulerRunning = true;
+    try {
+      await runEmailSchedulerTick();
+    } catch (error: unknown) {
+      console.error(
+        "Email notification scheduler tick failed.",
+        error instanceof Error ? error.stack ?? error.message : error
+      );
+    } finally {
+      globalThis.__merrylaneEmailSchedulerRunning = false;
+    }
+  };
+
+  globalThis.__merrylaneEmailSchedulerTimer = setInterval(
+    () => void tick(),
+    POLL_INTERVAL_MS
+  );
+  globalThis.__merrylaneEmailSchedulerTimer.unref();
+  void tick();
+}

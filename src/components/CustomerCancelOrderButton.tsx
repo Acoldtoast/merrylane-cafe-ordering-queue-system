@@ -6,6 +6,7 @@ import { Icon } from "./Icons";
 import { LoadingDots } from "./LoadingDots";
 import { useFeedback } from "./Feedback";
 import { peso } from "@/lib/format";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 
 export function canCustomerCancelOrder(order: Order) {
   return (
@@ -30,7 +31,7 @@ export function CustomerCancelOrderButton({
     if (
       cancelling ||
       !window.confirm(
-        `Cancel order #${String(order.id).padStart(3, "0")}? This cannot be undone.`
+        `Cancel order #${String(order.order_number ?? order.id).padStart(3, "0")}? This cannot be undone.`
       )
     ) {
       return;
@@ -39,7 +40,7 @@ export function CustomerCancelOrderButton({
     setCancelling(true);
     const result = await feedback.run(
       async () => {
-        const response = await fetch(`/api/orders/${order.id}`, {
+        const response = await fetchPortalApi(`/api/orders/${order.id}`, {
           method: "DELETE",
         });
         const data = await response.json();
@@ -51,7 +52,7 @@ export function CustomerCancelOrderButton({
       {
         loading: {
           title: "Cancelling your order…",
-          message: `Removing order #${String(order.id).padStart(3, "0")}.`,
+          message: `Removing order #${String(order.order_number ?? order.id).padStart(3, "0")}.`,
         },
         success: () => ({
           eyebrow: "Cancelled",
@@ -60,7 +61,7 @@ export function CustomerCancelOrderButton({
             "Nothing was charged. You can start a new order whenever you're ready.",
           duration: 3200,
           details: [
-            { label: "Order", value: `#${String(order.id).padStart(3, "0")}` },
+            { label: "Order", value: `#${String(order.order_number ?? order.id).padStart(3, "0")}` },
             {
               label: "Table",
               value: String(order.table_number).padStart(2, "0"),

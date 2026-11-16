@@ -12,8 +12,20 @@ import {
   orderRef,
   paymentMethodLabel,
 } from "@/lib/activityLog";
+import type { DiscountRecipient } from "@/lib/orderDiscount";
 
 const SUGAR_LEVELS = new Set(["0%", "25%", "50%", "75%", "100%"]);
+const DATA_IMAGE_PATTERN =
+  /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/;
+
+function isHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 function stamp(offsetMinutes = 0) {
   const d = new Date(Date.now() + offsetMinutes * 60000);
@@ -33,8 +45,7 @@ function manilaDate() {
 
 export async function GET(request: Request) {
   try {
-    OrderModel.autoCompleteReadyOrders();
-    OrderModel.autoCancelUnpaidCounterOrders();
+    await OrderModel.autoCancelUnpaidCounterOrders();
     const url = new URL(request.url);
     const table = url.searchParams.get("table");
     const status = url.searchParams.get("status");
@@ -43,7 +54,7 @@ export async function GET(request: Request) {
 
     if (id) {
       const orderId = Number(id);
-      const owner = OrderModel.guestOwner(orderId);
+      const owner = await OrderModel.guestOwner(orderId);
       const guestId = await getGuestId();
       if (owner && owner !== guestId) {
         return Response.json(
@@ -51,13 +62,13 @@ export async function GET(request: Request) {
           { status: 404 }
         );
       }
-      const order = OrderModel.byId(orderId);
+      const order = await OrderModel.byId(orderId);
       return Response.json({ order, success: true });
     }
 
     if (table) {
       return Response.json({
-        orders: OrderModel.byTable(Number(table), 8),
+        orders: await OrderModel.byTable(Number(table), 8),
         success: true,
       });
     }
@@ -68,8 +79,8 @@ export async function GET(request: Request) {
     if (url.searchParams.get("board") === "1") {
       const today = manilaDate();
       return Response.json({
-        orders: OrderModel.staffBoard(today),
-        stats: OrderModel.todayStats(today),
+        orders: await OrderModel.staffBoard(today),
+        stats: await OrderModel.todayStats(today),
         success: true,
       });
     }
@@ -94,9 +105,9 @@ export async function GET(request: Request) {
       const serviceDate = dateParam
         ? dateParam
         : businessDay
-          ? SettingsModel.paymentBusinessDate()
+          ? manilaDate()
           : undefined;
-      const result = OrderModel.recentVerified(
+      const result = await OrderModel.recentVerified(
         pageSize,
         (page - 1) * pageSize,
         serviceDate
@@ -105,7 +116,7 @@ export async function GET(request: Request) {
         orders: result.orders,
         total: result.total,
         autoCancelledOrders: serviceDate
-          ? OrderModel.unpaidTimeoutCancellationsForDate(serviceDate)
+          ? await OrderModel.unpaidTimeoutCancellationsForDate(serviceDate)
           : [],
         page,
         page_size: pageSize,
@@ -116,8 +127,10 @@ export async function GET(request: Request) {
 
     const statuses = status ? (status.split(",") as OrderStatus[]) : undefined;
     return Response.json({
-      orders: OrderModel.list(statuses),
-      stats: OrderModel.todayStats(manilaDate()),
+      orders: statuses
+        ? await OrderModel.listForDate(statuses, manilaDate())
+        : await OrderModel.list(),
+      stats: await OrderModel.todayStats(manilaDate()),
       success: true,
     });
   } catch (error: unknown) {
@@ -154,6 +167,15 @@ export async function POST(request: Request) {
         note?: string;
       }[];
     } = body;
+    const preview = body.preview === true;
+    const paymentProof =
+      typeof body.payment_proof_url === "string"
+        ? body.payment_proof_url.trim()
+        : "";
+    const paymentReference =
+      typeof body.payment_reference === "string"
+        ? body.payment_reference.trim()
+        : "";
 
     const customerName =
       typeof customer_name === "string" ? customer_name.trim() : "";
@@ -178,8 +200,43 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+    if (preview && payment_method !== "gcash") {
+      return Response.json(
+        { error: "Only GCash checkouts can be previewed.", success: false },
+        { status: 400 }
+      );
+    }
+    if (payment_method === "gcash" && !preview) {
+      if (!paymentProof || !(DATA_IMAGE_PATTERN.test(paymentProof) || isHttpUrl(paymentProof))) {
+        return Response.json(
+          { error: "Attach a valid GCash payment proof before submitting.", success: false },
+          { status: 400 }
+        );
+      }
+      if (!paymentReference) {
+        return Response.json(
+          { error: "Enter the GCash reference number shown on your receipt.", success: false },
+          { status: 400 }
+        );
+      }
+      if (paymentProof.length > 5_000_000) {
+        return Response.json(
+          { error: "That image is too large. Please use a file under 3 MB.", success: false },
+          { status: 413 }
+        );
+      }
+      if (await OrderModel.gcashReferenceIsInUse(paymentReference)) {
+        return Response.json(
+          {
+            error: "That GCash reference has already been submitted for another payment.",
+            success: false,
+          },
+          { status: 409 }
+        );
+      }
+    }
 
-    if (!SettingsModel.isOrderingOpen()) {
+    if (!(await SettingsModel.isOrderingOpen())) {
       return Response.json(
         {
           error:
@@ -191,7 +248,7 @@ export async function POST(request: Request) {
     }
 
     const priced: {
-      item: NonNullable<ReturnType<typeof MenuItemModel.byId>>;
+      item: NonNullable<Awaited<ReturnType<typeof MenuItemModel.byId>>>;
       quantity: number;
       variantName: string;
       extras: { id: number; name: string; price_modifier: number }[];
@@ -209,7 +266,7 @@ export async function POST(request: Request) {
           { status: 400 }
         );
       }
-      const menuItem = MenuItemModel.byId(Number(line.menuItemId));
+      const menuItem = await MenuItemModel.byId(Number(line.menuItemId));
       if (!menuItem || !menuItem.is_active) {
         return Response.json(
           { error: "An item in your cart is no longer available.", success: false },
@@ -281,12 +338,44 @@ export async function POST(request: Request) {
       (sum, line) => sum + line.unitPrice * line.quantity,
       0
     );
-    const servicePct = Number(SettingsModel.get("service_charge_pct") || 0);
+    const servicePct = Number(
+      (await SettingsModel.get("service_charge_pct")) || 0
+    );
     const serviceCharge = Math.round(subtotal * (servicePct / 100) * 100) / 100;
     const total = Math.round((subtotal + serviceCharge) * 100) / 100;
+    if (preview) {
+      const requestedByItem = new Map<number, number>();
+      for (const line of priced) {
+        requestedByItem.set(
+          line.item.id,
+          (requestedByItem.get(line.item.id) || 0) + line.quantity
+        );
+      }
+      for (const [menuItemId, quantity] of requestedByItem) {
+        const item = priced.find((line) => line.item.id === menuItemId)?.item;
+        if (
+          item?.stock_tracking_enabled &&
+          item.stock_count < quantity
+        ) {
+          return Response.json(
+            {
+              error: `Only ${item.stock_count} ${item.name} left. Update your cart quantity and try again.`,
+              success: false,
+            },
+            { status: 409 }
+          );
+        }
+      }
+      return Response.json({
+        subtotal,
+        service_charge: serviceCharge,
+        total,
+        success: true,
+      });
+    }
 
     const guestId = await getOrCreateGuestId();
-    const result = OrderModel.createWithStockDeduction({
+    const result = await OrderModel.createWithStockDeduction({
       order: {
         table_number: Number(table_number),
         order_type,
@@ -297,6 +386,9 @@ export async function POST(request: Request) {
         total,
         remarks: remarks?.trim() || undefined,
         status: payment_method === "gcash" ? "payment_pending" : "pending",
+        payment_proof_url: payment_method === "gcash" ? paymentProof : null,
+        payment_reference: payment_method === "gcash" ? paymentReference : null,
+        payment_amount: payment_method === "gcash" ? total : null,
         guest_id: guestId,
       },
       items: priced.map((line) => ({
@@ -319,6 +411,8 @@ export async function POST(request: Request) {
 
     return Response.json({
       orderId: result.orderId,
+      orderNumber:
+        (await OrderModel.byId(result.orderId))?.order_number ?? result.orderId,
       total,
       status: payment_method === "gcash" ? "payment_pending" : "pending",
       success: true,
@@ -345,7 +439,7 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const order = OrderModel.byId(id);
+    const order = await OrderModel.byId(id);
     if (!order) {
       return Response.json(
         { error: "Order not found.", success: false },
@@ -369,7 +463,7 @@ export async function PATCH(request: Request) {
           { status: 409 }
         );
       }
-      if (!OrderModel.cancelUnpaidByStaff(id)) {
+      if (!(await OrderModel.cancelUnpaidByStaff(id))) {
         return Response.json(
           { error: "This order can no longer be cancelled.", success: false },
           { status: 409 }
@@ -383,10 +477,98 @@ export async function PATCH(request: Request) {
         entity_id: id,
       });
       return Response.json({
-        order: OrderModel.byId(id),
+        order: await OrderModel.byId(id),
         success: true,
         message: "Order cancelled.",
       });
+    }
+
+    if (body.discounts !== undefined) {
+      if (
+        order.payment_status === "verified" ||
+        !["pending", "payment_pending"].includes(order.status)
+      ) {
+        return Response.json(
+          { error: "Discounts can only be added before payment is verified.", success: false },
+          { status: 409 }
+        );
+      }
+      if (
+        order.payment_method === "gcash" &&
+        order.payment_status !== "rejected" &&
+        order.payment_proof_url
+      ) {
+        return Response.json(
+          {
+            error: "Apply the discount before the customer submits GCash payment proof.",
+            success: false,
+          },
+          { status: 409 }
+        );
+      }
+      if (!Array.isArray(body.discounts) || body.discounts.length > 10) {
+        return Response.json(
+          { error: "Add up to 10 valid discount IDs.", success: false },
+          { status: 400 }
+        );
+      }
+      const recipients: DiscountRecipient[] = [];
+      const seenIds = new Set<string>();
+      for (const entry of body.discounts) {
+        const type = String(entry?.type || "");
+        const idNumber =
+          typeof entry?.id_number === "string" ? entry.id_number.trim() : "";
+        const name = typeof entry?.name === "string" ? entry.name.trim() : "";
+        if (
+          !["staff", "senior", "pwd", "other"].includes(type) ||
+          !idNumber ||
+          idNumber.length > 40 ||
+          !name ||
+          name.length > 80
+        ) {
+          return Response.json(
+            {
+              error: "Each discount needs a valid type, ID number, and name (up to 80 characters).",
+              success: false,
+            },
+            { status: 400 }
+          );
+        }
+        const normalizedId = idNumber.toLowerCase();
+        if (seenIds.has(normalizedId)) {
+          return Response.json(
+            { error: "Each discount ID can only be used once on an order.", success: false },
+            { status: 400 }
+          );
+        }
+        seenIds.add(normalizedId);
+        recipients.push({
+          type: type as DiscountRecipient["type"],
+          id_number: idNumber,
+          name,
+        });
+      }
+
+      const discounts = await OrderModel.calculateDiscounts(id, recipients);
+      const discountAmount =
+        Math.round(
+          discounts.reduce((sum, discount) => sum + discount.discount_amount, 0) *
+            100
+        ) / 100;
+      updates.discount_amount = discountAmount;
+      updates.discounts_json = discounts.length ? JSON.stringify(discounts) : null;
+      updates.total =
+        Math.round(
+          (Number(order.subtotal) +
+            Number(order.service_charge) -
+            discountAmount) *
+            100
+        ) / 100;
+      if (order.payment_method === "gcash" && order.payment_status === "rejected") {
+        updates.payment_proof_url = null;
+        updates.payment_reference = null;
+        updates.payment_amount = null;
+      }
     }
 
     const prepMinutes =
@@ -416,22 +598,23 @@ export async function PATCH(request: Request) {
     if (body.payment_status) {
       updates.payment_status = body.payment_status;
       if (body.payment_status === "verified") {
+        const payableTotal = Number(updates.total ?? order.total);
         if (order.payment_method === "counter") {
           const cashReceived = Number(body.cash_received);
-          if (!Number.isFinite(cashReceived) || cashReceived < order.total) {
+          if (!Number.isFinite(cashReceived) || cashReceived < payableTotal) {
             return Response.json(
               {
-                error: `Enter at least ${money(order.total)} received from the customer.`,
+                error: `Enter at least ${money(payableTotal)} received from the customer.`,
                 success: false,
               },
               { status: 400 }
             );
           }
           const roundedCash = Math.round(cashReceived * 100) / 100;
-          updates.payment_amount = order.total;
+          updates.payment_amount = payableTotal;
           updates.cash_received = roundedCash;
           updates.change_given =
-            Math.round((roundedCash - order.total) * 100) / 100;
+            Math.round((roundedCash - payableTotal) * 100) / 100;
         }
         // GCash verification needs the receipt the staff member is checking.
         if (order.payment_method === "gcash" && !order.payment_proof_url) {
@@ -445,9 +628,9 @@ export async function PATCH(request: Request) {
           );
         }
         if (order.payment_method === "counter") {
-          updates.payment_amount = order.total;
+          updates.payment_amount = payableTotal;
         } else if (order.payment_amount == null) {
-          updates.payment_amount = order.total;
+          updates.payment_amount = payableTotal;
         }
         if (!nextStatus) nextStatus = "preparing";
       }
@@ -473,7 +656,7 @@ export async function PATCH(request: Request) {
           );
         }
         if (!order.queue_number && body.queue_number === undefined) {
-          updates.queue_number = OrderModel.nextQueueNumber();
+          updates.queue_number = await OrderModel.nextQueueNumber(manilaDate());
         }
         updates.confirmed_at = order.confirmed_at || stamp();
       }
@@ -490,7 +673,8 @@ export async function PATCH(request: Request) {
         }
         if (!order.confirmed_at) {
           updates.confirmed_at = stamp();
-          updates.queue_number = order.queue_number || OrderModel.nextQueueNumber();
+          updates.queue_number =
+            order.queue_number || await OrderModel.nextQueueNumber(manilaDate());
         }
         updates.preparing_at = order.preparing_at || stamp();
       }
@@ -498,7 +682,8 @@ export async function PATCH(request: Request) {
         updates.ready_at = stamp();
         if (!order.confirmed_at) {
           updates.confirmed_at = stamp();
-          updates.queue_number = order.queue_number || OrderModel.nextQueueNumber();
+          updates.queue_number =
+            order.queue_number || await OrderModel.nextQueueNumber(manilaDate());
         }
       }
       if (nextStatus === "completed") {
@@ -523,8 +708,12 @@ export async function PATCH(request: Request) {
       updates.queue_number = Number(body.queue_number);
     }
 
-    OrderModel.update(id, updates);
-    const updated = OrderModel.byId(id) || order;
+    if (updates.payment_status === "rejected") {
+      await OrderModel.rejectPayment(id, updates, stamp(), auth.user.name);
+    } else {
+      await OrderModel.update(id, updates);
+    }
+    const updated = (await OrderModel.byId(id)) || order;
 
     if (updates.payment_status === "verified") {
       logActivity(auth.user, {

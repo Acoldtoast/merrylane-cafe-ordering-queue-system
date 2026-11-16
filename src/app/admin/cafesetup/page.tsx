@@ -1,6 +1,6 @@
 import { AdminHoursClient } from "./AdminHoursClient";
 
-export const metadata = { title: "Hours & tables" };
+export const metadata = { title: "Cafe setup" };
 
 export default function AdminHoursPage() {
   return <AdminHoursClient />;

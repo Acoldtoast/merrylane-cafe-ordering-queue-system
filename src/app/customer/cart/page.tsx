@@ -16,7 +16,7 @@ export default async function CartPage({
 
   let ordering: OrderingWindow | null = null;
   try {
-    ordering = SettingsModel.orderingWindow();
+    ordering = await SettingsModel.orderingWindow();
   } catch {
     // Keep the cart usable when the database is still initializing.
   }

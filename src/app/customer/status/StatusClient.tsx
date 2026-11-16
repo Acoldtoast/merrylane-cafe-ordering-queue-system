@@ -10,6 +10,7 @@ import {
 } from "react";
 import { Icon } from "@/components/Icons";
 import { LoadingDots } from "@/components/LoadingDots";
+import { CustomerPageSkeleton } from "@/components/CustomerPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
 import { CustomerCancelOrderButton } from "@/components/CustomerCancelOrderButton";
 import { useCustomer } from "@/components/CustomerProvider";
@@ -22,6 +23,7 @@ import {
   statusLabel,
 } from "@/lib/format";
 import { orderItemMeta } from "@/lib/orderItems";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 
 const steps = [
   { label: "Order placed", icon: "receipt" as const },
@@ -90,14 +92,14 @@ export function StatusClient({
   }, [initialTable, setTable]);
 
   const fetchOrder = useCallback(async (id: number) => {
-    const response = await fetch(`/api/orders/${id}`, { cache: "no-store" });
+    const response = await fetchPortalApi(`/api/orders/${id}`, { cache: "no-store" });
     const data = await response.json();
     if (!response.ok || !data.order) {
       throw new Error(data.error || "Order not found.");
     }
     setOrder(data.order);
     setReview(data.review || null);
-    const requestsResponse = await fetch(
+    const requestsResponse = await fetchPortalApi(
       `/api/waiter?table=${data.order.table_number}`,
       { cache: "no-store" }
     );
@@ -120,14 +122,14 @@ export function StatusClient({
     setSendingFollowUp(true);
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/waiter", {
+        const response = await fetchPortalApi("/api/waiter", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             table_number: order.table_number,
             order_id: order.id,
             request_type: "Order follow-up",
-            message: `Customer is asking for an update on order #${String(order.id).padStart(3, "0")}.`,
+            message: `Customer is asking for an update on order #${String(order.order_number ?? order.id).padStart(3, "0")}.`,
           }),
         });
         const data = await response.json();
@@ -139,7 +141,7 @@ export function StatusClient({
       {
         loading: {
           title: "Asking the team…",
-          message: `Sending a follow-up for order #${String(order.id).padStart(3, "0")}.`,
+          message: `Sending a follow-up for order #${String(order.order_number ?? order.id).padStart(3, "0")}.`,
         },
         success: () => ({
           eyebrow: "Follow-up sent",
@@ -147,7 +149,7 @@ export function StatusClient({
           message:
             "Someone will check on your order and update the status here.",
           details: [
-            { label: "Order", value: `#${String(order.id).padStart(3, "0")}` },
+            { label: "Order", value: `#${String(order.order_number ?? order.id).padStart(3, "0")}` },
             {
               label: "Table",
               value: String(order.table_number).padStart(2, "0"),
@@ -165,7 +167,7 @@ export function StatusClient({
     setConfirmingReceipt(true);
     const result = await feedback.run(
       async () => {
-        const response = await fetch(`/api/orders/${order.id}/received`, {
+        const response = await fetchPortalApi(`/api/orders/${order.id}/received`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ table_number: order.table_number }),
@@ -188,7 +190,7 @@ export function StatusClient({
             "Your order is complete. We'd love to hear how the visit felt.",
           duration: 3400,
           details: [
-            { label: "Order", value: `#${String(order.id).padStart(3, "0")}` },
+            { label: "Order", value: `#${String(order.order_number ?? order.id).padStart(3, "0")}` },
             {
               label: "Table",
               value: String(order.table_number).padStart(2, "0"),
@@ -222,7 +224,7 @@ export function StatusClient({
       try {
         let id = resolvedId || lastOrderId || 0;
         if (!id) {
-          const res = await fetch("/api/orders/history", {
+          const res = await fetchPortalApi("/api/orders/history", {
             cache: "no-store",
           });
           const data = await res.json();
@@ -265,7 +267,7 @@ export function StatusClient({
   const queue = order?.queue_number
     ? `A-${String(order.queue_number).padStart(3, "0")}`
     : "";
-  const orderCode = `#${String(order?.id || 0).padStart(3, "0")}`;
+  const orderCode = `#${String(order?.order_number ?? order?.id ?? 0).padStart(3, "0")}`;
   const readyAt = order?.estimated_ready_at
     ? new Date(order.estimated_ready_at.replace(" ", "T"))
     : null;
@@ -285,12 +287,7 @@ export function StatusClient({
   }, [currentIndex]);
 
   if (loading) {
-    return (
-      <div className="loading-block">
-        <span className="spinner" />
-        Finding your table&apos;s latest order…
-      </div>
-    );
+    return <CustomerPageSkeleton />;
   }
 
   if (!order) {
@@ -335,7 +332,7 @@ export function StatusClient({
       <div className="status-head">
         <div>
           <span className="eyebrow" style={{ color: "var(--brown)" }}>
-            Order #{String(order.id).padStart(3, "0")} ·{" "}
+            Order #{String(order.order_number ?? order.id).padStart(3, "0")} ·{" "}
             {orderTypeLabel(order.order_type)}
           </span>
           <h1>
@@ -473,8 +470,7 @@ export function StatusClient({
                   ) : null}
                   {order.queue_number ? (
                     <span className="queue-order-ref">
-                      {order.customer_name ? " · " : ""}
-                      {orderCode}
+                      Order {orderCode}
                     </span>
                   ) : null}
                 </div>
@@ -737,6 +733,12 @@ export function StatusClient({
                 <span>Service charge</span>
                 <span>{peso(order.service_charge)}</span>
               </div>
+              {Number(order.discount_amount || 0) > 0 && (
+                <div className="totals-row payment-customer-discount">
+                  <span>Discount</span>
+                  <span>−{peso(order.discount_amount || 0)}</span>
+                </div>
+              )}
               <div className="totals-row total">
                 <span>Total</span>
                 <span>{peso(order.total)}</span>
@@ -764,7 +766,7 @@ export function StatusClient({
             </div>
             <div className="status-confirm-number">
               <span>Order number</span>
-              <b>#{String(order.id).padStart(3, "0")}</b>
+              <b>#{String(order.order_number ?? order.id).padStart(3, "0")}</b>
             </div>
             {review && (
               <div className="status-confirm-number">

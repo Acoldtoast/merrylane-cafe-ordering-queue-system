@@ -28,9 +28,9 @@ export default async function NetworkRequiredPage({
     redirect(nextPath);
   }
 
-  let ssid = "MERLYLANE-WIFI";
+  let ssid = "MERRLYLANE-WIFI";
   try {
-    ssid = SettingsModel.get("wifi_ssid") || ssid;
+    ssid = (await SettingsModel.get("wifi_ssid")) || ssid;
   } catch {
     // Settings may not be ready before the database is initialized.
   }

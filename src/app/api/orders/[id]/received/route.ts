@@ -20,7 +20,7 @@ export async function POST(
 
     const body = await request.json();
     const tableNumber = Number(body.table_number);
-    const order = OrderModel.byId(orderId);
+    const order = await OrderModel.byId(orderId);
     if (!order || order.table_number !== tableNumber) {
       return Response.json(
         { error: "Order not found for this table.", success: false },
@@ -37,8 +37,14 @@ export async function POST(
       );
     }
 
-    OrderModel.update(orderId, { status: "completed", completed_at: stamp() });
-    return Response.json({ order: OrderModel.byId(orderId), success: true });
+    await OrderModel.update(orderId, {
+      status: "completed",
+      completed_at: stamp(),
+    });
+    return Response.json({
+      order: await OrderModel.byId(orderId),
+      success: true,
+    });
   } catch (error: unknown) {
     return Response.json(
       {

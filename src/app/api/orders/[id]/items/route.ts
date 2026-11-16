@@ -46,7 +46,7 @@ export async function POST(
       );
     }
 
-    const result = OrderModel.addStaffItem({
+    const result = await OrderModel.addStaffItem({
       orderId,
       menuItemId,
       quantity,
@@ -63,7 +63,7 @@ export async function POST(
       );
     }
 
-    const item = MenuItemModel.byId(menuItemId);
+    const item = await MenuItemModel.byId(menuItemId);
     logActivity(auth.user, {
       area: "Orders",
       action: "order.item_added",

@@ -1,5 +1,5 @@
 import { requireStaff } from "@/lib/auth";
-import { UserModel } from "@/lib/models";
+import { UserModel, verifyPassword } from "@/lib/models";
 
 export async function POST(request: Request) {
   const auth = await requireStaff(request);
@@ -20,8 +20,12 @@ export async function POST(request: Request) {
       );
     }
 
-    const user = UserModel.byEmail(auth.user.email);
-    if (!user || user.role !== "staff" || user.password_hash !== `sha256_${password}`) {
+    const user = await UserModel.byEmail(auth.user.email);
+    if (
+      !user ||
+      user.role !== "staff" ||
+      !verifyPassword(password, user.password_hash)
+    ) {
       return Response.json(
         { error: "That password doesn't match your staff account.", success: false },
         { status: 401 }

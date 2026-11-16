@@ -10,15 +10,19 @@ export function logActivity(
   user: ActivityUser | null,
   entry: ActivityEntry
 ): void {
-  ActivityModel.log(
+  void ActivityModel.log(
     user ? { id: user.id, name: user.name, role: user.role } : null,
     entry
   );
 }
 
 /** "order #073 · Table 07" */
-export function orderRef(order: { id: number; table_number: number }): string {
-  return `order #${String(order.id).padStart(3, "0")} · Table ${String(
+export function orderRef(order: {
+  id: number;
+  order_number?: number;
+  table_number: number;
+}): string {
+  return `order #${String(order.order_number ?? order.id).padStart(3, "0")} · Table ${String(
     order.table_number
   ).padStart(2, "0")}`;
 }

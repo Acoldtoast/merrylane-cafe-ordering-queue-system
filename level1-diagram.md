@@ -20,8 +20,8 @@ graph TD
     end
 
     subgraph "Data Layer"
-        Sqlite["SQLite Local DB (node:sqlite)"]
-        Schema["Schema (scripts/init-db.js)"]
+        PGlite["PGlite Local DB (PostgreSQL/WASM)"]
+        Schema["Schema + demo seed (scripts/init-pglite.mjs)"]
     end
 
     Browser -->|QR code loads ?table=N| Middleware
@@ -31,8 +31,8 @@ graph TD
     Middleware -->|Auth check /staff /admin| Auth
     Middleware -->|Pass through /api| API
     Auth -->|JWT verify| Models
-    Models -->|SQL queries| Sqlite
-    Sqlite -->|Data| Schema
+    Models -->|SQL queries| PGlite
+    PGlite -->|Data| Schema
 
     Pages <-->|Server fetches / SWR| API
     Pages -->|Reads/writes| Cart

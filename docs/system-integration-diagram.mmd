@@ -1,0 +1,126 @@
+```mermaid
+flowchart TB
+    %% External Actors (Left Side - Blue boxes) ================================
+    Staff[("Staff<br/>PIN / session access<br/>Record entry and review<br/>Dashboard / validation views<br/>Excel upload and download")]
+    Admin[("Admin<br/>Admin actions / results<br/>Admin sign-in / admin forms<br/>Rendered HTML responses")]
+    Customer[("Customer / Guest<br/>QR table access<br/>Menu browse & order<br/>Payment & status")]
+
+    %% System Boundary (Large light purple box) ===============================
+    subgraph Merrylane["Merrylane Cafe — Next.js App Router System"]
+        
+        direction TB
+        
+        %% Staff Portal Module
+        subgraph StaffPortal["Staff Portal<br/><small>PIN / session access<br/>Sessions · Permissions · CSRF<br/>Server-side template rendering<br/>JSON results / validation errors<br/>Submitted entries and import options</small>"]
+            SB[("Staff Board<br/>Order queue<br/>Preparing / Ready / Done")]
+            SP[("Staff Payments<br/>GCash verification<br/>Balance payments")]
+            SS[("Staff Stock<br/>Portions left<br/>Stock updates")]
+            SR[("Staff Requests<br/>Waiter calls<br/>Water / extras / questions")]
+        end
+
+        %% Admin Portal Module
+        subgraph AdminPortal["Admin Portal<br/><small>Admin actions / results<br/>Account authentication · Sessions<br/>Permissions · CSRF protection<br/>PIN changes invalidate shared sessions</small>"]
+            AO[("Admin Overview<br/>Today's numbers<br/>Sales & queues")]
+            AA[("Admin Analytics<br/>Sales trends<br/>Forecast & best sellers")]
+            AM[("Admin Menu<br/>Menu & accounts<br/>Stock & add-ons")]
+            AH[("Admin Hours<br/>Hours & tables")]
+            AR[("Admin Reviews<br/>Customer feedback")]
+            ACT[("Admin Activity<br/>Activity log")]
+        end
+
+        %% Customer Ordering Module
+        subgraph CustomerPortal["Customer Portal<br/><small>QR table access<br/>Menu browse & order<br/>Payment & status<br/>Welcome · Menu · Item · Cart · Confirm · Thanks</small>"]
+            CW[("Customer Welcome<br/>Table selection<br/>Ordering window")]
+            CM[("Customer Menu<br/>Browse items<br/>Variants & add-ons")]
+            CC[("Customer Cart<br/>Review order<br/>Payment method")]
+            CP[("Customer Payment<br/>GCash / Counter<br/>Payment proof")]
+            CS[("Customer Status<br/>Order status<br/>Queue number")]
+        end
+
+        %% Auth & Session Module
+        subgraph AuthModule["Auth Module<br/><small>JWT httpOnly cookies<br/>login · verify · heartbeat · unlock<br/>Role-based: admin | staff<br/>Single session per browser</small>"]
+            AL[("Auth Login<br/>POST /api/auth/login<br/>Issue role token")]
+            AV[("Auth Verify<br/>GET /api/auth/verify<br/>Check session")]
+            AHH[("Auth Heartbeat<br/>POST /api/auth/heartbeat<br/>Extend admin session")]
+            AU[("Auth Unlock<br/>POST /api/auth/unlock<br/>Staff unlock password")]
+        end
+
+        %% API Routes Module
+        subgraph APIRoutes["API Routes<br/><small>REST endpoints<br/>GET / POST / PATCH / DELETE<br/>JSON responses</small>"]
+            API1[("/api/auth/*<br/>Login / verify / heartbeat / unlock")]
+            API2[("/api/analytics/overview<br/>Admin dashboard numbers")]
+            API3[("/api/menu<br/>CRUD menu items")]
+            API4[("/api/stock<br/>Stock tracking & logs")]
+            API5[("/api/orders<br/>Order lifecycle")]
+            API6[("/api/categories<br/>Menu categories")]
+            API7[("/api/reviews<br/>Customer reviews")]
+            API8[("/api/waiter<br/>Waiter requests")]
+            API9[("/api/network<br/>Network status")]
+        end
+
+        %% Internal connections within system
+        SB -.->|Returned data / response| API5
+        SP -.->|Returned data / response| API5
+        SS -.->|Returned data / response| API4
+        SR -.->|Returned data / response| API8
+
+        AO -.->|Returned data / response| API2
+        AA -.->|Returned data / response| API2
+        AM -.->|Returned data / response| API3
+        AH -.->|Returned data / response| API3
+        AR -.->|Returned data / response| API7
+        ACT -.->|Returned data / response| API5
+
+        CW -.->|Request / call / query / write| API9
+        CM -.->|Request / call / query / write| API3
+        CC -.->|Request / call / query / write| API5
+        CP -.->|Request / call / query / write| API5
+        CS -.->|Request / call / query / write| API5
+
+        AL -.->|Request / call / query / write| API1
+        AV -.->|Request / call / query / write| API1
+        AHH -.->|Request / call / query / write| API1
+        AU -.->|Request / call / query / write| API1
+    end
+
+    %% External Database (Right Side - Beige box) ==============================
+    subgraph PGliteDB["PGlite Database<br/><small>data/merrylane-pglite<br/>PostgreSQL · Foreign keys ON<br/><br/>Users · Orders · Order items<br/>Menu items · Categories · Addons<br/>Stock logs · Activity logs<br/>Settings · Waiter requests<br/>Reviews</small>"]
+    end
+
+    %% Connections: External Actors to System =================================
+    Staff ==>|HTTP request<br/>Forms / JSON<br/>PIN / session access| StaffPortal
+    Admin ==>|HTTP request<br/>Admin actions / results| AdminPortal
+    Customer ==>|HTTP request<br/>QR table access<br/>HTML · CSS · JavaScript| CustomerPortal
+
+    %% Connections: System to Database ========================================
+    StaffPortal -.->|Read / write<br/>Records · Entries| PGliteDB
+    AdminPortal -.->|Read / write<br/>Record queries ·<br/>Transactional writes| PGliteDB
+    CustomerPortal -.->|Read / write<br/>Orders · Payments| PGliteDB
+    AuthModule -.->|Read / write<br/>Session tokens| PGliteDB
+    APIRoutes -.->|Read / write<br/>All domain data| PGliteDB
+
+    %% Connections: Actors to Database (direct, where applicable) =============
+    Staff -.->|Read / write<br/>Entries / uploads| PGliteDB
+    Admin -.->|SQL queries / writes<br/>Clients / masterlist<br/>Users / groups / sessions| PGliteDB
+    Customer -.->|Read / write<br/>Orders · Payments| PGliteDB
+
+    %% Legend ==================================================================
+    subgraph Legend["Legend"]
+        L1[("■─► Request / call / query / write")]
+        L2[("■-.-► Returned data / response")]
+        L3[("● Dot = connection; crossing without dot = no join")]
+    end
+
+    %% Styling ==================================================================
+    classDef actor fill:#e1f0fa,stroke:#2c5282,stroke-width:2px,color:#1a202c
+    classDef module fill:#f7fafc,stroke:#4a5568,stroke-width:2px,color:#1a202c
+    classDef db fill:#faf5e7,stroke:#b7791f,stroke-width:2px,color:#1a202c
+    classDef legend fill:#f0f0f0,stroke:#718096,stroke-width:1px,color:#1a202c
+
+    class Staff,Admin,Customer actor
+    class StaffPortal,AdminPortal,CustomerPortal,AuthModule,APIRoutes,Merrylane module
+    class PGliteDB db
+    class L1,L2,L3 legend
+
+    linkStyle default stroke:#2c5282,stroke-width:2px
+```

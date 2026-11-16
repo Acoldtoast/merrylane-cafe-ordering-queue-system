@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Icon } from "@/components/Icons";
 import { LoadingDots } from "@/components/LoadingDots";
 import { useCustomer } from "@/components/CustomerProvider";
@@ -44,6 +44,14 @@ export function WelcomeClient({
   const nextOpeningAt = nextOpening ? formatTime(nextOpening.start) : null;
   const menuPath = `/customer/menu?table=${initialTable}`;
   const hoursPath = `/customer/hours?table=${initialTable}`;
+  const navigateToMenu = useCallback(
+    (replace = false) => {
+      setTable(initialTable);
+      if (replace) router.replace(menuPath);
+      else router.push(menuPath);
+    },
+    [initialTable, menuPath, router, setTable]
+  );
   const reopenText =
     nextOpening && nextOpeningAt
       ? `${nextOpening.day} at ${nextOpeningAt}`
@@ -66,9 +74,9 @@ export function WelcomeClient({
   // notice and reopening time are not skipped.
   useEffect(() => {
     if (!connected || !open) return;
-    const timer = window.setTimeout(() => router.replace(menuPath), 1100);
+    const timer = window.setTimeout(() => navigateToMenu(true), 1100);
     return () => window.clearTimeout(timer);
-  }, [connected, menuPath, open, router]);
+  }, [connected, navigateToMenu, open]);
 
   // If the phone joins the cafe Wi-Fi while this screen is open, detect it and
   // continue without a tap.
@@ -121,7 +129,7 @@ export function WelcomeClient({
         body: JSON.stringify({ action: "skip" }),
       });
       if (!response.ok) throw new Error("Could not skip the network check.");
-      router.push(menuPath);
+      navigateToMenu();
     } catch (err: unknown) {
       setHint(err instanceof Error ? err.message : "Could not open the menu.");
       setSkipping(false);
@@ -254,7 +262,7 @@ export function WelcomeClient({
               onClick={
                 open
                   ? connected
-                    ? () => router.push(menuPath)
+                    ? () => navigateToMenu()
                     : checkConnection
                   : () => router.push(hoursPath)
               }

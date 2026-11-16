@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
+import { peso } from "@/lib/format";
 
 export type ReportPeriod = "today" | "week" | "month" | "year" | "last7" | "last30" | "custom";
 export type ReportFilters = {
@@ -19,7 +20,7 @@ const VALID_PERIODS = new Set<ReportPeriod>([
   "last30",
   "custom",
 ]);
-const SALES_STATUSES = "'confirmed','preparing','ready','completed'";
+const SALES_STATUSES = "'ready','completed'";
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 function isValidDate(value: string): boolean {
@@ -96,7 +97,7 @@ function dateRange(period: ReportPeriod, today: string) {
   };
 }
 
-function reportFor(filters: ReportFilters, includePaymentProofs = true) {
+async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   const today = manilaDate();
   const period = filters.period;
   const range =
@@ -129,13 +130,14 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     ...orderFilters.params,
   ];
   const db = getDb();
-  const summary = db
+  const summary = await db
     .prepare(
       `SELECT COUNT(*) AS order_count,
               COALESCE(SUM(total), 0) AS revenue,
               COALESCE(AVG(total), 0) AS average_order_value
        FROM orders o
-       WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+       WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+         AND o.payment_status = 'verified'
          AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}`
     )
     .get(...baseArgs) as {
@@ -143,25 +145,27 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     revenue: number;
     average_order_value: number;
   };
-  const previous = db
+  const previous = await db
     .prepare(
       `SELECT COUNT(*) AS order_count,
               COALESCE(SUM(total), 0) AS revenue
        FROM orders o
-       WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+       WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+         AND o.payment_status = 'verified'
          AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}`
     )
     .get(...comparisonArgs) as {
     order_count: number;
     revenue: number;
   };
-  const dailyRows = db
+  const dailyRows = await db
     .prepare(
       `SELECT DATE(created_at) AS date,
               COUNT(*) AS order_count,
               COALESCE(SUM(total), 0) AS revenue
        FROM orders o
-       WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+       WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+         AND o.payment_status = 'verified'
          AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
        GROUP BY DATE(o.created_at)
        ORDER BY date`
@@ -176,7 +180,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     const date = shiftDate(range.start, index);
     return dailyByDate.get(date) || { date, order_count: 0, revenue: 0 };
   });
-  const products = db
+  const products = await db
     .prepare(
       `SELECT oi.menu_item_id,
               oi.name,
@@ -184,7 +188,8 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
               COALESCE(SUM(oi.price_at_time * oi.quantity), 0) AS revenue
        FROM order_items oi
        JOIN orders o ON o.id = oi.order_id
-       WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+       WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+         AND o.payment_status = 'verified'
          AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
        GROUP BY oi.menu_item_id, oi.name
        ORDER BY quantity_sold DESC, revenue DESC`
@@ -195,13 +200,14 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     quantity_sold: number;
     revenue: number;
   }[];
-  const peakHours = db
+  const peakHours = await db
     .prepare(
       `SELECT CAST(strftime('%H', created_at) AS INTEGER) AS hour,
               COUNT(*) AS order_count,
               COALESCE(SUM(total), 0) AS revenue
        FROM orders o
-       WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+       WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+         AND o.payment_status = 'verified'
          AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
        GROUP BY hour
        ORDER BY order_count DESC, revenue DESC`
@@ -211,13 +217,14 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     order_count: number;
     revenue: number;
   }[];
-  const paymentMethods = db
+  const paymentMethods = await db
     .prepare(
       `SELECT payment_method,
               COUNT(*) AS order_count,
               COALESCE(SUM(total), 0) AS revenue
        FROM orders o
-       WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+       WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+         AND o.payment_status = 'verified'
          AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
        GROUP BY payment_method
        ORDER BY revenue DESC`
@@ -227,9 +234,12 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     order_count: number;
     revenue: number;
   }[];
-  const orders = db
+  const orders = await db
     .prepare(
-      `SELECT id, table_number, order_type, status, payment_method,
+      `SELECT id, table_number, order_type,
+              CASE WHEN status IN (${SALES_STATUSES}) AND ready_at IS NOT NULL
+                THEN 'served' ELSE status END AS status,
+              payment_method,
               payment_status, subtotal, service_charge, total, created_at,
               confirmed_at, completed_at, cancelled_at
        FROM orders o
@@ -251,7 +261,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     completed_at: string | null;
     cancelled_at: string | null;
   }[];
-  const orderItems = db
+  const orderItems = await db
     .prepare(
       `SELECT oi.order_id, oi.name, oi.variant_name, oi.extras,
               oi.sugar_level, oi.quantity, oi.price_at_time
@@ -269,17 +279,18 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     quantity: number;
     price_at_time: number;
   }[];
-  const waitStats = db
+  const waitStats = await db
   .prepare(
     `SELECT COALESCE(AVG((julianday(o.ready_at) - julianday(o.confirmed_at)) * 1440), 0) AS average_wait_minutes,
             COUNT(*) AS sample_count
      FROM orders o
-     WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+     WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+       AND o.payment_status = 'verified'
        AND o.confirmed_at IS NOT NULL AND o.ready_at IS NOT NULL
        AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}`
   )
   .get(...baseArgs) as { average_wait_minutes: number; sample_count: number };
-  const paymentVerificationCounts = db
+  const paymentVerificationCounts = await db
   .prepare(
     `SELECT
        SUM(CASE WHEN o.payment_status = 'pending' THEN 1 ELSE 0 END) AS pending,
@@ -293,7 +304,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   verified: number | null;
   rejected: number | null;
   };
-  const averageRating = db
+  const averageRating = await db
   .prepare(
     `SELECT COALESCE(AVG(r.rating), 0) AS average_rating, COUNT(*) AS review_count
      FROM reviews r
@@ -301,20 +312,21 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
      WHERE DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}`
   )
   .get(...baseArgs) as { average_rating: number; review_count: number };
-  const itemsOutOfStock = db
+  const itemsOutOfStock = await db
   .prepare(
     `SELECT COUNT(*) AS count FROM menu_items
      WHERE is_active = 1 AND stock_tracking_enabled = 1 AND stock_status = 'out'`
   )
   .get() as { count: number };
-  const heatmap = db
+  const heatmap = await db
   .prepare(
     `SELECT CAST(strftime('%w', o.created_at) AS INTEGER) AS weekday,
             CAST(strftime('%H', o.created_at) AS INTEGER) AS hour,
             COUNT(*) AS order_count,
             COALESCE(SUM(o.total), 0) AS revenue
      FROM orders o
-     WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+     WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+       AND o.payment_status = 'verified'
        AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
      GROUP BY weekday, hour ORDER BY weekday, hour`
   )
@@ -324,12 +336,13 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   order_count: number;
   revenue: number;
   }[];
-  const hourlySales = db
+  const hourlySales = await db
   .prepare(
     `SELECT strftime('%Y-%m-%d %H:00', o.created_at) AS hour,
             COUNT(*) AS order_count, COALESCE(SUM(o.total), 0) AS revenue
      FROM orders o
-     WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+     WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+       AND o.payment_status = 'verified'
        AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
      GROUP BY hour ORDER BY hour`
   )
@@ -338,7 +351,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   order_count: number;
   revenue: number;
   }[];
-  const timingStats = db
+  const timingStats = await db
   .prepare(
     `SELECT
        COALESCE(AVG(CASE WHEN confirmed_at IS NOT NULL THEN
@@ -351,7 +364,10 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
          (julianday(ready_at) - julianday(preparing_at)) * 1440 END), 0) AS preparing_to_ready_minutes,
        COUNT(CASE WHEN ready_at IS NOT NULL AND preparing_at IS NOT NULL THEN 1 END) AS preparing_to_ready_samples
      FROM orders o
-     WHERE DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}`
+       WHERE o.status IN (${SALES_STATUSES})
+         AND o.ready_at IS NOT NULL
+         AND o.payment_status = 'verified'
+         AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}`
   )
   .get(...baseArgs) as {
   confirmation_minutes: number;
@@ -361,13 +377,17 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   preparing_to_ready_minutes: number;
   preparing_to_ready_samples: number;
   };
-  const pendingOrders = db
+  const pendingOrders = await db
   .prepare(
     `SELECT o.id, o.order_type, o.payment_method, o.payment_status,
             o.total, o.created_at, o.confirmed_at, o.status,
-            MAX(0, CAST((julianday('now','localtime') - julianday(o.created_at)) * 1440 AS INTEGER)) AS elapsed_minutes
+            CASE WHEN o.payment_status = 'rejected'
+              THEN 0
+              ELSE MAX(0, CAST((julianday('now','localtime') - julianday(o.created_at)) * 1440 AS INTEGER))
+            END AS elapsed_minutes
      FROM orders o
-     WHERE o.status IN ('pending','payment_pending','confirmed','preparing','ready')
+     WHERE o.status IN ('pending','payment_pending','confirmed','preparing')
+       AND o.payment_status != 'rejected'
        AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
      ORDER BY o.created_at ASC LIMIT 50`
   )
@@ -382,7 +402,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   status: string;
   elapsed_minutes: number;
   }[];
-  const pendingGcash = db
+  const pendingGcash = await db
   .prepare(
     `SELECT o.id, o.total, o.created_at,
             CASE WHEN ? = 1 AND o.payment_proof_url LIKE 'http%'
@@ -403,12 +423,12 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   inline_proof: number;
   elapsed_minutes: number;
   }[];
-  const menuPerformance = db
+  const menuPerformance = await db
   .prepare(
     `SELECT m.id AS menu_item_id, m.name, m.is_active, m.stock_status,
-            COALESCE(SUM(CASE WHEN o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified' THEN oi.quantity ELSE 0 END), 0) AS quantity_sold,
-            COALESCE(SUM(CASE WHEN o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified' THEN oi.price_at_time * oi.quantity ELSE 0 END), 0) AS revenue,
-            COALESCE(SUM(CASE WHEN o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+            COALESCE(SUM(CASE WHEN o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL AND o.payment_status = 'verified' THEN oi.quantity ELSE 0 END), 0) AS quantity_sold,
+            COALESCE(SUM(CASE WHEN o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL AND o.payment_status = 'verified' THEN oi.price_at_time * oi.quantity ELSE 0 END), 0) AS revenue,
+            COALESCE(SUM(CASE WHEN o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL AND o.payment_status = 'verified'
               AND oi.extras IS NOT NULL AND oi.extras NOT IN ('', '[]', 'null')
               THEN oi.quantity ELSE 0 END), 0) AS extras_quantity
      FROM menu_items m
@@ -428,7 +448,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   revenue: number;
   extras_quantity: number;
   }[];
-  const stockEvents = db
+  const stockEvents = await db
   .prepare(
     `SELECT sl.menu_item_id, m.name,
             SUM(CASE WHEN sl.action = 'out_of_stock' THEN 1 ELSE 0 END) AS out_events,
@@ -443,7 +463,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   out_events: number;
   last_event: string;
   }[];
-  const currentStock = db
+  const currentStock = await db
   .prepare(
     `SELECT id AS menu_item_id, name, stock_count, low_stock_threshold,
             stock_status, stock_note
@@ -460,7 +480,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   stock_status: string;
   stock_note: string | null;
   }[];
-  const waiterCalls = db
+  const waiterCalls = await db
   .prepare(
     `SELECT wr.id, wr.request_type, wr.status, wr.created_at,
             wr.acknowledged_at, wr.resolved_at, wr.table_number,
@@ -485,7 +505,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   hour: number;
   resolution_minutes: number | null;
   }[];
-  const waiterReasonCounts = db
+  const waiterReasonCounts = await db
   .prepare(
     `SELECT wr.request_type, CAST(strftime('%H', wr.created_at) AS INTEGER) AS hour,
             COUNT(*) AS call_count
@@ -500,7 +520,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   hour: number;
   call_count: number;
   }[];
-  const recentReviews = db
+  const recentReviews = await db
   .prepare(
     `SELECT r.id, r.rating, r.customer_name, r.comment, r.photo_url, r.created_at
      FROM reviews r JOIN orders o ON o.id = r.order_id
@@ -515,7 +535,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   photo_url: string | null;
   created_at: string;
   }[];
-  const ratingDistribution = db
+  const ratingDistribution = await db
   .prepare(
     `SELECT r.rating, COUNT(*) AS review_count
      FROM reviews r JOIN orders o ON o.id = r.order_id
@@ -523,11 +543,12 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
      GROUP BY r.rating ORDER BY r.rating`
   )
   .all(...baseArgs) as { rating: number; review_count: number }[];
-  const orderTypeMix = db
+  const orderTypeMix = await db
   .prepare(
     `SELECT o.order_type, COUNT(*) AS order_count, COALESCE(SUM(o.total), 0) AS revenue
      FROM orders o
-     WHERE o.status IN (${SALES_STATUSES}) AND o.payment_status = 'verified'
+     WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
+       AND o.payment_status = 'verified'
        AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
      GROUP BY o.order_type ORDER BY revenue DESC`
   )
@@ -536,7 +557,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   order_count: number;
   revenue: number;
   }[];
-  const recentCancelled = db
+  const recentCancelled = await db
   .prepare(
     `SELECT cancellation_reason, COUNT(*) AS order_count
      FROM orders o
@@ -548,7 +569,7 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   cancellation_reason: string | null;
   order_count: number;
   }[];
-  const paymentBalances = db
+  const paymentBalances = await db
   .prepare(
     `SELECT p.payment_method, p.status, COUNT(*) AS payment_count,
             COALESCE(SUM(p.amount), 0) AS amount,
@@ -749,19 +770,27 @@ function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     },
     insights: {
       revenue_trend:
-        revenueChange === null
-          ? "Not enough previous-period sales to compare."
-          : revenueChange > 0
-            ? `Revenue increased ${revenueChange}% versus the previous period.`
-            : revenueChange < 0
-              ? `Revenue decreased ${Math.abs(revenueChange)}% versus the previous period.`
-              : "Revenue was unchanged versus the previous period.",
-      leading_product: products[0]
-        ? `${products[0].name} led with ${products[0].quantity_sold} sold.`
-        : "No confirmed sales were recorded in this period.",
-      busiest_hour: peakHours[0]
-        ? `The busiest hour was ${String(peakHours[0].hour).padStart(2, "0")}:00 with ${peakHours[0].order_count} orders.`
-        : "There is not enough order data to identify a peak hour.",
+        selectedOrderCount === 0
+          ? "No confirmed sales were recorded in this period. Start tracking once orders come in."
+          : revenueChange === null
+            ? "Not enough previous-period sales to compare yet."
+            : revenueChange > 0
+              ? `Revenue increased ${revenueChange}% versus the previous period.`
+              : revenueChange < 0
+                ? `Revenue decreased ${Math.abs(revenueChange)}% versus the previous period.`
+                : "Revenue was unchanged versus the previous period.",
+      leading_product:
+        selectedOrderCount === 0
+          ? "No confirmed sales were recorded in this period."
+          : products[0]
+            ? `${products[0].name} led with ${products[0].quantity_sold} sold, generating ${peso(Number(products[0].revenue))}.`
+            : "No confirmed sales were recorded in this period.",
+      busiest_hour:
+        selectedOrderCount === 0
+          ? "No order data yet to identify a peak hour."
+          : peakHours[0]
+            ? `The busiest hour was ${String(peakHours[0].hour).padStart(2, "0")}:00 with ${peakHours[0].order_count} orders.`
+            : "There is not enough order data to identify a peak hour.",
     },
   };
 }
@@ -813,14 +842,16 @@ export async function GET(request: Request) {
       }
     }
 
-    return Response.json({
-      ...reportFor({
+    const report = await reportFor({
         period: periodParam as ReportPeriod,
         start,
         end,
         orderType: orderType as ReportFilters["orderType"],
         paymentMethod: paymentMethod as ReportFilters["paymentMethod"],
-      }, params.get("include_proofs") !== "0"),
+      }, params.get("include_proofs") !== "0");
+
+    return Response.json({
+      ...report,
       generated_by: auth.user?.name || "Administrator",
       success: true,
     });

@@ -8,9 +8,9 @@ import {
 
 export const dynamic = "force-dynamic";
 
-function currentSsid() {
+async function currentSsid() {
   try {
-    return SettingsModel.get("wifi_ssid") || "MERLYLANE-WIFI";
+    return (await SettingsModel.get("wifi_ssid")) || "MERLYLANE-WIFI";
   } catch {
     return "MERLYLANE-WIFI";
   }
@@ -21,7 +21,7 @@ export async function GET(request: Request) {
     {
       connected: isCafeNetwork(request.headers),
       skipped: hasWifiSkipCookie(request.headers),
-      ssid: currentSsid(),
+      ssid: await currentSsid(),
       ip: clientIp(request.headers),
       success: true,
     },

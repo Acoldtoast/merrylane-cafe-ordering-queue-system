@@ -1,12 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { PortalShell } from "@/components/PortalShell";
+import { usePathname } from "next/navigation";
 import { adminNav } from "@/components/portalNav";
 import { CoffeeArt, artKindForCategory } from "@/components/CoffeeArt";
 import { Icon } from "@/components/Icons";
 import { LoadingDots } from "@/components/LoadingDots";
+import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
+import { usePolling } from "@/lib/usePolling";
 import type { Addon, Category, MenuItem, User } from "@/lib/types";
 import { peso } from "@/lib/format";
 
@@ -65,6 +68,7 @@ const emptyAddonForm: AddonForm = {
 };
 
 export function AdminMenuClient() {
+  const pathname = usePathname();
   const feedback = useFeedback();
   const [tab, setTab] = useState<Tab>("menu");
   const [items, setItems] = useState<MenuItem[]>([]);
@@ -77,6 +81,9 @@ export function AdminMenuClient() {
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [modal, setModal] = useState<"create" | "edit" | null>(null);
   const [form, setForm] = useState<ItemForm>(emptyForm);
+  const [savedForm, setSavedForm] = useState<ItemForm | null>(null);
+  const [deleteConfirmItem, setDeleteConfirmItem] = useState<MenuItem | null>(null);
+  const [deleteConfirmAddon, setDeleteConfirmAddon] = useState<Addon | null>(null);
   const [itemAttempted, setItemAttempted] = useState(false);
   const [saving, setSaving] = useState(false);
   const [accountForm, setAccountForm] = useState({
@@ -89,6 +96,7 @@ export function AdminMenuClient() {
   const [creatingAccount, setCreatingAccount] = useState(false);
   const [addonModal, setAddonModal] = useState<"create" | "edit" | null>(null);
   const [addonForm, setAddonForm] = useState<AddonForm>(emptyAddonForm);
+  const [savedAddonForm, setSavedAddonForm] = useState<AddonForm | null>(null);
   const [addonAttempted, setAddonAttempted] = useState(false);
   const [savingAddon, setSavingAddon] = useState(false);
   const [categoryModal, setCategoryModal] = useState(false);
@@ -102,9 +110,9 @@ export function AdminMenuClient() {
   const load = useCallback(async () => {
     try {
       const [menuRes, addonsRes, usersRes] = await Promise.all([
-        fetch("/api/menu?all=1", { cache: "no-store" }),
-        fetch("/api/addons?all=1", { cache: "no-store" }),
-        fetch("/api/users", { cache: "no-store" }),
+        fetchPortalApi("/api/menu?all=1", { cache: "no-store" }),
+        fetchPortalApi("/api/addons?all=1", { cache: "no-store" }),
+        fetchPortalApi("/api/users", { cache: "no-store" }),
       ]);
       const menuData = await menuRes.json();
       const addonData = await addonsRes.json();
@@ -127,6 +135,11 @@ export function AdminMenuClient() {
   useEffect(() => {
     load();
   }, [load]);
+  usePolling(load, 20_000, {
+    immediate: false,
+    enabled: pathname === "/admin/menu",
+    resources: ["menu", "accounts"],
+  });
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -143,6 +156,7 @@ export function AdminMenuClient() {
     const categoryId =
       categoryFilter !== "all" ? categoryFilter : String(categories[0]?.id || "");
     setForm({ ...emptyForm, category_id: categoryId });
+    setSavedForm(null);
     setItemAttempted(false);
     setModal("create");
   };
@@ -158,7 +172,7 @@ export function AdminMenuClient() {
         price_modifier: String(variant.price_modifier),
       });
     }
-    setForm({
+    const nextForm: ItemForm = {
       id: item.id,
       name: item.name,
       description: item.description || "",
@@ -176,7 +190,9 @@ export function AdminMenuClient() {
       is_best_seller: Boolean(item.is_best_seller),
       addonIds: item.extras.map((extra) => extra.id),
       optionGroups: Array.from(groups.values()),
-    });
+    };
+    setForm(nextForm);
+    setSavedForm(nextForm);
     setItemAttempted(false);
     setModal("edit");
   };
@@ -244,7 +260,7 @@ export function AdminMenuClient() {
 
     const result = await feedback.run(
       async () => {
-        const response = await fetch(
+        const response = await fetchPortalApi(
           editing ? `/api/menu/${form.id}` : "/api/menu",
           {
             method: editing ? "PATCH" : "POST",
@@ -371,7 +387,7 @@ export function AdminMenuClient() {
     const name = categoryName.trim();
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/categories", {
+        const response = await fetchPortalApi("/api/categories", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name }),
@@ -427,7 +443,7 @@ export function AdminMenuClient() {
     setError("");
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/categories", {
+        const response = await fetchPortalApi("/api/categories", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -501,7 +517,7 @@ export function AdminMenuClient() {
           : String(Object.values(payload)[0] ?? "");
     await feedback.run(
       async () => {
-        const response = await fetch(`/api/menu/${item.id}`, {
+        const response = await fetchPortalApi(`/api/menu/${item.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -536,10 +552,16 @@ export function AdminMenuClient() {
   };
 
   const deleteItem = async (item: MenuItem) => {
-    if (!window.confirm(`Remove “${item.name}” from the menu?`)) return;
+    setDeleteConfirmItem(item);
+  };
+
+  const confirmDeleteItem = async () => {
+    const item = deleteConfirmItem;
+    setDeleteConfirmItem(null);
+    if (!item) return;
     const result = await feedback.run(
       async () => {
-        const response = await fetch(`/api/menu/${item.id}`, { method: "DELETE" });
+        const response = await fetchPortalApi(`/api/menu/${item.id}`, { method: "DELETE" });
         const data = await response.json();
         if (!response.ok || !data.success) {
           throw new Error(data.error || "Could not remove the menu item.");
@@ -582,7 +604,7 @@ export function AdminMenuClient() {
     const account = { ...accountForm };
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/users", {
+        const response = await fetchPortalApi("/api/users", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(account),
@@ -621,7 +643,7 @@ export function AdminMenuClient() {
     if (!window.confirm(`Remove ${user.name}? They will lose access immediately.`)) return;
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/users", {
+        const response = await fetchPortalApi("/api/users", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: user.id }),
@@ -653,17 +675,20 @@ export function AdminMenuClient() {
 
   const openCreateAddon = () => {
     setAddonForm(emptyAddonForm);
+    setSavedAddonForm(null);
     setAddonAttempted(false);
     setAddonModal("create");
   };
 
   const openEditAddon = (addon: Addon) => {
-    setAddonForm({
+    const nextForm: AddonForm = {
       id: addon.id,
       name: addon.name,
       price_modifier: String(addon.price_modifier),
       is_active: Boolean(addon.is_active),
-    });
+    };
+    setAddonForm(nextForm);
+    setSavedAddonForm(nextForm);
     setAddonAttempted(false);
     setAddonModal("edit");
   };
@@ -686,7 +711,7 @@ export function AdminMenuClient() {
     };
     const result = await feedback.run(
       async () => {
-        const response = await fetch(
+        const response = await fetchPortalApi(
           editing ? `/api/addons/${addonForm.id}` : "/api/addons",
           {
             method: editing ? "PATCH" : "POST",
@@ -732,7 +757,7 @@ export function AdminMenuClient() {
     const visible = Boolean(payload.is_active);
     await feedback.run(
       async () => {
-        const response = await fetch(`/api/addons/${addon.id}`, {
+        const response = await fetchPortalApi(`/api/addons/${addon.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -762,16 +787,16 @@ export function AdminMenuClient() {
   };
 
   const deleteAddon = async (addon: Addon) => {
-    if (
-      !window.confirm(
-        `Delete “${addon.name}”? It will be removed from every menu item and the customer menu. Past orders keep their record.`
-      )
-    ) {
-      return;
-    }
+    setDeleteConfirmAddon(addon);
+  };
+
+  const confirmDeleteAddon = async () => {
+    const addon = deleteConfirmAddon;
+    setDeleteConfirmAddon(null);
+    if (!addon) return;
     const result = await feedback.run(
       async () => {
-        const response = await fetch(`/api/addons/${addon.id}`, { method: "DELETE" });
+        const response = await fetchPortalApi(`/api/addons/${addon.id}`, { method: "DELETE" });
         const data = await response.json();
         if (!response.ok || !data.success) {
           throw new Error(data.error || "Could not delete the add-on.");
@@ -799,15 +824,10 @@ export function AdminMenuClient() {
     if (result.ok) await load();
   };
 
+  if (loading) return <PortalPageSkeleton area="admin" />;
+
   return (
-    <PortalShell
-      area="admin"
-      title="Menu & people."
-      subtitle="Keep the menu current and the right people behind the counter."
-      contextLabel="Admin · Menu & accounts"
-      contextTitle={`${items.length} menu items · ${users.length} accounts`}
-      nav={adminNav}
-    >
+    <>
       {error && <div className="error-strip" style={{ marginBottom: 13 }}>{error}</div>}
 
       <div className="admin-tabs">
@@ -824,13 +844,6 @@ export function AdminMenuClient() {
           onClick={() => setTab("addons")}
         >
           Add-ons
-        </button>
-        <button
-          type="button"
-          className={`admin-tab ${tab === "accounts" ? "active" : ""}`}
-          onClick={() => setTab("accounts")}
-        >
-          Staff accounts
         </button>
       </div>
 
@@ -878,12 +891,7 @@ export function AdminMenuClient() {
 
           <div className="panel">
             <div className="panel-body tight">
-              {loading ? (
-                <div className="loading-block">
-                  <span className="spinner" /> Loading menu…
-                </div>
-              ) : (
-                <div className="data-table-wrap">
+              <div className="data-table-wrap admin-menu-items-table">
                   <table className="data-table data-table-stack">
                     <thead>
                       <tr>
@@ -968,8 +976,7 @@ export function AdminMenuClient() {
                       ))}
                     </tbody>
                   </table>
-                </div>
-              )}
+              </div>
             </div>
           </div>
         </>
@@ -996,7 +1003,7 @@ export function AdminMenuClient() {
                   No add-ons yet. Add your first topping or extra.
                 </div>
               ) : (
-                <div className="data-table-wrap">
+                <div className="data-table-wrap admin-menu-addons-table">
                   <table className="data-table data-table-stack">
                     <thead>
                       <tr>
@@ -1064,135 +1071,10 @@ export function AdminMenuClient() {
             </span>
           </div>
         </>
-      ) : (
-        <div className="admin-two">
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <h2>Team accounts</h2>
-                <p>Staff accounts use service tools; admin accounts manage menus and team settings.</p>
-              </div>
-              <span className="badge badge-cream">{users.length}</span>
-            </div>
-            <div className="panel-body">
-              <div className="account-list">
-                {users.map((user) => (
-                  <div className="account-row" key={user.id}>
-                    <span className="avatar">
-                      {user.name
-                        .split(" ")
-                        .map((part) => part[0])
-                        .slice(0, 2)
-                        .join("")}
-                    </span>
-                    <div className="account-info">
-                      <strong>{user.name}</strong>
-                      <span>{user.email}</span>
-                    </div>
-                    <span className={`badge ${user.role === "admin" ? "badge-dark" : "badge-cream"}`}>
-                      {user.role}
-                    </span>
-                    <button
-                      type="button"
-                      className="table-icon-btn danger"
-                      title="Remove account"
-                      onClick={() => removeAccount(user)}
-                    >
-                      <Icon name="trash" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <h2>Add an account</h2>
-                <p>Create credentials for a new team member.</p>
-              </div>
-            </div>
-            <div className="panel-body">
-              <div className="invite-form">
-                <div className="field">
-                  <label className="label" htmlFor="acc-name">Full name (required)</label>
-                  <input
-                    id="acc-name"
-                    className="input"
-                    value={accountForm.name}
-                    required
-                    aria-invalid={accountAttempted && !accountForm.name.trim()}
-                    onChange={(event) =>
-                      setAccountForm((current) => ({ ...current, name: event.target.value }))
-                    }
-                    placeholder="Juan Dela Cruz"
-                  />
-                </div>
-                <div className="field">
-                  <label className="label" htmlFor="acc-email">Email (required)</label>
-                  <input
-                    id="acc-email"
-                    className="input"
-                    type="email"
-                    value={accountForm.email}
-                    required
-                    aria-invalid={accountAttempted && !accountForm.email.trim()}
-                    onChange={(event) =>
-                      setAccountForm((current) => ({ ...current, email: event.target.value }))
-                    }
-                    placeholder="juan@merrylane.com"
-                  />
-                </div>
-                <div className="field">
-                  <label className="label" htmlFor="acc-role">Role</label>
-                  <select
-                    id="acc-role"
-                    className="select"
-                    value={accountForm.role}
-                    onChange={(event) =>
-                      setAccountForm((current) => ({ ...current, role: event.target.value }))
-                    }
-                  >
-                    <option value="staff">Staff</option>
-                    <option value="admin">Administrator</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label className="label" htmlFor="acc-password">Temporary password (required)</label>
-                  <input
-                    id="acc-password"
-                    className="input"
-                    type="text"
-                    value={accountForm.password}
-                    required
-                    aria-invalid={accountAttempted && !accountForm.password.trim()}
-                    onChange={(event) =>
-                      setAccountForm((current) => ({ ...current, password: event.target.value }))
-                    }
-                    placeholder="At least 6 characters"
-                  />
-                </div>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={creatingAccount}
-                  onClick={createAccount}
-                >
-                  {creatingAccount ? <LoadingDots label="Creating" /> : "Create account"}
-                </button>
-                <div className="payment-note" style={{ marginTop: 0 }}>
-                  <Icon name="shield" />
-                  <span>Share the temporary password privately. Accounts can be removed at any time.</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      ) : null}
 
       {modal && (
-        <div className="modal-backdrop" onClick={() => setModal(null)}>
+        <div className="modal-backdrop">
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-head">
               <h2>{modal === "edit" ? "Edit item" : "New menu item"}</h2>
@@ -1210,7 +1092,7 @@ export function AdminMenuClient() {
                   required
                   aria-invalid={itemAttempted && !form.name.trim()}
                   onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-                  placeholder="Spanish Latte"
+                  placeholder="Menu item name"
                 />
               </div>
               <div className="field">
@@ -1547,7 +1429,16 @@ export function AdminMenuClient() {
               <button type="button" className="btn btn-outline" onClick={() => setModal(null)}>
                 Cancel
               </button>
-              <button type="button" className="btn btn-primary" disabled={saving} onClick={saveItem}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={
+                  saving ||
+                  (modal === "edit" &&
+                    JSON.stringify(form) === JSON.stringify(savedForm))
+                }
+                onClick={saveItem}
+              >
                 {saving ? <LoadingDots label="Saving" /> : modal === "edit" ? "Save changes" : "Add to menu"}
               </button>
             </div>
@@ -1555,8 +1446,74 @@ export function AdminMenuClient() {
         </div>
       )}
 
+       {deleteConfirmItem && (
+        <div className="modal-backdrop">
+           <div className="modal" onClick={(event) => event.stopPropagation()}>
+             <div className="modal-head">
+               <h2>Remove menu item</h2>
+               <button type="button" onClick={() => setDeleteConfirmItem(null)} aria-label="Close">
+                 <Icon name="x" />
+               </button>
+             </div>
+             <div className="modal-body">
+               <p>
+                 Remove <strong>{deleteConfirmItem.name}</strong> from the menu?
+               </p>
+               <p style={{ marginTop: 8, fontWeight: 600, color: "var(--danger, #b91c1c)" }}>
+                 This action cannot be undone. Once removed, there is no turning it back.
+               </p>
+             </div>
+             <div className="modal-foot">
+               <button type="button" className="btn btn-outline" onClick={() => setDeleteConfirmItem(null)}>
+                 Cancel
+               </button>
+               <button
+                 type="button"
+                 className="btn btn-primary btn-danger"
+                 onClick={() => void confirmDeleteItem()}
+               >
+                 Remove
+               </button>
+             </div>
+           </div>
+         </div>
+       )}
+
+       {deleteConfirmAddon && (
+        <div className="modal-backdrop">
+           <div className="modal" onClick={(event) => event.stopPropagation()}>
+             <div className="modal-head">
+               <h2>Delete add-on</h2>
+               <button type="button" onClick={() => setDeleteConfirmAddon(null)} aria-label="Close">
+                 <Icon name="x" />
+               </button>
+             </div>
+             <div className="modal-body">
+               <p>
+                 Delete <strong>{deleteConfirmAddon.name}</strong>? It will be removed from every menu item and the customer menu.
+               </p>
+               <p style={{ marginTop: 8, fontWeight: 600, color: "var(--danger, #b91c1c)" }}>
+                 This action cannot be undone. Once removed, there is no turning it back.
+               </p>
+             </div>
+             <div className="modal-foot">
+               <button type="button" className="btn btn-outline" onClick={() => setDeleteConfirmAddon(null)}>
+                 Cancel
+               </button>
+               <button
+                 type="button"
+                 className="btn btn-primary btn-danger"
+                 onClick={() => void confirmDeleteAddon()}
+               >
+                 Delete
+               </button>
+             </div>
+           </div>
+         </div>
+       )}
+
       {categoryModal && (
-        <div className="modal-backdrop" onClick={() => setCategoryModal(false)}>
+        <div className="modal-backdrop">
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-head">
               <h2>Manage categories</h2>
@@ -1676,7 +1633,7 @@ export function AdminMenuClient() {
       )}
 
       {addonModal && (
-        <div className="modal-backdrop" onClick={() => setAddonModal(null)}>
+        <div className="modal-backdrop">
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-head">
               <h2>{addonModal === "edit" ? "Edit add-on" : "New add-on"}</h2>
@@ -1742,14 +1699,23 @@ export function AdminMenuClient() {
               <button type="button" className="btn btn-outline" onClick={() => setAddonModal(null)}>
                 Cancel
               </button>
-              <button type="button" className="btn btn-primary" disabled={savingAddon} onClick={saveAddon}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={
+                  savingAddon ||
+                  (addonModal === "edit" &&
+                    JSON.stringify(addonForm) === JSON.stringify(savedAddonForm))
+                }
+                onClick={saveAddon}
+              >
                 {savingAddon ? <LoadingDots label="Saving" /> : addonModal === "edit" ? "Save changes" : "Add add-on"}
               </button>
             </div>
           </div>
         </div>
       )}
-    </PortalShell>
+    </>
   );
 }
 

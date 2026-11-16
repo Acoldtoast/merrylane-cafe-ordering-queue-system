@@ -1,0 +1,376 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" viewBox="0 0 1600 1200">
+  <defs>
+    <style>
+      .actor { fill: #e1f0fa; stroke: #2c5282; stroke-width: 2; font-family: Arial, sans-serif; font-size: 14px; }
+      .module { fill: #f7fafc; stroke: #4a5568; stroke-width: 2; font-family: Arial, sans-serif; font-size: 13px; }
+      .db { fill: #faf5e7; stroke: #b7791f; stroke-width: 2; font-family: Arial, sans-serif; font-size: 13px; }
+      .legend-box { fill: #f0f0f0; stroke: #718096; stroke-width: 1; font-family: Arial, sans-serif; font-size: 12px; }
+      .title-text { font-family: Arial, sans-serif; font-size: 20px; font-weight: bold; fill: #1a202c; }
+      .sub-title-text { font-family: Arial, sans-serif; font-size: 16px; fill: #1a202c; }
+      .box-title { font-family: Arial, sans-serif; font-size: 15px; font-weight: bold; fill: #1a202c; }
+      .box-sub { font-family: Arial, sans-serif; font-size: 11px; fill: #4a5568; }
+      .line-solid { stroke: #2c5282; stroke-width: 2.5; fill: none; }
+      .line-dashed { stroke: #2c5282; stroke-width: 2; fill: none; stroke-dasharray: 6,4; }
+      .arrowhead { fill: #2c5282; }
+      .label-text { font-family: Arial, sans-serif; font-size: 11px; fill: #2d3748; }
+      .legend-text { font-family: Arial, sans-serif; font-size: 12px; fill: #1a202c; }
+      .system-border { fill: #ede9fe; stroke: #7c3aed; stroke-width: 2; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon fill="#2c5282" points="0 0, 10 3.5, 0 7"/>
+    </marker>
+    <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon fill="#2c5282" points="0 0, 10 3.5, 0 7"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1600" height="1200" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="800" y="40" text-anchor="middle" class="title-text">Merrylane Cafe — System Integration Diagram</text>
+  <text x="800" y="65" text-anchor="middle" class="sub-title-text">Next.js App Router · PGlite · Staff / Admin / Customer Portals</text>
+
+  <!-- ==================== LEFT: EXTERNAL ACTORS ==================== -->
+  
+  <!-- Staff -->
+  <g transform="translate(40, 100)">
+    <rect x="0" y="0" width="200" height="120" class="actor" rx="8"/>
+    <text x="100" y="28" text-anchor="middle" class="box-title">Staff</text>
+    <text x="100" y="45" text-anchor="middle" class="box-sub">PIN / session access</text>
+    <text x="100" y="60" text-anchor="middle" class="box-sub">Record entry and review</text>
+    <text x="100" y="75" text-anchor="middle" class="box-sub">Dashboard / validation views</text>
+    <text x="100" y="90" text-anchor="middle" class="box-sub">Excel upload and download</text>
+  </g>
+
+  <!-- Admin -->
+  <g transform="translate(40, 280)">
+    <rect x="0" y="0" width="200" height="120" class="actor" rx="8"/>
+    <text x="100" y="28" text-anchor="middle" class="box-title">Admin</text>
+    <text x="100" y="45" text-anchor="middle" class="box-sub">Admin actions / results</text>
+    <text x="100" y="60" text-anchor="middle" class="box-sub">Admin sign-in / admin forms</text>
+    <text x="100" y="75" text-anchor="middle" class="box-sub">Rendered HTML responses</text>
+  </g>
+
+  <!-- Customer -->
+  <g transform="translate(40, 460)">
+    <rect x="0" y="0" width="200" height="120" class="actor" rx="8"/>
+    <text x="100" y="28" text-anchor="middle" class="box-title">Customer / Guest</text>
+    <text x="100" y="45" text-anchor="middle" class="box-sub">QR table access</text>
+    <text x="100" y="60" text-anchor="middle" class="box-sub">Menu browse &amp; order</text>
+    <text x="100" y="75" text-anchor="middle" class="box-sub">Payment &amp; status</text>
+  </g>
+
+  <!-- ==================== CENTER: SYSTEM BOUNDARY ==================== -->
+  <g transform="translate(260, 40)">
+    <rect x="0" y="0" width="980" height="1020" class="system-border" rx="12"/>
+    <text x="490" y="30" text-anchor="middle" class="sub-title-text">Merrylane Cafe — Next.js App Router System</text>
+
+    <!-- Staff Portal Module -->
+    <g transform="translate(30, 60)">
+      <rect x="0" y="0" width="300" height="200" class="module" rx="8"/>
+      <text x="150" y="25" text-anchor="middle" class="box-title">Staff Portal</text>
+      <text x="150" y="40" text-anchor="middle" class="box-sub">PIN / session access</text>
+      <text x="150" y="54" text-anchor="middle" class="box-sub">Sessions · Permissions · CSRF</text>
+      <text x="150" y="68" text-anchor="middle" class="box-sub">Server-side template rendering</text>
+      <text x="150" y="82" text-anchor="middle" class="box-sub">JSON results / validation errors</text>
+      <text x="150" y="96" text-anchor="middle" class="box-sub">Submitted entries &amp; import options</text>
+    </g>
+
+    <g transform="translate(340, 60)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Staff Board</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Order queue</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Preparing / Ready / Done</text>
+    </g>
+
+    <g transform="translate(340, 140)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Staff Payments</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">GCash verification</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Balance payments</text>
+    </g>
+
+    <g transform="translate(340, 220)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Staff Stock</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Portions left</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Stock updates</text>
+    </g>
+
+    <g transform="translate(340, 300)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Staff Requests</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Waiter calls</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Water / extras / questions</text>
+    </g>
+
+    <!-- Admin Portal Module -->
+    <g transform="translate(30, 280)">
+      <rect x="0" y="0" width="300" height="320" class="module" rx="8"/>
+      <text x="150" y="25" text-anchor="middle" class="box-title">Admin Portal</text>
+      <text x="150" y="40" text-anchor="middle" class="box-sub">Admin actions / results</text>
+      <text x="150" y="54" text-anchor="middle" class="box-sub">Account authentication · Sessions</text>
+      <text x="150" y="68" text-anchor="middle" class="box-sub">Permissions · CSRF protection</text>
+      <text x="150" y="82" text-anchor="middle" class="box-sub">PIN changes invalidate shared</text>
+      <text x="150" y="94" text-anchor="middle" class="box-sub">workspace sessions</text>
+    </g>
+
+    <g transform="translate(340, 280)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Admin Overview</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Today's numbers</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Sales &amp; queues</text>
+    </g>
+
+    <g transform="translate(340, 360)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Admin Analytics</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Sales trends</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Forecast &amp; best sellers</text>
+    </g>
+
+    <g transform="translate(340, 440)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Admin Menu</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Menu &amp; accounts</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Stock &amp; add-ons</text>
+    </g>
+
+    <g transform="translate(340, 520)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Admin Hours</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Hours &amp; tables</text>
+    </g>
+
+    <g transform="translate(340, 600)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Admin Reviews</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Customer feedback</text>
+    </g>
+
+    <g transform="translate(340, 680)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Admin Activity</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Activity log</text>
+    </g>
+
+    <!-- Customer Portal Module -->
+    <g transform="translate(30, 620)">
+      <rect x="0" y="0" width="300" height="280" class="module" rx="8"/>
+      <text x="150" y="25" text-anchor="middle" class="box-title">Customer Portal</text>
+      <text x="150" y="40" text-anchor="middle" class="box-sub">QR table access</text>
+      <text x="150" y="54" text-anchor="middle" class="box-sub">Menu browse &amp; order</text>
+      <text x="150" y="68" text-anchor="middle" class="box-sub">Payment &amp; status</text>
+      <text x="150" y="82" text-anchor="middle" class="box-sub">Welcome · Menu · Item</text>
+      <text x="150" y="94" text-anchor="middle" class="box-sub">Cart · Confirm · Thanks</text>
+    </g>
+
+    <g transform="translate(340, 620)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Customer Welcome</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Table selection</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Ordering window</text>
+    </g>
+
+    <g transform="translate(340, 700)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Customer Menu</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Browse items</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Variants &amp; add-ons</text>
+    </g>
+
+    <g transform="translate(340, 780)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Customer Cart</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Review order</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Payment method</text>
+    </g>
+
+    <g transform="translate(340, 860)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Customer Payment</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">GCash / Counter</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Payment proof</text>
+    </g>
+
+    <g transform="translate(340, 940)">
+      <rect x="0" y="0" width="130" height="70" class="module" rx="6"/>
+      <text x="65" y="22" text-anchor="middle" class="box-title">Customer Status</text>
+      <text x="65" y="36" text-anchor="middle" class="box-sub">Order status</text>
+      <text x="65" y="48" text-anchor="middle" class="box-sub">Queue number</text>
+    </g>
+
+    <!-- Auth Module -->
+    <g transform="translate(340, 1030)">
+      <rect x="0" y="0" width="300" height="140" class="module" rx="8"/>
+      <text x="150" y="25" text-anchor="middle" class="box-title">Auth Module</text>
+      <text x="150" y="40" text-anchor="middle" class="box-sub">JWT httpOnly cookies</text>
+      <text x="150" y="54" text-anchor="middle" class="box-sub">login · verify · heartbeat · unlock</text>
+      <text x="150" y="68" text-anchor="middle" class="box-sub">Role-based: admin \| staff</text>
+      <text x="150" y="82" text-anchor="middle" class="box-sub">Single session per browser</text>
+    </g>
+
+    <g transform="translate(660, 60)">
+      <rect x="0" y="0" width="280" height="200" class="module" rx="8"/>
+      <text x="140" y="25" text-anchor="middle" class="box-title">API Routes</text>
+      <text x="140" y="40" text-anchor="middle" class="box-sub">REST endpoints</text>
+      <text x="140" y="54" text-anchor="middle" class="box-sub">GET / POST / PATCH / DELETE</text>
+      <text x="140" y="68" text-anchor="middle" class="box-sub">JSON responses</text>
+    </g>
+
+    <g transform="translate(660, 270)">
+      <rect x="0" y="0" width="280" height="140" class="module" rx="6"/>
+      <text x="140" y="22" text-anchor="middle" class="box-title">/api/auth/*</text>
+      <text x="140" y="36" text-anchor="middle" class="box-sub">Login / verify / heartbeat / unlock</text>
+    </g>
+
+    <g transform="translate(660, 420)">
+      <rect x="0" y="0" width="280" height="70" class="module" rx="6"/>
+      <text x="140" y="22" text-anchor="middle" class="box-title">/api/analytics/overview</text>
+      <text x="140" y="36" text-anchor="middle" class="box-sub">Admin dashboard numbers</text>
+    </g>
+
+    <g transform="translate(660, 500)">
+      <rect x="0" y="0" width="280" height="70" class="module" rx="6"/>
+      <text x="140" y="22" text-anchor="middle" class="box-title">/api/menu</text>
+      <text x="140" y="36" text-anchor="middle" class="box-sub">CRUD menu items</text>
+    </g>
+
+    <g transform="translate(660, 580)">
+      <rect x="0" y="0" width="280" height="70" class="module" rx="6"/>
+      <text x="140" y="22" text-anchor="middle" class="box-title">/api/stock</text>
+      <text x="140" y="36" text-anchor="middle" class="box-sub">Stock tracking &amp; logs</text>
+    </g>
+
+    <g transform="translate(660, 660)">
+      <rect x="0" y="0" width="280" height="70" class="module" rx="6"/>
+      <text x="140" y="22" text-anchor="middle" class="box-title">/api/orders</text>
+      <text x="140" y="36" text-anchor="middle" class="box-sub">Order lifecycle</text>
+    </g>
+
+    <g transform="translate(660, 740)">
+      <rect x="0" y="0" width="280" height="70" class="module" rx="6"/>
+      <text x="140" y="22" text-anchor="middle" class="box-title">/api/categories</text>
+      <text x="140" y="36" text-anchor="middle" class="box-sub">Menu categories</text>
+    </g>
+
+    <g transform="translate(660, 820)">
+      <rect x="0" y="0" width="280" height="70" class="module" rx="6"/>
+      <text x="140" y="22" text-anchor="middle" class="box-title">/api/reviews</text>
+      <text x="140" y="36" text-anchor="middle" class="box-sub">Customer reviews</text>
+    </g>
+
+    <g transform="translate(660, 900)">
+      <rect x="0" y="0" width="280" height="70" class="module" rx="6"/>
+      <text x="140" y="22" text-anchor="middle" class="box-title">/api/waiter</text>
+      <text x="140" y="36" text-anchor="middle" class="box-sub">Waiter requests</text>
+    </g>
+
+    <g transform="translate(660, 980)">
+      <rect x="0" y="0" width="280" height="70" class="module" rx="6"/>
+      <text x="140" y="22" text-anchor="middle" class="box-title">/api/network</text>
+      <text x="140" y="36" text-anchor="middle" class="box-sub">Network status</text>
+    </g>
+  </g>
+
+  <!-- ==================== RIGHT: DATABASE ==================== -->
+  <g transform="translate(1260, 340)">
+    <rect x="0" y="0" width="300" height="420" class="db" rx="12"/>
+    <text x="150" y="30" text-anchor="middle" class="box-title">PGlite Database</text>
+    <text x="150" y="46" text-anchor="middle" class="box-sub">data/merrylane-pglite</text>
+    <text x="150" y="60" text-anchor="middle" class="box-sub">WAL mode · Foreign keys ON</text>
+    <text x="150" y="78" text-anchor="middle" class="box-sub">Users · Orders · Order items</text>
+    <text x="150" y="92" text-anchor="middle" class="box-sub">Menu items · Categories · Addons</text>
+    <text x="150" y="106" text-anchor="middle" class="box-sub">Stock logs · Activity logs</text>
+    <text x="150" y="120" text-anchor="middle" class="box-sub">Settings · Waiter requests</text>
+    <text x="150" y="134" text-anchor="middle" class="box-sub">Reviews</text>
+  </g>
+
+  <!-- ==================== CONNECTIONS: Actors to System ==================== -->
+  <!-- Staff to Staff Portal -->
+  <line x1="240" y1="160" x2="260" y2="160" class="line-solid" marker-end="url(#arrowhead)"/>
+  <text x="245" y="145" class="label-text">HTTP request</text>
+  <text x="245" y="157" class="label-text">Forms / JSON</text>
+  <text x="245" y="169" class="label-text">PIN / session access</text>
+
+  <!-- Staff Portal to Staff -->
+  <line x1="260" y1="250" x2="240" y2="250" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="245" y="235" class="label-text">Returned data</text>
+  <text x="245" y="247" class="label-text">/ response</text>
+
+  <!-- Admin to Admin Portal -->
+  <line x1="240" y1="340" x2="260" y2="340" class="line-solid" marker-end="url(#arrowhead)"/>
+  <text x="245" y="325" class="label-text">HTTP request</text>
+  <text x="245" y="337" class="label-text">Admin actions / results</text>
+
+  <!-- Admin Portal to Admin -->
+  <line x1="260" y1="430" x2="240" y2="430" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="245" y="415" class="label-text">Returned data</text>
+  <text x="245" y="427" class="label-text">/ response</text>
+
+  <!-- Customer to Customer Portal -->
+  <line x1="240" y1="520" x2="260" y2="520" class="line-solid" marker-end="url(#arrowhead)"/>
+  <text x="245" y="505" class="label-text">HTTP request</text>
+  <text x="245" y="517" class="label-text">QR table access</text>
+  <text x="245" y="529" class="label-text">HTML · CSS · JavaScript</text>
+
+  <!-- Customer Portal to Customer -->
+  <line x1="260" y1="610" x2="240" y2="610" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="245" y="595" class="label-text">Returned data</text>
+  <text x="245" y="607" class="label-text">/ response</text>
+
+  <!-- ==================== CONNECTIONS: System to Database ==================== -->
+  <!-- Staff Portal to DB -->
+  <line x1="1240" y1="420" x2="1260" y2="420" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="1255" y="405" class="label-text">Read / write</text>
+  <text x="1255" y="417" class="label-text">Records · Entries</text>
+
+  <!-- Admin Portal to DB -->
+  <line x1="1240" y1="520" x2="1260" y2="520" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="1255" y="505" class="label-text">Read / write</text>
+  <text x="1255" y="517" class="label-text">Record queries ·</text>
+  <text x="1255" y="529" class="label-text">Transactional writes</text>
+
+  <!-- Customer Portal to DB -->
+  <line x1="1240" y1="620" x2="1260" y2="620" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="1255" y="605" class="label-text">Read / write</text>
+  <text x="1255" y="617" class="label-text">Orders · Payments</text>
+
+  <!-- Auth Module to DB -->
+  <line x1="540" y1="1060" x2="1240" y2="420" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="880" y="730" class="label-text" transform="rotate(-30 880 730)">Read / write</text>
+  <text x="880" y="742" class="label-text" transform="rotate(-30 880 742)">Session tokens</text>
+
+  <!-- API Routes to DB -->
+  <line x1="940" y1="1080" x2="1240" y2="560" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="1080" y="830" class="label-text" transform="rotate(-45 1080 830)">Read / write</text>
+  <text x="1080" y="842" class="label-text" transform="rotate(-45 1080 842)">All domain data</text>
+
+  <!-- ==================== Connections: Actors to Database ==================== -->
+  <!-- Staff to DB -->
+  <line x1="240" y1="220" x2="1260" y2="420" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="740" y="330" class="label-text" transform="rotate(-5 740 330)">Read / write</text>
+  <text x="740" y="342" class="label-text" transform="rotate(-5 740 342)">Entries / uploads</text>
+
+  <!-- Admin to DB -->
+  <line x1="240" y1="400" x2="1260" y2="520" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="740" y="480" class="label-text" transform="rotate(-5 740 480)">SQL queries / writes</text>
+  <text x="740" y="492" class="label-text" transform="rotate(-5 740 492)">Users / groups / sessions</text>
+
+  <!-- Customer to DB -->
+  <line x1="240" y1="580" x2="1260" y2="620" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+  <text x="740" y="610" class="label-text" transform="rotate(-5 740 610)">Read / write</text>
+  <text x="740" y="622" class="label-text" transform="rotate(-5 740 622)">Orders · Payments</text>
+
+  <!-- ==================== LEGEND ==================== -->
+  <g transform="translate(40, 1080)">
+    <text x="0" y="20" class="sub-title-text">Legend</text>
+    <rect x="0" y="30" width="220" height="60" class="legend-box" rx="6"/>
+    <line x1="20" y1="50" x2="80" y2="50" class="line-solid" marker-end="url(#arrowhead)"/>
+    <text x="90" y="54" class="legend-text">Request / call / query / write</text>
+    <line x1="20" y1="70" x2="80" y2="70" class="line-dashed" marker-end="url(#arrowhead-dashed)"/>
+    <text x="90" y="74" class="legend-text">Returned data / response</text>
+    <text x="20" y="94" class="legend-text">● Dot = connection; crossing without dot = no join</text>
+  </g>
+</svg>

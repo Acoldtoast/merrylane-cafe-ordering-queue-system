@@ -5,6 +5,13 @@ import {
   ReviewModel,
   WaiterRequestModel,
 } from "@/lib/models";
+import {
+  preparationEtaHasPassed,
+  preparationMinutesElapsed,
+  preparationReminderLevel,
+  readyMinutesElapsed,
+  readyReminderLevel,
+} from "@/lib/orderLifecycle";
 import type { Order, Review } from "@/lib/types";
 
 type PortalNotification = {
@@ -16,15 +23,8 @@ type PortalNotification = {
   read: boolean;
 };
 
-function parseDate(value: string | null | undefined): Date | null {
-  if (!value) return null;
-  const normalized = value.includes("T") ? value : value.replace(" ", "T");
-  const date = new Date(normalized);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
 function orderCode(order: Order) {
-  return `#${String(order.id).padStart(3, "0")}`;
+  return `#${String(order.order_number ?? order.id).padStart(3, "0")}`;
 }
 
 function needsPaymentReview(order: Order) {
@@ -57,7 +57,7 @@ export async function GET(request: Request) {
   const entries: Omit<PortalNotification, "read">[] = [];
 
   if (user.role === "admin") {
-    for (const item of MenuItemModel.stockAlerts(10)) {
+    for (const item of await MenuItemModel.stockAlerts(10)) {
       entries.push({
         id: `admin-stock-${item.id}`,
         kind: "stock",
@@ -70,14 +70,16 @@ export async function GET(request: Request) {
       });
     }
 
-    for (const review of ReviewModel.all(5)) {
+    for (const review of await ReviewModel.all(5)) {
       entries.push(reviewNotification(review));
     }
   } else {
-    OrderModel.autoCancelUnpaidCounterOrders();
+    await OrderModel.autoCancelUnpaidCounterOrders();
     const now = Date.now();
 
-    for (const order of OrderModel.pendingPayments().filter(needsPaymentReview)) {
+    for (const order of (await OrderModel.pendingPayments()).filter(
+      needsPaymentReview
+    )) {
       entries.push({
         id: `payment-${order.id}`,
         kind: "payment",
@@ -87,7 +89,7 @@ export async function GET(request: Request) {
       });
     }
 
-    for (const payment of OrderModel.pendingBalancePayments()) {
+    for (const payment of await OrderModel.pendingBalancePayments()) {
       entries.push({
         id: `balance-payment-${payment.id}`,
         kind: "payment",
@@ -97,41 +99,63 @@ export async function GET(request: Request) {
       });
     }
 
-    for (const order of OrderModel.list(["preparing"], 500)) {
-      const prepStartedAt = parseDate(order.updated_at || order.created_at);
-      const eta = parseDate(order.estimated_ready_at);
-      const minutesPreparing = prepStartedAt
-        ? Math.floor((now - prepStartedAt.getTime()) / 60000)
-        : 0;
-      const etaExpired = Boolean(eta && eta.getTime() < now);
-      if (minutesPreparing <= 60 && !etaExpired) continue;
+    for (const order of await OrderModel.list(["preparing"], 500)) {
+      const minutesPreparing = preparationMinutesElapsed(order, now) ?? 0;
+      const etaExpired = preparationEtaHasPassed(order, now);
+      const reminderLevel = preparationReminderLevel(order, now);
+      if (reminderLevel === 0) continue;
 
       entries.push({
-        id: etaExpired ? `preparing-eta-${order.id}` : `preparing-${order.id}`,
+        id: `preparing-${order.id}-${reminderLevel}`,
         kind: "preparing",
-        title: etaExpired ? "Preparation ETA has passed" : "Order preparing over 1 hour",
+        title:
+          reminderLevel >= 3
+            ? "Urgent: preparation is overdue"
+            : reminderLevel === 2
+              ? "Preparation needs attention"
+              : etaExpired
+                ? "Preparation ETA has passed"
+                : "Order preparing over 1 hour",
         message: `${orderCode(order)} · Table ${String(order.table_number).padStart(2, "0")}${
           minutesPreparing > 60 ? ` · ${minutesPreparing} min preparing` : ""
-        }`,
+        }${etaExpired ? " · Mark served if already handed over" : ""}`,
         href: "/staff",
       });
     }
 
-    for (const order of OrderModel.recentUnpaidTimeoutCancellations()) {
+    for (const order of await OrderModel.list(["ready"], 500)) {
+      const reminderLevel = readyReminderLevel(order, now);
+      if (reminderLevel === 0) continue;
+      const minutesReady = readyMinutesElapsed(order, now) ?? 0;
+      entries.push({
+        id: `ready-${order.id}-${reminderLevel}`,
+        kind: "preparing",
+        title:
+          reminderLevel >= 3
+            ? "Urgent: served order still open"
+            : reminderLevel === 2
+              ? "Served order needs follow-up"
+              : "Confirm customer received order",
+        message: `${orderCode(order)} · Table ${String(order.table_number).padStart(2, "0")} · Served ${minutesReady} min ago`,
+        href: "/staff",
+      });
+    }
+
+    for (const order of await OrderModel.recentUnpaidTimeoutCancellations()) {
       const cancellationDate = order.cancelled_at?.slice(0, 10);
       entries.push({
         id: `unpaid-cancelled-${order.id}`,
         kind: "payment",
         title: "Cash order automatically cancelled",
         message: `${orderCode(order)} · Table ${String(order.table_number).padStart(2, "0")} · No payment recorded within 90 minutes`,
-        href: `/staff/payments?tab=verified${
-          cancellationDate ? `&date=${cancellationDate}` : ""
+        href: `/staff/receipt${
+          cancellationDate ? `?date=${cancellationDate}` : ""
         }#auto-cancelled`,
       });
     }
 
-    WaiterRequestModel.resolveAcknowledgedOlderThan(25);
-    for (const request of WaiterRequestModel.list("pending")) {
+    await WaiterRequestModel.resolveAcknowledgedOlderThan(25);
+    for (const request of await WaiterRequestModel.list("pending")) {
       const followUp = request.request_type === "Order follow-up";
       entries.push({
         id: `waiter-${request.id}`,
@@ -145,7 +169,7 @@ export async function GET(request: Request) {
     }
   }
 
-  const readIds = new Set(OrderModel.notificationReads(user.id));
+  const readIds = new Set(await OrderModel.notificationReads(user.id));
   const notifications: PortalNotification[] = entries
     .map((entry) => ({ ...entry, read: readIds.has(entry.id) }))
     .sort((first, second) => Number(first.read) - Number(second.read));
@@ -174,7 +198,7 @@ export async function PATCH(request: Request) {
   const validPattern =
     user.role === "admin"
       ? /^admin-(stock|review)-\d+$/
-      : /^(payment|balance-payment|preparing-eta|preparing|unpaid-cancelled|waiter)-\d+$/;
+      : /^(?:payment-\d+|balance-payment-\d+|preparing-eta-\d+|preparing-\d+(?:-\d+)?|ready-\d+-[1-3]|unpaid-cancelled-\d+|waiter-\d+)$/;
   const rawIds = Array.isArray(body.ids) ? body.ids : [body.id];
   const ids = rawIds.filter(
     (value): value is string => typeof value === "string" && validPattern.test(value)

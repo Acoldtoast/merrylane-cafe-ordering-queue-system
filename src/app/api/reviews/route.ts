@@ -7,7 +7,7 @@ export async function GET(request: Request) {
     const publicOrder = url.searchParams.get("order");
     if (publicOrder) {
       return Response.json({
-        review: ReviewModel.byOrder(Number(publicOrder)) || null,
+        review: (await ReviewModel.byOrder(Number(publicOrder))) || null,
         success: true,
       });
     }
@@ -27,8 +27,8 @@ export async function GET(request: Request) {
     }
 
     return Response.json({
-      reviews: ReviewModel.all(),
-      stats: ReviewModel.stats(),
+      reviews: await ReviewModel.all(),
+      stats: await ReviewModel.stats(),
       success: true,
     });
   } catch (error: any) {
@@ -73,7 +73,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const id = ReviewModel.create({
+    const id = await ReviewModel.create({
       order_id: Number(order_id),
       table_number: Number(table_number),
       rating: Number(rating),

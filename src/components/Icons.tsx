@@ -63,7 +63,11 @@ export type IconName =
   | "trending-down"
   | "help"
   | "external"
-  | "sad";
+  | "sad"
+  | "facebook"
+  | "twitter"
+  | "tiktok"
+  | "instagram";
 
 interface IconProps extends Omit<SVGProps<SVGSVGElement>, "name"> {
   name: IconName;
@@ -441,6 +445,26 @@ function content(name: IconName) {
         <>
           <circle cx="12" cy="12" r="9" />
           <path d="M8.5 10h.01M15.5 10h.01M8 16.2c.9-1.2 2.3-1.9 4-1.9s3.1.7 4 1.9" />
+        </>
+      );
+    case "facebook":
+      return (
+        <path d="M22 12a10 10 0 1 0-11.56 9.88v-6.99H8.08V12h2.36V9.8c0-2.33 1.39-3.62 3.52-3.62 1.02 0 2.08.18 2.08.18v2.29h-1.17c-1.15 0-1.51.71-1.51 1.44V12h2.57l-.41 2.89h-2.16v6.99A10 10 0 0 0 22 12Z" />
+      );
+    case "twitter":
+      return (
+        <path d="M23.95 4.57a10 10 0 0 1-2.82.77 4.93 4.93 0 0 0 2.16-2.72 9.99 9.99 0 0 1-3.13 1.2 4.92 4.92 0 0 0-8.38 4.48A13.98 13.98 0 0 1 1.64 3.16a4.82 4.82 0 0 0-.67 2.48 4.92 4.92 0 0 0 2.19 4.1 4.9 4.9 0 0 1-2.23-.62v.06a4.93 4.93 0 0 0 3.95 4.82 4.94 4.94 0 0 1-2.22.08 4.94 4.94 0 0 0 4.6 3.42A9.87 9.87 0 0 1 .96 19.54a13.94 13.94 0 0 0 7.55 2.21c9.06 0 14.01-7.5 14.01-14.01 0-.21 0-.43-.01-.64a10.01 10.01 0 0 0 2.46-2.53Z" />
+      );
+    case "tiktok":
+      return (
+        <path d="M16.8 3.5c.4 2.4 1.8 4 4.2 4.5v3.2a8.4 8.4 0 0 1-4.2-1.4v6.1a6.2 6.2 0 1 1-5.4-6.2v3.4a2.8 2.8 0 1 0 2 2.7V3.5h3.4Z" />
+      );
+    case "instagram":
+      return (
+        <>
+          <rect x="3.25" y="3.25" width="17.5" height="17.5" rx="5.25" />
+          <circle cx="12" cy="12" r="4.25" />
+          <circle cx="17.5" cy="6.75" r="1" fill="currentColor" stroke="none" />
         </>
       );
     default:

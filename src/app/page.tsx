@@ -1,16 +1,16 @@
-import Link from "next/link";
 import { Brand } from "@/components/Brand";
 import { Icon } from "@/components/Icons";
+import { CustomerOrderNowLink } from "@/components/CustomerOrderNowLink";
 import { SystemWalkthrough } from "@/components/SystemWalkthrough";
 import { SettingsModel } from "@/lib/models";
 
 export const dynamic = "force-dynamic";
 
-export default function Home() {
+export default async function Home() {
   let cafeLocation = "Lipa City, Batangas";
 
   try {
-    cafeLocation = SettingsModel.get("cafe_location") || cafeLocation;
+    cafeLocation = (await SettingsModel.get("cafe_location")) || cafeLocation;
   } catch {
     // The setup screen still works before the database is initialized.
   }
@@ -24,9 +24,9 @@ export default function Home() {
           <a href="#how-it-works">How it works</a>
           <a href="/login">Staff sign in</a>
         </nav>
-        <Link href="/customer/welcome?table=7" className="btn btn-primary btn-sm">
+        <CustomerOrderNowLink className="btn btn-primary btn-sm">
           Order now <Icon name="arrow-right" className="icon-sm" />
-        </Link>
+        </CustomerOrderNowLink>
       </header>
 
       <main className="landing-main">
@@ -45,12 +45,9 @@ export default function Home() {
             to the last crumb.
           </p>
           <div className="landing-actions">
-            <Link
-              href="/customer/welcome?table=7"
-              className="btn btn-primary btn-lg"
-            >
+            <CustomerOrderNowLink className="btn btn-primary btn-lg">
               <Icon name="qr" /> Order now
-            </Link>
+            </CustomerOrderNowLink>
             <a href="#portals" className="btn btn-outline btn-lg">
               Explore the system <Icon name="arrow-right" className="icon-sm" />
             </a>
@@ -159,9 +156,9 @@ export default function Home() {
             </p>
           </article>
         </div>
-        <Link href="/customer/welcome?table=7" className="btn btn-primary">
+        <CustomerOrderNowLink className="btn btn-primary">
           Start an order <Icon name="arrow-right" className="icon-sm" />
-        </Link>
+        </CustomerOrderNowLink>
       </section>
 
       <footer className="landing-footer">

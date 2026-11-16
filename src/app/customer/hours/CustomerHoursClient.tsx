@@ -2,6 +2,8 @@
 
 import { useCallback, useState } from "react";
 import { Icon } from "@/components/Icons";
+import { CustomerHoursContentSkeleton } from "@/components/CustomerHoursContentSkeleton";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { usePolling } from "@/lib/usePolling";
 
 interface DaySchedule {
@@ -36,7 +38,7 @@ export function CustomerHoursClient() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch("/api/settings", { cache: "no-store" });
+      const response = await fetchPortalApi("/api/settings", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok || !data.success || !data.settings) {
         throw new Error(data.error || "Unable to load cafe hours.");
@@ -51,7 +53,7 @@ export function CustomerHoursClient() {
     }
   }, []);
 
-  usePolling(load, 30_000);
+  usePolling(load, 30_000, { resources: ["hours", "settings"] });
 
   const today = new Intl.DateTimeFormat("en-US", {
     weekday: "long",
@@ -76,9 +78,10 @@ export function CustomerHoursClient() {
       {error ? (
         <div className="error-strip" role="alert">{error}</div>
       ) : !settings ? (
-        <div className="customer-hours-loading" role="status">
-          <span className="spinner" />
-          Loading cafe hours…
+        <div role="status" aria-busy="true" aria-label="Loading cafe hours">
+          <div aria-hidden="true">
+            <CustomerHoursContentSkeleton />
+          </div>
         </div>
       ) : (
         <div className="customer-hours-grid">

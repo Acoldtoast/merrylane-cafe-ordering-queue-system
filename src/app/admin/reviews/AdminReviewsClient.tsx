@@ -1,11 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { PortalShell } from "@/components/PortalShell";
+import { usePathname } from "next/navigation";
 import { adminNav } from "@/components/portalNav";
 import { Brand } from "@/components/Brand";
 import { Icon } from "@/components/Icons";
 import { useFeedback } from "@/components/Feedback";
+import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
+import { usePolling } from "@/lib/usePolling";
 import type { Review } from "@/lib/types";
 import { dateTimeLabel, fullDate, smartDateTime } from "@/lib/format";
 
@@ -16,6 +19,7 @@ interface ReviewStats {
 }
 
 export function AdminReviewsClient() {
+  const pathname = usePathname();
   const feedback = useFeedback();
   const [reviews, setReviews] = useState<Review[]>([]);
   const [stats, setStats] = useState<ReviewStats>({
@@ -31,7 +35,7 @@ export function AdminReviewsClient() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch("/api/reviews", { cache: "no-store" });
+      const response = await fetchPortalApi("/api/reviews", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || "Unable to load reviews.");
       setReviews(data.reviews || []);
@@ -48,6 +52,11 @@ export function AdminReviewsClient() {
   useEffect(() => {
     load();
   }, [load]);
+  usePolling(load, 30_000, {
+    immediate: false,
+    enabled: pathname === "/admin/reviews",
+    resources: ["reviews"],
+  });
 
   const filtered = useMemo(() => {
     if (filter === "all") return reviews;
@@ -64,89 +73,86 @@ export function AdminReviewsClient() {
     await feedback.run(
       async () => {
         if (document.fonts?.ready) await document.fonts.ready;
+        const [reviewPhoto, brandLogo] = await Promise.all([
+          selected.photo_url ? loadReviewPhoto(selected.photo_url) : Promise.resolve(null),
+          loadBrandLogo(),
+        ]);
         const canvas = document.createElement("canvas");
-      canvas.width = 1080;
-      canvas.height = 1080;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("Canvas is unavailable in this browser.");
+        canvas.width = 1080;
+        canvas.height = 1080;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Canvas is unavailable in this browser.");
 
-      const gradient = ctx.createRadialGradient(880, 140, 30, 540, 540, 900);
-      gradient.addColorStop(0, "#5a3d2b");
-      gradient.addColorStop(0.55, "#38261c");
-      gradient.addColorStop(1, "#241811");
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, 1080, 1080);
+        const gradient = ctx.createRadialGradient(880, 140, 30, 540, 540, 900);
+        gradient.addColorStop(0, "#5a3d2b");
+        gradient.addColorStop(0.55, "#38261c");
+        gradient.addColorStop(1, "#241811");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 1080, 1080);
 
-      ctx.strokeStyle = "rgba(200,162,116,0.16)";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(1010, 1010, 300, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(1010, 1010, 210, 0, Math.PI * 2);
-      ctx.stroke();
+        ctx.strokeStyle = "rgba(200,162,116,0.16)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(1010, 1010, 300, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(1010, 1010, 210, 0, Math.PI * 2);
+        ctx.stroke();
 
-      ctx.strokeStyle = "rgba(200,162,116,0.28)";
-      ctx.beginPath();
-      ctx.arc(120, 940, 150, 0, Math.PI * 2);
-      ctx.stroke();
+        ctx.strokeStyle = "rgba(200,162,116,0.28)";
+        ctx.beginPath();
+        ctx.arc(120, 940, 150, 0, Math.PI * 2);
+        ctx.stroke();
 
-      // Brand mark
-      ctx.fillStyle = "#c8a274";
-      roundRect(ctx, 92, 88, 78, 78, 20);
-      ctx.fill();
-      ctx.fillStyle = "#38261c";
-      ctx.font = "700 40px Georgia, 'Times New Roman', serif";
-      ctx.textAlign = "center";
-      ctx.fillText("m", 131, 142);
+        ctx.drawImage(brandLogo, 92, 80, 360, 158);
 
-      ctx.textAlign = "left";
-      ctx.fillStyle = "#fff6e8";
-      ctx.font = "600 40px Georgia, 'Times New Roman', serif";
-      ctx.fillText("merrylane", 190, 130);
-      ctx.fillStyle = "rgba(255,246,232,0.48)";
-      ctx.font = "700 17px 'Segoe UI', Arial, sans-serif";
-      ctx.fillText("LIPA CITY · EST. 2021", 192, 157);
+        // Stars
+        ctx.fillStyle = "#c8a274";
+        ctx.font = "34px 'Segoe UI Symbol', Arial, sans-serif";
+        const stars = "★★★★★".slice(0, selected.rating) + "☆☆☆☆☆".slice(0, 5 - selected.rating);
+        ctx.fillText(stars, 92, 310);
 
-      // Stars
-      ctx.fillStyle = "#c8a274";
-      ctx.font = "34px 'Segoe UI Symbol', Arial, sans-serif";
-      const stars = "★★★★★".slice(0, selected.rating) + "☆☆☆☆☆".slice(0, 5 - selected.rating);
-      ctx.fillText(stars, 92, 310);
+        ctx.fillStyle = "rgba(255,246,232,0.42)";
+        ctx.font = "700 19px 'Segoe UI', Arial, sans-serif";
+        ctx.fillText("A NOTE FROM OUR TABLE", 94, 358);
 
-      ctx.fillStyle = "rgba(255,246,232,0.42)";
-      ctx.font = "700 19px 'Segoe UI', Arial, sans-serif";
-      ctx.fillText("A NOTE FROM OUR TABLE", 94, 358);
+        // Keep the text in the left column when a photo uses the open right side.
+        const quote = selected.comment?.trim() || "A lovely cup, and an even lovelier visit.";
+        ctx.fillStyle = "#fff6e8";
+        wrapText(
+          ctx,
+          `“${quote}”`,
+          92,
+          460,
+          reviewPhoto ? 420 : 880,
+          76,
+          "500 56px Georgia, 'Times New Roman', serif",
+          5
+        );
 
-      // Quote
-      const quote = selected.comment?.trim() || "A lovely cup, and an even lovelier visit.";
-      ctx.fillStyle = "#fff6e8";
-      wrapText(ctx, `“${quote}”`, 92, 460, 880, 76, "500 56px Georgia, 'Times New Roman', serif");
+        if (reviewPhoto) {
+          drawImageContain(ctx, reviewPhoto, 570, 320, 418, 480, 14);
+        }
 
-      // Divider
-      ctx.strokeStyle = "rgba(200,162,116,0.35)";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(92, 852);
-      ctx.lineTo(560, 852);
-      ctx.stroke();
+        // Divider
+        ctx.strokeStyle = "rgba(200,162,116,0.35)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(92, 852);
+        ctx.lineTo(560, 852);
+        ctx.stroke();
 
-      ctx.fillStyle = "#fff6e8";
-      ctx.font = "600 30px Georgia, 'Times New Roman', serif";
-      ctx.fillText(selected.customer_name || "A Merrylane guest", 92, 916);
+        ctx.fillStyle = "#fff6e8";
+        ctx.font = "600 30px Georgia, 'Times New Roman', serif";
+        ctx.fillText(selected.customer_name || "A Merrylane guest", 92, 916);
 
-      ctx.fillStyle = "rgba(255,246,232,0.5)";
-      ctx.font = "500 20px 'Segoe UI', Arial, sans-serif";
-      ctx.fillText(
-        `Table ${String(selected.table_number).padStart(2, "0")} · ${fullDate(selected.created_at)}`,
-        92,
-        952
-      );
-
-      ctx.textAlign = "right";
-      ctx.fillStyle = "rgba(200,162,116,0.82)";
-      ctx.font = "600 22px Georgia, 'Times New Roman', serif";
-      ctx.fillText("merrylane cafe", 988, 952);
+        ctx.fillStyle = "rgba(255,246,232,0.5)";
+        ctx.font = "500 20px 'Segoe UI', Arial, sans-serif";
+        ctx.fillText(
+          `Table ${String(selected.table_number).padStart(2, "0")} · ${fullDate(selected.created_at)}`,
+          92,
+          952
+        );
 
         const link = document.createElement("a");
         link.download = `merrylane-review-${selected.id}.png`;
@@ -162,7 +168,7 @@ export function AdminReviewsClient() {
       {
         loading: {
           title: "Preparing the promo image…",
-          message: "Drawing a 1080 × 1080 card with the review and brand.",
+          message: "Drawing the review, brand, and photo if one was attached.",
         },
         success: (info) => ({
           eyebrow: "Downloaded",
@@ -180,15 +186,10 @@ export function AdminReviewsClient() {
     setExporting(false);
   };
 
+  if (loading) return <PortalPageSkeleton area="admin" />;
+
   return (
-    <PortalShell
-      area="admin"
-      title="Kind words, kept."
-      subtitle="Every review from every table — and a shareable promo image for the ones worth framing."
-      contextLabel="Admin · Reviews"
-      contextTitle={`${stats.total_reviews} reviews · ${stats.avg_rating || 0} average`}
-      nav={adminNav}
-    >
+    <>
       {error && <div className="error-strip" style={{ marginBottom: 13 }}>{error}</div>}
 
       <div className="stat-grid three">
@@ -249,11 +250,7 @@ export function AdminReviewsClient() {
             </div>
           </div>
           <div className="panel-body">
-            {loading ? (
-              <div className="loading-block">
-                <span className="spinner" /> Loading reviews…
-              </div>
-            ) : filtered.length === 0 ? (
+            {filtered.length === 0 ? (
               <div className="empty-panel" style={{ border: 0 }}>
                 <div className="empty-icon">
                   <Icon name="reviews" />
@@ -310,11 +307,11 @@ export function AdminReviewsClient() {
                         Order #{String(review.order_id).padStart(3, "0")}
                       </span>
                       {review.photo_url && (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
+                        <ReviewPhoto
+                          key={review.id}
                           className="review-photo-thumb"
                           src={review.photo_url}
-                          alt="Guest photo"
+                          alt="Photo shared with this review"
                         />
                       )}
                       {selected?.id === review.id && (
@@ -337,7 +334,7 @@ export function AdminReviewsClient() {
               </div>
             </div>
             <div className="panel-body">
-              <div className="export-preview">
+              <div className={`export-preview${selected?.photo_url ? " has-photo" : ""}`}>
                 <div className="export-brand">
                   <Brand href="" onDark />
                 </div>
@@ -356,6 +353,14 @@ export function AdminReviewsClient() {
                     "A lovely cup, and an even lovelier visit."}
                   ”
                 </div>
+                {selected?.photo_url && (
+                  <ReviewPhoto
+                    key={selected.id}
+                    className="export-photo"
+                    src={selected.photo_url}
+                    alt="Guest photo included with this review"
+                  />
+                )}
                 <div className="export-author">
                   {selected?.customer_name || "A Merrylane guest"} · Table{" "}
                   {selected ? String(selected.table_number).padStart(2, "0") : "—"}
@@ -400,7 +405,7 @@ export function AdminReviewsClient() {
                 <Icon name="image" />
                 <span>
                   Exports a 1080 × 1080 PNG with the Merrylane brand, star rating,
-                  quote, table, and date. Nothing is uploaded anywhere.
+                  quote, guest photo when available, table, and date. Nothing is uploaded anywhere.
                 </span>
               </div>
             </div>
@@ -448,7 +453,7 @@ export function AdminReviewsClient() {
           </div>
         </section>
       </div>
-    </PortalShell>
+    </>
   );
 }
 
@@ -469,6 +474,94 @@ function roundRect(
   ctx.closePath();
 }
 
+function ReviewPhoto({
+  src,
+  alt,
+  className,
+}: {
+  src: string;
+  alt: string;
+  className: string;
+}) {
+  const [unavailable, setUnavailable] = useState(false);
+  if (unavailable) {
+    return (
+      <div
+        className={`${className} review-photo-unavailable`}
+        role="img"
+        aria-label={`${alt} could not be displayed`}
+      >
+        Photo unavailable
+      </div>
+    );
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      className={className}
+      src={src}
+      alt={alt}
+      onError={() => setUnavailable(true)}
+    />
+  );
+}
+
+function loadReviewPhoto(source: string): Promise<HTMLImageElement> {
+  return loadCanvasImage(
+    source,
+    "The photo attached to this review could not be loaded."
+  );
+}
+
+function loadBrandLogo(): Promise<HTMLImageElement> {
+  return loadCanvasImage(
+    "/merrylane-logo-white.png",
+    "The Merrylane logo could not be loaded."
+  );
+}
+
+function loadCanvasImage(
+  source: string,
+  failureMessage: string
+): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    if (/^https?:\/\//i.test(source)) image.crossOrigin = "anonymous";
+    image.onload = () => {
+      if (image.naturalWidth === 0 || image.naturalHeight === 0) {
+        reject(new Error("The image is invalid."));
+      } else {
+        resolve(image);
+      }
+    };
+    image.onerror = () => reject(new Error(failureMessage));
+    image.src = source;
+  });
+}
+
+function drawImageContain(
+  ctx: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+) {
+  const scale = Math.min(width / image.naturalWidth, height / image.naturalHeight);
+  const drawWidth = image.naturalWidth * scale;
+  const drawHeight = image.naturalHeight * scale;
+  const drawX = x + (width - drawWidth) / 2;
+  const drawY = y + (height - drawHeight) / 2;
+
+  ctx.save();
+  roundRect(ctx, drawX, drawY, drawWidth, drawHeight, radius);
+  ctx.clip();
+  ctx.drawImage(image, drawX, drawY, drawWidth, drawHeight);
+  ctx.restore();
+}
+
 function wrapText(
   ctx: CanvasRenderingContext2D,
   text: string,
@@ -476,21 +569,40 @@ function wrapText(
   y: number,
   maxWidth: number,
   lineHeight: number,
-  font: string
+  font: string,
+  maxLines: number
 ) {
   ctx.font = font;
-  const words = text.split(" ");
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
   let line = "";
-  let cursorY = y;
+  let truncated = false;
   for (const word of words) {
     const test = line ? `${line} ${word}` : word;
     if (ctx.measureText(test).width > maxWidth && line) {
-      ctx.fillText(line, x, cursorY);
+      lines.push(line);
+      if (lines.length >= maxLines) {
+        truncated = true;
+        break;
+      }
       line = word;
-      cursorY += lineHeight;
     } else {
       line = test;
     }
   }
-  if (line) ctx.fillText(line, x, cursorY);
+  if (!truncated && line) lines.push(line);
+  if (truncated && lines.length > 0) {
+    let lastLine = lines[lines.length - 1];
+    while (
+      lastLine.length > 0 &&
+      ctx.measureText(`${lastLine}…`).width > maxWidth
+    ) {
+      lastLine = lastLine.slice(0, -1).trimEnd();
+    }
+    lines[lines.length - 1] = `${lastLine}…`;
+  }
+  lines.forEach((value, index) => {
+    ctx.fillText(value, x, y + index * lineHeight);
+  });
+  return y + Math.max(0, lines.length - 1) * lineHeight;
 }

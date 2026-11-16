@@ -24,11 +24,13 @@ export default async function WelcomePage({
   let ordering: OrderingWindow | null = null;
 
   try {
-    wifi = SettingsModel.get("wifi_ssid") || wifi;
-    opening = SettingsModel.get("opening_time") || opening;
-    closing = SettingsModel.get("closing_time") || closing;
-    lastOrder = SettingsModel.get("last_order_time") || lastOrder;
-    ordering = SettingsModel.orderingWindow();
+    [wifi, opening, closing, lastOrder] = await Promise.all([
+      SettingsModel.get("wifi_ssid").then((value) => value || wifi),
+      SettingsModel.get("opening_time").then((value) => value || opening),
+      SettingsModel.get("closing_time").then((value) => value || closing),
+      SettingsModel.get("last_order_time").then((value) => value || lastOrder),
+    ]);
+    ordering = await SettingsModel.orderingWindow();
     open = ordering.open;
     const todaySchedule = ordering.schedule.find(
       (day) => day.day === ordering?.today

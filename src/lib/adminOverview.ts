@@ -101,14 +101,14 @@ function shiftDate(date: string, days: number) {
   return shifted.toISOString().slice(0, 10);
 }
 
-function computeAdminOverview(): AdminOverviewData {
-  const overview = SalesModel.overview();
+async function computeAdminOverview(): Promise<AdminOverviewData> {
+  const overview = await SalesModel.overview();
   const todayDate = manilaDate();
-  const today = OrderModel.todayStats(todayDate);
-  const daily = SalesModel.dailySales(13, todayDate);
-  const bestSelling = SalesModel.bestSellingItems(8);
-  const reviews = ReviewModel.stats();
-  const inventoryReview = MenuItemModel.all()
+  const today = await OrderModel.todayStats(todayDate);
+  const daily = await SalesModel.dailySales(13, todayDate);
+  const bestSelling = await SalesModel.bestSellingItems(8);
+  const reviews = await ReviewModel.stats();
+  const inventoryReview = (await MenuItemModel.all())
     .filter((item) => item.is_active)
     .map((item) => ({
       id: item.id,
@@ -125,18 +125,18 @@ function computeAdminOverview(): AdminOverviewData {
   const monthStart = `${todayDate.slice(0, 7)}-01`;
   const nextMonthStart = new Date(`${monthStart}T00:00:00.000Z`);
   nextMonthStart.setUTCMonth(nextMonthStart.getUTCMonth() + 1);
-  const weeklyBestSelling = SalesModel.bestSellingItemsBetween(
+  const weeklyBestSelling = await SalesModel.bestSellingItemsBetween(
     weekStart,
     shiftDate(weekStart, 7)
   );
-  const monthlyBestSelling = SalesModel.bestSellingItemsBetween(
+  const monthlyBestSelling = await SalesModel.bestSellingItemsBetween(
     monthStart,
     nextMonthStart.toISOString().slice(0, 10)
   );
-  const peakHours = SalesModel.peakHours();
-  const forecast = ForecastModel.nextSevenDays();
-  const requests = WaiterRequestModel.stats();
-  const pendingPayments = OrderModel.pendingPaymentCount();
+  const peakHours = await SalesModel.peakHours();
+  const forecast = await ForecastModel.nextSevenDays();
+  const requests = await WaiterRequestModel.stats();
+  const pendingPayments = await OrderModel.pendingPaymentCount();
 
   const yesterdayDate = shiftDate(todayDate, -1);
   const todayRevenue =
@@ -168,7 +168,7 @@ function computeAdminOverview(): AdminOverviewData {
       ...reviews,
       // The overview never renders customer photos; stripping the data URLs
       // keeps the server-rendered payload small and the dashboard fast.
-      recent: ReviewModel.all(6).map((review) => ({
+      recent: (await ReviewModel.all(6)).map((review) => ({
         ...review,
         photo_url: null,
       })),
@@ -189,11 +189,11 @@ function computeAdminOverview(): AdminOverviewData {
     // Payment proofs are base64 data URLs that can be megabytes each. The
     // overview only shows an item count, so blank them out before the data
     // crosses from the server render to the client.
-    recent_orders: OrderModel.list(undefined, 8).map((order) => ({
+    recent_orders: (await OrderModel.list(undefined, 8)).map((order) => ({
       ...order,
       payment_proof_url: null,
     })),
-    recent_activity: ActivityModel.recent(6),
+    recent_activity: await ActivityModel.recent(6),
   };
 }
 
@@ -212,11 +212,11 @@ export async function buildAdminOverview(
   }
   if (inFlight) return inFlight;
 
-  inFlight = Promise.resolve().then(() => {
-    // SQLite rows use null prototypes; round-trip through JSON so the same
+  inFlight = Promise.resolve().then(async () => {
+    // PGlite rows may use null prototypes; round-trip through JSON so the same
     // payload can be cached and passed from a Server Component to the client.
     const data = JSON.parse(
-      JSON.stringify(computeAdminOverview())
+      JSON.stringify(await computeAdminOverview())
     ) as AdminOverviewData;
     cached = { data, expires: Date.now() + CACHE_MS };
     return data;

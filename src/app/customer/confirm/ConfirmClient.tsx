@@ -1,14 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Icon } from "@/components/Icons";
-import { CustomerCancelOrderButton } from "@/components/CustomerCancelOrderButton";
+import { CustomerPageSkeleton } from "@/components/CustomerPageSkeleton";
 import { useCustomer } from "@/components/CustomerProvider";
 import type { Order } from "@/lib/types";
 import { peso, orderTypeLabel } from "@/lib/format";
 import { orderItemMeta } from "@/lib/orderItems";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 
 export function ConfirmClient({
   orderId,
@@ -17,7 +17,6 @@ export function ConfirmClient({
   orderId: number;
   initialTable: number;
 }) {
-  const router = useRouter();
   const { setTable } = useCustomer();
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
@@ -31,18 +30,14 @@ export function ConfirmClient({
       setLoading(false);
       return;
     }
-    fetch(`/api/orders/${orderId}`)
+    fetchPortalApi(`/api/orders/${orderId}`)
       .then((res) => res.json())
       .then((data) => setOrder(data.order || null))
       .finally(() => setLoading(false));
   }, [orderId]);
 
   if (loading) {
-    return (
-      <div className="loading-block">
-        <span className="spinner" /> Checking your order…
-      </div>
-    );
+    return <CustomerPageSkeleton />;
   }
 
   if (!order) {
@@ -83,13 +78,13 @@ export function ConfirmClient({
         <p>
           {gcash
             ? "Our team has your receipt. Your order will move to the queue once the payment is confirmed."
-            : "Your order is at the counter. A staff member will receive your payment and confirm your queue number."}
+            : "Please pay at the counter to confirm your queue number."}
         </p>
 
         <div className="confirm-summary">
           <div className="confirm-line">
             <span>Order</span>
-            <strong>#{String(order.id).padStart(3, "0")}</strong>
+            <strong>#{String(order.order_number ?? order.id).padStart(3, "0")}</strong>
           </div>
           <div className="confirm-line">
             <span>Table · Type</span>
@@ -128,19 +123,11 @@ export function ConfirmClient({
           <span>
             {gcash
               ? "Staff usually verify GCash receipts within 2–5 minutes. Keep this page handy."
-              : "You can pay in cash or by card at the counter. Your queue number appears after confirmation."}
+              : "Cash or card payments are accepted at the counter. Your queue number appears once payment is confirmed."}
           </span>
         </div>
 
         <div className="confirm-footer">
-          <CustomerCancelOrderButton
-            order={order}
-            onCancelled={() =>
-              router.replace(
-                `/customer/status?id=${order.id}&table=${initialTable}`
-              )
-            }
-          />
           <Link
             href={`/customer/status?id=${order.id}&table=${initialTable}`}
             className="btn btn-primary btn-block"

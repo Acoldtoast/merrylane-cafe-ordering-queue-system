@@ -1,22 +1,7 @@
 import { SettingsModel } from "@/lib/models";
 import { requireAdmin } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
-
-const SETTING_LABELS: Record<string, string> = {
-  cafe_name: "cafe name",
-  cafe_location: "location",
-  wifi_ssid: "Wi-Fi name",
-  gcash_number: "GCash number",
-  gcash_name: "GCash name",
-  gcash_qr_data_url: "GCash QR",
-  ordering_closed: "ordering status",
-  last_order_time: "last order time",
-  opening_time: "opening time",
-  closing_time: "closing time",
-  service_charge_pct: "service charge",
-  vat_inclusive: "VAT setting",
-  days_operating: "operating days",
-};
+import { settingsAuditChanges } from "@/lib/settingsAudit";
 
 const MAX_GCASH_QR_BYTES = 1024 * 1024;
 const GCASH_QR_DATA_URL =
@@ -49,8 +34,10 @@ function isValidGcashQr(value: unknown): value is string {
 
 export async function GET() {
   try {
-    const values = SettingsModel.object();
-    const ordering = SettingsModel.orderingWindow();
+    const [values, ordering] = await Promise.all([
+      SettingsModel.object(),
+      SettingsModel.orderingWindow(),
+    ]);
     const todaySchedule = ordering.schedule.find((day) => day.day === ordering.today);
     return Response.json({
       settings: {
@@ -74,6 +61,11 @@ export async function GET() {
           values.days_operating ||
           "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday",
         weekly_schedule: ordering.schedule,
+        facebook_url: values.facebook_url || "",
+        twitter_url: values.twitter_url || "",
+        tiktok_url: values.tiktok_url || "",
+        instagram_url: values.instagram_url || "",
+        social_media_enabled: values.social_media_enabled !== "false",
       },
       ordering_open: ordering.open,
       last_order_warning: ordering.last_order_warning,
@@ -119,7 +111,25 @@ export async function PATCH(request: Request) {
       "service_charge_pct",
       "vat_inclusive",
       "days_operating",
+      "facebook_url",
+      "twitter_url",
+      "tiktok_url",
+      "instagram_url",
+      "social_media_enabled",
     ]);
+    const [previousValues, previousWindow, previousWeeklyScheduleRaw] = await Promise.all([
+      SettingsModel.object(),
+      SettingsModel.orderingWindow(),
+      SettingsModel.get("weekly_schedule"),
+    ]);
+    let previousWeeklySchedule: unknown = null;
+    try {
+      previousWeeklySchedule = previousWeeklyScheduleRaw
+        ? JSON.parse(previousWeeklyScheduleRaw)
+        : null;
+    } catch {
+      previousWeeklySchedule = null;
+    }
 
     const updatesManualPause =
       Object.prototype.hasOwnProperty.call(body, "ordering_closed");
@@ -127,45 +137,46 @@ export async function PATCH(request: Request) {
       updatesManualPause && String(body.ordering_closed) === "true";
     if (
       pausesOrdering &&
-      SettingsModel.get("ordering_closed") !== "true"
+      (await SettingsModel.get("ordering_closed")) !== "true"
     ) {
-      SettingsModel.paymentBusinessDate();
+      await SettingsModel.paymentBusinessDate();
     }
 
     for (const [key, value] of Object.entries(body)) {
       if (!allowed.has(key)) continue;
-      SettingsModel.set(
+      await SettingsModel.set(
         key,
         typeof value === "boolean" ? String(value) : String(value ?? "")
       );
     }
 
     if (Array.isArray(body.weekly_schedule)) {
-      SettingsModel.set("weekly_schedule", JSON.stringify(body.weekly_schedule));
+      await SettingsModel.set("weekly_schedule", JSON.stringify(body.weekly_schedule));
     }
     if (
       updatesManualPause &&
       !pausesOrdering &&
       String(body.ordering_closed) === "false"
     ) {
-      SettingsModel.paymentBusinessDate();
+      await SettingsModel.paymentBusinessDate();
     }
 
-    const changed = [
-      ...new Set(
-        [
-          ...Object.keys(body)
-            .filter((key) => allowed.has(key))
-            .map((key) => SETTING_LABELS[key] || key),
-          ...(Array.isArray(body.weekly_schedule) ? ["weekly hours"] : []),
-        ].filter(Boolean)
-      ),
-    ];
+    const changed = settingsAuditChanges({
+      previousValues,
+      nextValues: body,
+      previousSchedule: Array.isArray(previousWeeklySchedule)
+        ? previousWeeklySchedule
+        : previousWindow.schedule,
+      nextSchedule: body.weekly_schedule,
+    });
     if (changed.length) {
       logActivity(auth.user, {
         area: "Settings",
         action: "settings.updated",
-        summary: `Updated cafe settings · ${changed.join(", ")}`,
+        summary:
+          changed.length === 1
+            ? changed[0]
+            : `Updated cafe settings: ${changed.join(" ")}`,
         entity_type: "settings",
         entity_id: null,
       });
@@ -174,7 +185,7 @@ export async function PATCH(request: Request) {
     return Response.json({
       success: true,
       message: "Settings saved.",
-      ordering_open: SettingsModel.isOrderingOpen(),
+      ordering_open: await SettingsModel.isOrderingOpen(),
     });
   } catch (error: any) {
     return Response.json(

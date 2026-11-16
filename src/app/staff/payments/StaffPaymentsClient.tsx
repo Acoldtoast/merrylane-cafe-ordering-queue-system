@@ -1,11 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
-import { useSearchParams } from "next/navigation";
-import { PortalShell } from "@/components/PortalShell";
-import { staffNav } from "@/components/portalNav";
+import { useCallback, useMemo, useState } from "react";
 import { Icon } from "@/components/Icons";
+import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
 import type {
   MenuItem,
@@ -13,8 +10,14 @@ import type {
   OrderBalancePayment,
   OrderItem,
 } from "@/lib/types";
-import { dateTimeLabel, orderTypeLabel, peso, relativeTime, smartDateTime } from "@/lib/format";
+import {
+  calculateOrderDiscounts,
+  type DiscountRecipient,
+  type DiscountType,
+} from "@/lib/orderDiscount";
+import { orderTypeLabel, peso, relativeTime, smartDateTime } from "@/lib/format";
 import { orderItemMeta } from "@/lib/orderItems";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { usePolling } from "@/lib/usePolling";
 
 const PREP_OPTIONS = [5, 10, 15, 20, 30];
@@ -35,20 +38,19 @@ function readyClock(minutes: string) {
   });
 }
 
+function discountTypeLabel(type: DiscountType) {
+  return {
+    staff: "Staff",
+    senior: "Senior citizen",
+    pwd: "PWD",
+    other: "Other ID",
+  }[type];
+}
+
 export function StaffPaymentsClient() {
-  const searchParams = useSearchParams();
   const feedback = useFeedback();
   const [pendingOrders, setPendingOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
-  const [verified, setVerified] = useState<Order[]>([]);
-  const [autoCancelledOrders, setAutoCancelledOrders] = useState<Order[]>([]);
-  const [verifiedTotal, setVerifiedTotal] = useState(0);
-  const [verifiedPage, setVerifiedPage] = useState(1);
-  const [verifiedDate, setVerifiedDate] = useState(searchParams.get("date") || "");
-  const [verifiedServiceDate, setVerifiedServiceDate] = useState("");
-  const [activeTab, setActiveTab] = useState<"review" | "verified">(
-    searchParams.get("tab") === "verified" ? "verified" : "review"
-  );
   const [balancePayments, setBalancePayments] = useState<
     (OrderBalancePayment & { order: Order })[]
   >([]);
@@ -59,7 +61,9 @@ export function StaffPaymentsClient() {
   const [preview, setPreview] = useState<Order | null>(null);
   const [pendingRemoval, setPendingRemoval] = useState<OrderItem | null>(null);
   const [prepMinutes, setPrepMinutes] = useState("15");
-  const [cashReceived, setCashReceived] = useState("");
+  const [cashReceived, setCashReceived] = useState<string | null>(null);
+  const [discountEditorOpen, setDiscountEditorOpen] = useState(false);
+  const [discountRecipients, setDiscountRecipients] = useState<DiscountRecipient[]>([]);
   const [itemEditor, setItemEditor] = useState<{
     item: OrderItem | null;
     menuItemId: string;
@@ -69,36 +73,21 @@ export function StaffPaymentsClient() {
     menuSearch: string;
     sugarLevel: string;
     note: string;
+    savedValues: string;
   } | null>(null);
   const load = useCallback(async () => {
     try {
-      const [pendingRes, verifiedRes, balanceRes, menuRes] = await Promise.all([
-        fetch("/api/orders?status=payment_pending,pending", { cache: "no-store" }),
-        fetch(
-          `/api/orders?recent_verified=1&${
-            verifiedDate
-              ? `date=${encodeURIComponent(verifiedDate)}`
-              : "business_day=1"
-          }&page=${verifiedPage}`,
-          { cache: "no-store" }
-        ),
-        fetch("/api/order-balance-payments", { cache: "no-store" }),
-        fetch("/api/menu", { cache: "no-store" }),
+      const [pendingRes, balanceRes, menuRes] = await Promise.all([
+        fetchPortalApi("/api/orders?status=payment_pending,pending", { cache: "no-store" }),
+        fetchPortalApi("/api/order-balance-payments", { cache: "no-store" }),
+        fetchPortalApi("/api/menu", { cache: "no-store" }),
       ]);
       const pending = await pendingRes.json();
-      const recentVerified = await verifiedRes.json();
       const balanceData = await balanceRes.json();
       const menuData = await menuRes.json();
       if (!pendingRes.ok || !pending.success) {
         throw new Error(pending.error || "Unable to load payments.");
       }
-      if (!verifiedRes.ok || !recentVerified.success) {
-        throw new Error(recentVerified.error || "Unable to load recent verified orders.");
-      }
-      setVerified(recentVerified.orders || []);
-      setAutoCancelledOrders(recentVerified.autoCancelledOrders || []);
-      setVerifiedTotal(Number(recentVerified.total) || 0);
-      setVerifiedServiceDate(recentVerified.date || "");
       if (!balanceRes.ok || !balanceData.success) {
         throw new Error(balanceData.error || "Unable to load additional balance receipts.");
       }
@@ -126,7 +115,7 @@ export function StaffPaymentsClient() {
     } finally {
       setLoading(false);
     }
-  }, [verifiedDate, verifiedPage]);
+  }, []);
 
   const refreshPayments = async () => {
     setRefreshing(true);
@@ -137,29 +126,7 @@ export function StaffPaymentsClient() {
     }
   };
 
-  // Changing the day scope or page should refresh right away instead of
-  // waiting for the next 12-second poll.
-  const mountedOnce = useRef(false);
-  useEffect(() => {
-    if (!mountedOnce.current) {
-      mountedOnce.current = true;
-      return;
-    }
-    void load();
-  }, [load]);
-
-  usePolling(load, 12000);
-
-  useEffect(() => {
-    const showPaymentHistory = (event: Event) => {
-      const date = (event as CustomEvent<{ date?: string }>).detail?.date || "";
-      setActiveTab("verified");
-      setVerifiedDate(date);
-      setVerifiedPage(1);
-    };
-    window.addEventListener("staff-payment-history", showPaymentHistory);
-    return () => window.removeEventListener("staff-payment-history", showPaymentHistory);
-  }, []);
+  usePolling(load, 12000, { resources: ["orders", "payments", "sales"] });
 
   const pending = useMemo(
     () => pendingOrders.filter(needsPaymentReview),
@@ -168,18 +135,50 @@ export function StaffPaymentsClient() {
 
   const gcashCount = pending.filter((order) => order.payment_method === "gcash").length;
   const counterCount = pending.filter((order) => order.payment_method === "counter").length;
-  const cashReceivedAmount = Number(cashReceived);
+  const cashReceivedValue = cashReceived ?? String(preview?.total ?? "");
+  const cashReceivedAmount = Number(cashReceivedValue);
   const cashIsSufficient =
     Number.isFinite(cashReceivedAmount) && cashReceivedAmount >= Number(preview?.total || 0);
   const cashChange = cashIsSufficient
     ? Math.round((cashReceivedAmount - Number(preview?.total || 0)) * 100) / 100
     : 0;
+  const discountPreview = useMemo(() => {
+    if (!preview) return [];
+    return calculateOrderDiscounts(
+      (preview.items || []).map((item) => ({
+        id: item.id,
+        quantity: item.quantity,
+        unit_price: item.price_at_time,
+        category_name:
+          menuItems.find((menuItem) => menuItem.id === item.menu_item_id)
+            ?.category_name || "",
+      })),
+      discountRecipients.filter(
+        (recipient) => recipient.id_number.trim() && recipient.name.trim()
+      )
+    );
+  }, [discountRecipients, menuItems, preview]);
+  const discountPreviewTotal =
+    Math.round(
+      discountPreview.reduce(
+        (sum, discount) => sum + discount.discount_amount,
+        0
+      ) * 100
+    ) / 100;
 
   const openPreview = (order: Order) => {
     setPrepMinutes(String(order.prep_minutes || 15));
     setCashReceived(
-      order.payment_method === "counter" ? String(order.total) : ""
+      order.payment_method === "counter" ? String(order.total) : null
     );
+    setDiscountRecipients(
+      (order.discounts || []).map(({ type, id_number, name }) => ({
+        type,
+        id_number,
+        name,
+      }))
+    );
+    setDiscountEditorOpen(false);
     setPreview(order);
   };
 
@@ -247,7 +246,7 @@ export function StaffPaymentsClient() {
           )
           .filter((id): id is number => id !== undefined)
       : [];
-    setItemEditor({
+    const editorValues = {
       item,
       menuItemId: menuItem ? String(menuItem.id) : "",
       quantity: String(item?.quantity || 1),
@@ -264,10 +263,18 @@ export function StaffPaymentsClient() {
             )
             .filter((id): id is number => id !== undefined)
         : [],
-      menuSearch: "",
       sugarLevel: item?.sugar_level || (isDrink(menuItem) ? "50%" : ""),
       note: item?.note || "",
+    };
+    const savedValues = JSON.stringify({
+      menuItemId: editorValues.menuItemId,
+      quantity: editorValues.quantity,
+      variantIds: editorValues.variantIds,
+      extraIds: editorValues.extraIds,
+      sugarLevel: editorValues.sugarLevel,
+      note: editorValues.note,
     });
+    setItemEditor({ ...editorValues, menuSearch: "", savedValues });
   };
 
   const updatePreviewItem = async () => {
@@ -280,7 +287,7 @@ export function StaffPaymentsClient() {
     setBusyId(target.id);
     setError("");
     try {
-      const response = await fetch(
+      const response = await fetchPortalApi(
         itemEditor.item
           ? `/api/orders/${target.id}/items/${itemEditor.item.id}`
           : `/api/orders/${target.id}/items`,
@@ -319,7 +326,7 @@ export function StaffPaymentsClient() {
     setBusyId(target.id);
     setError("");
     try {
-      const response = await fetch(
+      const response = await fetchPortalApi(
         `/api/orders/${target.id}/items/${item.id}`,
         { method: "DELETE" }
       );
@@ -333,6 +340,57 @@ export function StaffPaymentsClient() {
       );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Could not remove the order item.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const applyDiscounts = async () => {
+    if (!preview) return;
+    const target = preview;
+    if (
+      discountRecipients.some(
+        (recipient) => !recipient.id_number.trim() || !recipient.name.trim()
+      )
+    ) {
+      setError("Enter both the ID number and name for each discount.");
+      return;
+    }
+
+    setBusyId(target.id);
+    setError("");
+    try {
+      const response = await fetchPortalApi("/api/orders", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: target.id, discounts: discountRecipients }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success || !data.order) {
+        throw new Error(data.error || "Could not apply the discounts.");
+      }
+      setPreview(data.order);
+      setPendingOrders((orders) =>
+        orders.map((order) => (order.id === target.id ? data.order : order))
+      );
+      if (
+        target.payment_method === "counter" &&
+        cashReceivedValue === String(target.total)
+      ) {
+        setCashReceived(String(data.order.total));
+      }
+      setDiscountRecipients(
+        (data.order.discounts || []).map(
+          ({ type, id_number, name }: DiscountRecipient) => ({
+            type,
+            id_number,
+            name,
+          })
+        )
+      );
+      setDiscountEditorOpen(false);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not apply the discounts.");
     } finally {
       setBusyId(null);
     }
@@ -355,6 +413,17 @@ export function StaffPaymentsClient() {
     (selectedMenuItem?.extras
       .filter((extra) => itemEditor?.extraIds.includes(extra.id))
       .reduce((sum, extra) => sum + Number(extra.price_modifier || 0), 0) || 0);
+  const itemEditorHasChanges =
+    itemEditor?.item !== null &&
+    itemEditor?.item !== undefined &&
+    JSON.stringify({
+      menuItemId: itemEditor.menuItemId,
+      quantity: itemEditor.quantity,
+      variantIds: itemEditor.variantIds,
+      extraIds: itemEditor.extraIds,
+      sugarLevel: itemEditor.sugarLevel,
+      note: itemEditor.note,
+    }) !== itemEditor.savedValues;
 
   const decide = async (
     order: Order,
@@ -364,7 +433,9 @@ export function StaffPaymentsClient() {
     if (
       payment_status === "rejected" &&
       !window.confirm(
-        `Reject the GCash payment for order #${String(order.id).padStart(
+        `Reject the GCash payment for order #${String(
+          order.order_number ?? order.id
+        ).padStart(
           3,
           "0"
         )}? The customer will be asked to upload a clearer receipt.`
@@ -376,10 +447,10 @@ export function StaffPaymentsClient() {
     const minutes = Math.min(240, Math.max(0, Number(prepMinutes) || 15));
     setBusyId(order.id);
     setError("");
-    const orderCode = `#${String(order.id).padStart(3, "0")}`;
+    const orderCode = `#${String(order.order_number ?? order.id).padStart(3, "0")}`;
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/orders", {
+        const response = await fetchPortalApi("/api/orders", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -487,7 +558,9 @@ export function StaffPaymentsClient() {
   const cancelOrder = async (order: Order) => {
     if (
       !window.confirm(
-        `Cancel order #${String(order.id).padStart(3, "0")}? This will remove it from the payment queue.`
+        `Cancel order #${String(
+          order.order_number ?? order.id
+        ).padStart(3, "0")}? This will remove it from the payment queue.`
       )
     ) {
       return;
@@ -495,10 +568,10 @@ export function StaffPaymentsClient() {
 
     setBusyId(order.id);
     setError("");
-    const orderCode = `#${String(order.id).padStart(3, "0")}`;
+    const orderCode = `#${String(order.order_number ?? order.id).padStart(3, "0")}`;
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/orders", {
+        const response = await fetchPortalApi("/api/orders", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: order.id, status: "cancelled" }),
@@ -552,7 +625,7 @@ export function StaffPaymentsClient() {
     const orderCode = `#${String(payment.order_id).padStart(3, "0")}`;
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/order-balance-payments", {
+        const response = await fetchPortalApi("/api/order-balance-payments", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: payment.id, status }),
@@ -601,18 +674,10 @@ export function StaffPaymentsClient() {
     setBusyId(null);
   };
 
+  if (loading) return <PortalPageSkeleton area="staff" />;
+
   return (
-    <PortalShell
-      area="staff"
-      className={`payment-screen-shell ${
-        activeTab === "review" ? "payment-screen-review" : ""
-      }`}
-      title="Payment checks."
-      subtitle="Verify GCash receipts and counter payments before the bar starts."
-      contextLabel="Service · Payments"
-      contextTitle={`${pending.length} order payments · ${balancePayments.length} additional`}
-      nav={staffNav}
-    >
+    <>
       {refreshing && (
         <div className="payment-refresh-screen" role="status" aria-live="polite">
           <span className="spinner" />
@@ -645,32 +710,7 @@ export function StaffPaymentsClient() {
         </div>
       </div>
 
-      <div className="payment-page-tabs" role="tablist" aria-label="Payment views">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeTab === "review"}
-          className={activeTab === "review" ? "active" : ""}
-          onClick={() => setActiveTab("review")}
-        >
-          Review payments
-          {pending.length > 0 && <span>{pending.length}</span>}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeTab === "verified"}
-          className={activeTab === "verified" ? "active" : ""}
-          onClick={() => {
-            setActiveTab("verified");
-            setVerifiedPage(1);
-          }}
-        >
-          Verified today
-        </button>
-      </div>
-
-      {activeTab === "review" && balancePayments.length > 0 && (
+      {balancePayments.length > 0 && (
         <section className="balance-review-section">
           <div className="payment-panel-heading">
             <div>
@@ -703,7 +743,10 @@ export function StaffPaymentsClient() {
                         {payment.order.customer_name || "Guest"} · Table{" "}
                         {String(payment.order.table_number).padStart(2, "0")}
                       </span>
-                      <h4>Order #{String(payment.order_id).padStart(3, "0")}</h4>
+                      <h4>
+                        Order #
+                        {String(payment.order.order_number ?? payment.order_id).padStart(3, "0")}
+                      </h4>
                     </div>
                     <strong className="balance-review-amount">{peso(payment.amount)}</strong>
                   </div>
@@ -765,13 +808,7 @@ export function StaffPaymentsClient() {
         </section>
       )}
 
-      {activeTab === "review" && (loading ? (
-        <div className="payment-review-loading">
-          {[1, 2, 3].map((n) => (
-            <div className="skeleton payment-review-skeleton" key={n} />
-          ))}
-        </div>
-      ) : pending.length === 0 ? (
+      {pending.length === 0 ? (
         <div className="empty-panel">
           <div className="empty-icon">
             <Icon name="check-circle" />
@@ -802,7 +839,7 @@ export function StaffPaymentsClient() {
                 >
                   <span className="payment-queue-item-top">
                     <strong>
-                      #{String(order.id).padStart(3, "0")}
+                      #{String(order.order_number ?? order.id).padStart(3, "0")}
                     </strong>
                     <b>{peso(order.total)}</b>
                   </span>
@@ -903,18 +940,41 @@ export function StaffPaymentsClient() {
                   <span className="eyebrow">
                     {preview.customer_name || "Customer"}
                   </span>
-                  <h3>#{String(preview.id).padStart(3, "0")}</h3>
+                  <h3>#{String(preview.order_number ?? preview.id).padStart(3, "0")}</h3>
                 </div>
                 <div className="payment-order-heading-actions">
                   {canEditItems(preview) && (
-                    <button
-                      type="button"
-                      className="btn btn-soft btn-sm"
-                      disabled={busyId === preview.id || menuItems.length === 0}
-                      onClick={() => openItemEditor()}
-                    >
-                      <Icon name="plus" className="icon-sm" /> Add menu
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-soft btn-sm"
+                        disabled={busyId === preview.id || menuItems.length === 0}
+                        onClick={() => openItemEditor()}
+                      >
+                        <Icon name="plus" className="icon-sm" /> Add menu
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-soft btn-sm"
+                        disabled={busyId === preview.id}
+                        onClick={() => {
+                          setDiscountRecipients(
+                            preview.discounts?.length
+                              ? preview.discounts.map(
+                                  ({ type, id_number, name }) => ({
+                                    type,
+                                    id_number,
+                                    name,
+                                  })
+                                )
+                              : [{ type: "senior", id_number: "", name: "" }]
+                          );
+                          setDiscountEditorOpen(true);
+                        }}
+                      >
+                        <Icon name="plus" className="icon-sm" /> Add discount
+                      </button>
+                    </>
                   )}
                   <span className="badge badge-amber">Pending</span>
                 </div>
@@ -930,6 +990,149 @@ export function StaffPaymentsClient() {
                     : orderTypeLabel(preview.order_type)}
                 </strong>
               </div>
+
+              {discountEditorOpen && (
+                <div className="payment-discount-editor">
+                  <div className="payment-discount-heading">
+                    <strong>Discount IDs</strong>
+                    <span>
+                      20% off one highest-priced meal and one drink per ID.
+                      Coffee and Non-Coffee items count as drinks.
+                    </span>
+                  </div>
+                  {discountRecipients.map((recipient, index) => (
+                    <div className="payment-discount-entry" key={index}>
+                      <label className="field">
+                        <span className="label">Discount type</span>
+                        <select
+                          className="input"
+                          value={recipient.type}
+                          onChange={(event) =>
+                            setDiscountRecipients((current) =>
+                              current.map((entry, entryIndex) =>
+                                entryIndex === index
+                                  ? {
+                                      ...entry,
+                                      type: event.target.value as DiscountType,
+                                    }
+                                  : entry
+                              )
+                            )
+                          }
+                        >
+                          <option value="staff">Staff</option>
+                          <option value="senior">Senior citizen</option>
+                          <option value="pwd">PWD</option>
+                          <option value="other">Other ID</option>
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span className="label">ID number</span>
+                        <input
+                          className="input"
+                          value={recipient.id_number}
+                          maxLength={40}
+                          onChange={(event) =>
+                            setDiscountRecipients((current) =>
+                              current.map((entry, entryIndex) =>
+                                entryIndex === index
+                                  ? { ...entry, id_number: event.target.value }
+                                  : entry
+                              )
+                            )
+                          }
+                          placeholder="Enter ID number"
+                        />
+                      </label>
+                      <label className="field">
+                        <span className="label">Name on ID</span>
+                        <input
+                          className="input"
+                          value={recipient.name}
+                          maxLength={80}
+                          onChange={(event) =>
+                            setDiscountRecipients((current) =>
+                              current.map((entry, entryIndex) =>
+                                entryIndex === index
+                                  ? { ...entry, name: event.target.value }
+                                  : entry
+                              )
+                            )
+                          }
+                          placeholder="Enter name"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        aria-label={`Remove discount ID ${index + 1}`}
+                        onClick={() =>
+                          setDiscountRecipients((current) =>
+                            current.filter((_, entryIndex) => entryIndex !== index)
+                          )
+                        }
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                  <div className="payment-discount-footer">
+                    <span>
+                      Estimated discount: {peso(discountPreviewTotal)}
+                      {preview.payment_method === "gcash" &&
+                        " · Apply before payment; ask the customer to refresh"}
+                    </span>
+                    <div>
+                      <button
+                        type="button"
+                        className="btn btn-soft btn-sm"
+                        disabled={discountRecipients.length >= 10}
+                        onClick={() =>
+                          setDiscountRecipients((current) => [
+                            ...current,
+                            { type: "senior", id_number: "", name: "" },
+                          ])
+                        }
+                      >
+                        <Icon name="plus" className="icon-sm" /> Add another ID
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-soft btn-sm"
+                        disabled={busyId === preview.id}
+                        onClick={() => {
+                          setDiscountRecipients(
+                            (preview.discounts || []).map(
+                              ({ type, id_number, name }) => ({
+                                type,
+                                id_number,
+                                name,
+                              })
+                            )
+                          );
+                          setDiscountEditorOpen(false);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        disabled={
+                          busyId === preview.id ||
+                          discountRecipients.some(
+                            (recipient) =>
+                              !recipient.id_number.trim() || !recipient.name.trim()
+                          )
+                        }
+                        onClick={() => void applyDiscounts()}
+                      >
+                        Apply discount
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="payment-review-items">
                 {(preview.items || []).map((item) => (
@@ -977,6 +1180,19 @@ export function StaffPaymentsClient() {
                 <strong>Amount due</strong>
                 <b>{peso(preview.total)}</b>
               </div>
+              {Number(preview.discount_amount || 0) > 0 && (
+                <div className="payment-discount-summary">
+                  <strong>
+                    Discount applied: −{peso(preview.discount_amount || 0)}
+                  </strong>
+                  {(preview.discounts || []).map((discount) => (
+                    <span key={discount.id_number}>
+                      {discountTypeLabel(discount.type)} · {discount.name} · ID{" "}
+                      {discount.id_number}: −{peso(discount.discount_amount)}
+                    </span>
+                  ))}
+                </div>
+              )}
               {preview.payment_method === "counter" && (
                 <div className="payment-cash-settlement">
                   <label className="field">
@@ -986,11 +1202,11 @@ export function StaffPaymentsClient() {
                       type="number"
                       min={preview.total}
                       step="0.01"
-                      value={cashReceived}
+                      value={cashReceivedValue}
                       onChange={(event) => setCashReceived(event.target.value)}
-                      onFocus={() => setCashReceived("")}
+                      onFocus={(event) => event.currentTarget.select()}
                       onBlur={() => {
-                        if (!cashReceived.trim()) {
+                        if (!cashReceivedValue.trim()) {
                           setCashReceived(String(preview.total));
                         }
                       }}
@@ -1165,13 +1381,10 @@ export function StaffPaymentsClient() {
             </section>
           )}
         </div>
-      ))}
+      )}
 
       {itemEditor && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setItemEditor(null)}
-        >
+        <div className="modal-backdrop">
           <div
             className="modal payment-item-editor"
             onClick={(event) => event.stopPropagation()}
@@ -1180,7 +1393,8 @@ export function StaffPaymentsClient() {
               <div>
                 <h2>{itemEditor.item ? "Edit order item" : "Add a menu item"}</h2>
                 <span className="order-time">
-                  Order #{String(preview?.id || "").padStart(3, "0")} ·{" "}
+                  Order #
+                  {String(preview?.order_number ?? preview?.id ?? "").padStart(3, "0")} ·{" "}
                   {preview?.customer_name || "Guest"}
                 </span>
               </div>
@@ -1531,6 +1745,7 @@ export function StaffPaymentsClient() {
                   !Number.isInteger(Number(itemEditor.quantity)) ||
                   Number(itemEditor.quantity) < 1 ||
                   Number(itemEditor.quantity) > 20 ||
+                  (itemEditor.item !== null && !itemEditorHasChanges) ||
                   busyId === preview?.id
                 }
                 onClick={() => void updatePreviewItem()}
@@ -1549,12 +1764,7 @@ export function StaffPaymentsClient() {
       )}
 
       {pendingRemoval && preview && (
-        <div
-          className="feedback-layer"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setPendingRemoval(null);
-          }}
-        >
+        <div className="feedback-layer">
           <div
             className="feedback-card is-shaking payment-remove-confirm-card"
             role="alertdialog"
@@ -1578,7 +1788,7 @@ export function StaffPaymentsClient() {
               className="feedback-message"
             >
               Remove {pendingRemoval.quantity} × {pendingRemoval.name} from order #
-              {String(preview.id).padStart(3, "0")}? This cannot be undone.
+              {String(preview.order_number ?? preview.id).padStart(3, "0")}? This cannot be undone.
             </p>
             <div className="payment-remove-confirm-actions">
               <button
@@ -1605,166 +1815,14 @@ export function StaffPaymentsClient() {
         </div>
       )}
 
-      {activeTab === "verified" && (
-      <>
-      <div className="section-bar">
-        <div>
-          <h2>Verified today</h2>
-          <p>
-            {verifiedServiceDate
-              ? `Service day ${verifiedServiceDate}. This list advances when the cafe opens its next service day.`
-              : "Payments from the current service day."}
-          </p>
-        </div>
-        <div className="section-bar-tools">
-          <Link href="/staff/sales" className="btn btn-soft btn-sm">
-            History in Sales <Icon name="arrow-right" className="icon-sm" />
-          </Link>
-        </div>
-      </div>
-      <div className="panel">
-        <div className="panel-body tight">
-          {verified.length === 0 ? (
-            <div className="empty-panel" style={{ border: 0 }}>
-              No payments verified for this service day yet.
-            </div>
-          ) : (
-            <div className="data-table-wrap">
-              <table className="data-table data-table-stack">
-                <thead>
-                  <tr>
-                    <th>Order</th>
-                    <th>Customer</th>
-                    <th>Table</th>
-                    <th>Payment</th>
-                    <th>Paid at</th>
-                    <th>Amount</th>
-                    <th>Details</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {verified.map((order) => {
-                    const paidAt = order.confirmed_at || order.updated_at;
-                    const paidDate = paidAt.slice(0, 10);
-                    return (
-                      <tr key={order.id}>
-                        <td data-label=""><strong>#{String(order.id).padStart(3, "0")}</strong></td>
-                        <td data-label="Customer">{order.customer_name || "Guest"}</td>
-                        <td data-label="Table">{String(order.table_number).padStart(2, "0")}</td>
-                        <td data-label="Payment">{order.payment_method === "gcash" ? "GCash" : "Cash / counter"}</td>
-                        <td data-label="Paid at">{dateTimeLabel(paidAt)}</td>
-                        <td data-label="Amount">{peso(order.payment_amount ?? order.total)}</td>
-                        <td data-label="Details">
-                          <div style={{ display: "grid", gap: 3 }}>
-                            {order.payment_method === "counter" &&
-                              order.cash_received !== null &&
-                              order.cash_received !== undefined && (
-                                <span>
-                                  Received {peso(order.cash_received)} · change{" "}
-                                  {peso(order.change_given || 0)}
-                                </span>
-                              )}
-                            <Link
-                              className="text-link"
-                              href={`/staff/sales?date=${paidDate}&transaction_id=order-${order.id}`}
-                            >
-                              View order
-                            </Link>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {verifiedTotal > 10 && (
-            <div className="flex-between" style={{ marginTop: 14 }}>
-              <span className="payment-review-counts">
-                Showing {(verifiedPage - 1) * 10 + (verified.length ? 1 : 0)}–
-                {Math.min(verifiedPage * 10, verifiedTotal)} of {verifiedTotal}
-              </span>
-              <div className="payment-review-heading-actions">
-                <button
-                  type="button"
-                  className="btn btn-soft btn-sm"
-                  disabled={verifiedPage === 1}
-                  onClick={() => setVerifiedPage((page) => Math.max(1, page - 1))}
-                >
-                  <Icon name="chevron-left" className="icon-sm" /> Previous
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-soft btn-sm"
-                  disabled={verifiedPage * 10 >= verifiedTotal}
-                  onClick={() => setVerifiedPage((page) => page + 1)}
-                >
-                  Next <Icon name="chevron-right" className="icon-sm" />
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-      {autoCancelledOrders.length > 0 && (
-        <section
-          className="daily-sales-method"
-          id="auto-cancelled"
-          style={{ marginTop: 14 }}
-        >
-          <header className="daily-sales-method-head">
-            <div>
-              <span className="eyebrow">Automatically cancelled unpaid orders</span>
-              <strong>Not verified and not included in sales</strong>
-            </div>
-            <b>{autoCancelledOrders.length}</b>
-          </header>
-          <div className="data-table-wrap">
-            <table className="data-table daily-sales-table data-table-stack">
-              <thead>
-                <tr>
-                  <th>Order</th>
-                  <th>Cancelled at</th>
-                  <th>Table</th>
-                  <th>Customer</th>
-                  <th>Payment method</th>
-                  <th>Cancellation details</th>
-                  <th>Order amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {autoCancelledOrders.map((order) => (
-                  <tr key={order.id}>
-                    <td data-label="Order">
-                      <strong>#{String(order.id).padStart(3, "0")}</strong>
-                    </td>
-                    <td data-label="Cancelled at">{dateTimeLabel(order.cancelled_at || "")}</td>
-                    <td data-label="Table">{String(order.table_number).padStart(2, "0")}</td>
-                    <td data-label="Customer">{order.customer_name || "Guest"}</td>
-                    <td data-label="Payment method">Cash / counter</td>
-                    <td data-label="Cancellation details">
-                      No cash payment recorded within 90 minutes; automatically removed from the queue.
-                    </td>
-                    <td data-label="Order amount">{peso(order.total)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-      </>
-      )}
-
-      {activeTab === "review" && <div className="payment-note" style={{ marginTop: 13 }}>
+      <div className="payment-note" style={{ marginTop: 13 }}>
         <Icon name="info" />
         <span>
           Verifying a payment assigns the next queue number, starts preparation and
           sets the prep ETA chosen here for the guest. Rejecting a GCash payment asks
           the customer to upload a clearer receipt.
         </span>
-      </div>}
-    </PortalShell>
+      </div>
+    </>
   );
 }

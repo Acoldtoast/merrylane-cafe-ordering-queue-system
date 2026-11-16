@@ -4,8 +4,10 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Icon } from "@/components/Icons";
 import type { IconName } from "@/components/Icons";
+import { CustomerPageSkeleton } from "@/components/CustomerPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
 import { useCustomer } from "@/components/CustomerProvider";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 import type { WaiterRequest } from "@/lib/types";
 
 const reasons: { label: string; icon: IconName; hint: string }[] = [
@@ -71,7 +73,8 @@ export function WaiterClient({
   const [request, setRequest] = useState<WaiterRequest | null>(null);
   const [remaining, setRemaining] = useState(0);
   const [attempts, setAttempts] = useState<AttemptStatus>(DEFAULT_ATTEMPTS);
-  const [checkingHistory, setCheckingHistory] = useState(true);
+  const [checkedHistoryTable, setCheckedHistoryTable] = useState<number | null>(null);
+  const checkingHistory = checkedHistoryTable !== initialTable;
 
   const atLimit = attempts.remaining <= 0;
   const attemptNote = atLimit
@@ -90,9 +93,13 @@ export function WaiterClient({
   // that was already sent, together with the live countdown.
   useEffect(() => {
     let cancelled = false;
-    setCheckingHistory(true);
-    fetch(`/api/waiter?table=${initialTable}`, { cache: "no-store" })
-      .then((response) => response.json())
+    fetchPortalApi(`/api/waiter?table=${initialTable}`, { cache: "no-store" })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Waiter history request failed (${response.status})`);
+        }
+        return response.json();
+      })
       .then((data) => {
         if (cancelled) return;
         if (data.attempts) {
@@ -105,9 +112,11 @@ export function WaiterClient({
           );
         }
       })
-      .catch(() => {})
+      .catch((error: unknown) => {
+        console.error("Failed to load waiter request history:", error);
+      })
       .finally(() => {
-        if (!cancelled) setCheckingHistory(false);
+        if (!cancelled) setCheckedHistoryTable(initialTable);
       });
     return () => {
       cancelled = true;
@@ -126,7 +135,7 @@ export function WaiterClient({
     setSubmitting(true);
     feedback.loading("Calling your waiter…", `Letting the team know about table ${initialTable}.`);
     try {
-      const response = await fetch("/api/waiter", {
+      const response = await fetchPortalApi("/api/waiter", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -215,19 +224,7 @@ export function WaiterClient({
   };
 
   if (checkingHistory) {
-    return (
-      <div className="waiter-card">
-        <Link href={`/customer/menu?table=${initialTable}`} className="back-link">
-          <Icon name="chevron-left" /> Back to menu
-        </Link>
-        <div className="card waiter-success">
-          <div className="loading-block">
-            <span className="spinner" />
-            Checking your last request…
-          </div>
-        </div>
-      </div>
-    );
+    return <CustomerPageSkeleton />;
   }
 
   return (

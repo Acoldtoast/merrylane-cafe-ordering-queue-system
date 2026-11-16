@@ -18,8 +18,10 @@ export async function GET(request: Request) {
       if (auth.error) return auth.error;
     }
 
-    const items = includeInactive ? MenuItemModel.all() : MenuItemModel.allActive();
-    const categories = CategoryModel.all();
+    const items = includeInactive
+      ? await MenuItemModel.all()
+      : await MenuItemModel.allActive();
+    const categories = await CategoryModel.all();
     return Response.json({ categories, items, success: true });
   } catch (error: any) {
     return Response.json(
@@ -86,7 +88,7 @@ export async function POST(request: Request) {
         );
       }
     }
-    const id = MenuItemModel.create({
+    const id = await MenuItemModel.create({
       name: String(body.name).trim(),
       description: typeof body.description === "string" ? body.description.trim() : "",
       price: Number(body.price),
@@ -99,10 +101,10 @@ export async function POST(request: Request) {
       image_url: typeof body.image_url === "string" ? body.image_url : "",
     });
     if (body.variants !== undefined) {
-      MenuItemModel.setVariants(id, variants);
+      await MenuItemModel.setVariants(id, variants);
     }
     if (Array.isArray(body.addonIds)) {
-      AddonModel.setForItem(id, body.addonIds);
+      await AddonModel.setForItem(id, body.addonIds);
     }
     logActivity(auth.user, {
       area: "Menu",
@@ -111,7 +113,11 @@ export async function POST(request: Request) {
       entity_type: "menu_item",
       entity_id: id,
     });
-    return Response.json({ id, item: MenuItemModel.byId(id), success: true });
+    return Response.json({
+      id,
+      item: await MenuItemModel.byId(id),
+      success: true,
+    });
   } catch (error: any) {
     return Response.json(
       { error: error.message, success: false },

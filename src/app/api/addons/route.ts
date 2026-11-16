@@ -13,7 +13,7 @@ export async function GET(request: Request) {
     }
 
     return Response.json({
-      addons: AddonModel.all(includeInactive),
+      addons: await AddonModel.all(includeInactive),
       success: true,
     });
   } catch (error: any) {
@@ -38,7 +38,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const id = AddonModel.create({
+    const id = await AddonModel.create({
       name,
       price_modifier: Number(body.price_modifier) || 0,
       is_active: body.is_active !== false,
@@ -51,7 +51,11 @@ export async function POST(request: Request) {
       entity_type: "addon",
       entity_id: id,
     });
-    return Response.json({ id, addon: AddonModel.byId(id), success: true });
+    return Response.json({
+      id,
+      addon: await AddonModel.byId(id),
+      success: true,
+    });
   } catch (error: any) {
     const duplicate = /UNIQUE/i.test(error.message || "");
     return Response.json(

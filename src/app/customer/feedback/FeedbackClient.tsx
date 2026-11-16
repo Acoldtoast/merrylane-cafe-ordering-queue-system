@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Icon } from "@/components/Icons";
 import { useFeedback } from "@/components/Feedback";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { useCustomer } from "@/components/CustomerProvider";
 
 const captions = [
@@ -66,7 +67,7 @@ export function FeedbackClient({
     setSubmitting(true);
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/reviews", {
+        const response = await fetchPortalApi("/api/reviews", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

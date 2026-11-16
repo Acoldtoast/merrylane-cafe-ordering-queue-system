@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { CoffeeArt, artKindForCategory } from "@/components/CoffeeArt";
 import { Icon } from "@/components/Icons";
+import { SkeletonLine } from "@/components/PortalSkeletonPrimitives";
 import { useFeedback } from "@/components/Feedback";
 import { useCustomer } from "@/components/CustomerProvider";
 import type { MenuExtra, MenuItem, MenuVariant } from "@/lib/types";
@@ -51,6 +52,7 @@ export function ItemClient({
   const [quantity, setQuantity] = useState(1);
   const [editLoaded, setEditLoaded] = useState(!editKey);
   const [editMissing, setEditMissing] = useState(false);
+  const [editBaseline, setEditBaseline] = useState<string | null>(null);
 
   useEffect(() => {
     if (!editKey || !ready) return;
@@ -72,6 +74,15 @@ export function ItemClient({
     setSugarLevel(cartItem.sugarLevel || "50%");
     setNote(cartItem.note || "");
     setQuantity(cartItem.quantity);
+    setEditBaseline(
+      JSON.stringify({
+        selectedVariants: selected,
+        selectedExtras: cartItem.extras.map((extra) => extra.id),
+        sugarLevel: cartItem.sugarLevel || "50%",
+        note: cartItem.note || "",
+        quantity: cartItem.quantity,
+      })
+    );
     setEditMissing(false);
     setEditLoaded(true);
   }, [editKey, groups, item.id, items, ready]);
@@ -103,6 +114,15 @@ export function ItemClient({
   const outOfStock = item.stock_status === "out";
   const allInCart = !outOfStock && Number.isFinite(maxQuantity) && maxQuantity <= 0;
   const soldOut = outOfStock || allInCart;
+  const editHasChanges =
+    !editKey ||
+    JSON.stringify({
+      selectedVariants,
+      selectedExtras,
+      sugarLevel,
+      note,
+      quantity,
+    }) !== editBaseline;
 
   useEffect(() => {
     if (maxQuantity === Number.POSITIVE_INFINITY) return;
@@ -239,8 +259,23 @@ export function ItemClient({
           </Link>
         </div>
       ) : editKey && !editLoaded ? (
-        <div className="loading-block">
-          <span className="spinner" /> Loading your item options…
+        <div className="item-layout" role="status" aria-busy="true" aria-label="Loading item options">
+          <div
+            className="item-visual customer-skeleton-item-visual skeleton"
+            aria-hidden="true"
+          />
+          <section className="item-panel" aria-hidden="true">
+            <SkeletonLine size="short" />
+            <SkeletonLine size="heading" />
+            <SkeletonLine size="long" />
+            <SkeletonLine size="medium" />
+            <div className="customer-skeleton-options">
+              {[1, 2, 3].map((option) => (
+                <SkeletonLine size="search" key={option} />
+              ))}
+            </div>
+            <SkeletonLine size="button" />
+          </section>
         </div>
       ) : (
       <div className="item-layout">
@@ -248,7 +283,17 @@ export function ItemClient({
           <span className="badge badge-dark item-visual-tag">
             {item.is_best_seller ? "Best seller" : item.category_name}
           </span>
-          <CoffeeArt kind={artKindForCategory(item.category_name, item.name)} />
+          {item.image_url ? (
+            <img
+              className="item-product-image"
+              src={item.image_url}
+              alt={item.name}
+              loading="lazy"
+              decoding="async"
+            />
+          ) : (
+            <CoffeeArt kind={artKindForCategory(item.category_name, item.name)} />
+          )}
         </div>
 
         <section className="item-panel">
@@ -408,7 +453,9 @@ export function ItemClient({
               type="button"
               className="btn btn-primary"
               onClick={addToOrder}
-              disabled={Boolean(editKey && !editLoaded) || soldOut}
+              disabled={
+                Boolean(editKey && (!editLoaded || !editHasChanges)) || soldOut
+              }
             >
               {outOfStock
                 ? "Sold out today"

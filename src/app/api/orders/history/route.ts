@@ -4,8 +4,9 @@ import { OrderModel } from "@/lib/models";
 export async function GET() {
   try {
     const guestId = await getGuestId();
+    const orders = guestId ? await OrderModel.byGuest(guestId) : [];
     return Response.json({
-      orders: guestId ? OrderModel.byGuest(guestId) : [],
+      orders,
       success: true,
     });
   } catch (error: unknown) {

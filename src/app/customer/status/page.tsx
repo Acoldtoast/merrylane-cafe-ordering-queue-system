@@ -19,10 +19,10 @@ export default async function StatusPage({
 
   try {
     initialOrder = orderId
-      ? OrderModel.byId(orderId) || null
-      : OrderModel.byTable(table, 1)[0] || null;
+      ? (await OrderModel.byId(orderId)) || null
+      : (await OrderModel.byTable(table, 1))[0] || null;
     if (initialOrder) {
-      initialReview = ReviewModel.byOrder(initialOrder.id) || null;
+      initialReview = (await ReviewModel.byOrder(initialOrder.id)) || null;
     }
   } catch {
     // The client can still load the order after the database is ready.

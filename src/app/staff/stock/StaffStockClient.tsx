@@ -1,14 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PortalShell } from "@/components/PortalShell";
 import { staffNav } from "@/components/portalNav";
 import { CoffeeArt, artKindForCategory } from "@/components/CoffeeArt";
 import { Icon } from "@/components/Icons";
 import { LoadingDots } from "@/components/LoadingDots";
+import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
 import type { MenuItem } from "@/lib/types";
 import { peso } from "@/lib/format";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { usePolling } from "@/lib/usePolling";
 
 type Filter = "all" | "low" | "out" | "available";
@@ -42,10 +43,11 @@ export function StaffStockClient() {
     stock_status: "available" as "available" | "out",
     stock_scope: "today" as "today" | "until_changed",
   });
+  const [savedForm, setSavedForm] = useState<typeof form | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch("/api/stock", { cache: "no-store" });
+      const response = await fetchPortalApi("/api/stock", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok || !data.success) {
         throw new Error(data.error || "Unable to load menu availability.");
@@ -59,7 +61,7 @@ export function StaffStockClient() {
     }
   }, []);
 
-  usePolling(load, 20000);
+  usePolling(load, 20000, { resources: ["stock"] });
 
   useEffect(() => {
     if (!confirming) return;
@@ -109,7 +111,7 @@ export function StaffStockClient() {
           : "available";
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/stock", {
+        const response = await fetchPortalApi("/api/stock", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -155,14 +157,16 @@ export function StaffStockClient() {
 
   const openEdit = (item: MenuItem) => {
     setEditing(item);
-    setForm({
+    const nextForm: typeof form = {
       stock_count: item.stock_tracking_enabled
         ? String(item.stock_count ?? 0)
         : "",
       low_stock_threshold: String(item.low_stock_threshold ?? 5),
       stock_status: item.stock_manual_out_date ? "out" : "available",
       stock_scope: item.stock_scope || "today",
-    });
+    };
+    setForm(nextForm);
+    setSavedForm(nextForm);
   };
 
   const saveEdit = async () => {
@@ -206,7 +210,7 @@ export function StaffStockClient() {
     };
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/stock", {
+        const response = await fetchPortalApi("/api/stock", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -247,15 +251,10 @@ export function StaffStockClient() {
   const lowCount = items.filter((item) => item.stock_status === "low").length;
   const outCount = items.filter((item) => item.stock_status === "out").length;
 
+  if (loading) return <PortalPageSkeleton area="staff" />;
+
   return (
-    <PortalShell
-      area="staff"
-      title="Menu availability."
-      subtitle="Enter how many portions staff estimate are left. Orders deduct one each; zero marks the item sold out. No inventory setup is needed."
-      contextLabel="Service · Portions left"
-      contextTitle={`${items.length} menu items · ${outCount} sold out`}
-      nav={staffNav}
-    >
+    <>
       {error && <div className="error-strip" style={{ marginBottom: 13 }}>{error}</div>}
 
       <div className="stat-grid three">
@@ -288,11 +287,7 @@ export function StaffStockClient() {
         </div>
       </div>
 
-      <div className="section-bar">
-        <div>
-          <h2>Remaining portions</h2>
-          <p>Set an estimate of what is left; no inventory management required.</p>
-        </div>
+      <div className="section-bar section-bar-actions-only">
         <button type="button" className="btn btn-soft btn-sm" onClick={load}>
           <Icon name="refresh" className="icon-sm" /> Refresh
         </button>
@@ -331,11 +326,7 @@ export function StaffStockClient() {
 
       <div className="panel">
         <div className="panel-body tight">
-          {loading ? (
-            <div className="loading-block">
-              <span className="spinner" /> Loading availability…
-            </div>
-          ) : filtered.length === 0 ? (
+          {filtered.length === 0 ? (
             <div className="empty-panel" style={{ border: 0 }}>
               <div className="empty-icon">
                 <Icon name="coffee" />
@@ -451,17 +442,7 @@ export function StaffStockClient() {
       </div>
 
       {confirming && (
-        <div
-          className="feedback-layer tone-warning"
-          onMouseDown={(event) => {
-            if (
-              event.target === event.currentTarget &&
-              busyId !== confirming.item.id
-            ) {
-              setConfirming(null);
-            }
-          }}
-        >
+        <div className="feedback-layer tone-warning">
           <section
             className="feedback-card stock-confirm-card"
             data-tone="warning"
@@ -517,7 +498,7 @@ export function StaffStockClient() {
       )}
 
       {editing && (
-        <div className="modal-backdrop" onClick={() => setEditing(null)}>
+        <div className="modal-backdrop">
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-head">
               <h2>{editing.name}</h2>
@@ -620,7 +601,10 @@ export function StaffStockClient() {
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={busyId === editing.id}
+                disabled={
+                  busyId === editing.id ||
+                  JSON.stringify(form) === JSON.stringify(savedForm)
+                }
                 onClick={saveEdit}
               >
                 Save availability
@@ -629,6 +613,6 @@ export function StaffStockClient() {
           </div>
         </div>
       )}
-    </PortalShell>
+    </>
   );
 }

@@ -1,47 +1,38 @@
 /**
- * Database adapter using Node's built-in node:sqlite (SQLite3).
- * 
- * NOTE: Node.js v26.7.0 crashes PGlite/WASM with an Abort() error,
- * so we use node:sqlite (built-in, no native deps) instead of PGlite.
- * 
- * The dev server runs with --webpack (not Turbopack) because Turbopack
- * has a junction point bug with PGlite on Windows.
+ * Database adapter backed by PGlite (PostgreSQL compiled to WASM).
  *
- * Database file: data/merrylane.db (auto-created on first run).
- * Migrations: see scripts/schema.sql
+ * The app keeps a single PGlite instance per process. PGlite is asynchronous,
+ * so every statement returns a promise; callers must `await` queries.
+ *
+ * Database directory: data/merrylane-pglite (created on first run).
+ * This system uses PGlite (PostgreSQL compiled to WASM) exclusively.
+ * All data access goes through PGlite. All new integrations must use PGlite.
  */
 
-import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
-import fs from "node:fs";
+import { PGliteDatabase } from "./pglite";
 
 declare global {
-  var __merrylaneDb: DatabaseSync | undefined;
+  var __merrylaneDb: PGliteDatabase | undefined;
 }
 
-let _db: DatabaseSync | null = null;
+let _db: PGliteDatabase | null = null;
 
-function getDbPath(): string {
-  const dataDir = path.join(process.cwd(), "data");
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
+export function getDbPath(): string {
+  const override = process.env.MERRYLANE_DB_DIR;
+  if (override && override.trim()) {
+    return path.resolve(override);
   }
-  return path.join(dataDir, "merrylane.db");
+  return path.join(process.cwd(), "data", "merrylane-pglite");
 }
 
-export function getDb(): DatabaseSync {
+export function getDb(): PGliteDatabase {
   if (typeof globalThis !== "undefined" && globalThis.__merrylaneDb) {
     return globalThis.__merrylaneDb;
   }
   if (_db) return _db;
 
-  const dbPath = getDbPath();
-  _db = new DatabaseSync(dbPath);
-  _db.exec(
-    `PRAGMA journal_mode = WAL;
-     PRAGMA foreign_keys = ON;
-     PRAGMA busy_timeout = 5000;`
-  );
+  _db = PGliteDatabase.open(getDbPath());
 
   if (typeof globalThis !== "undefined") {
     globalThis.__merrylaneDb = _db;
@@ -50,12 +41,14 @@ export function getDb(): DatabaseSync {
   return _db;
 }
 
-export function closeDb(): void {
+export async function closeDb(): Promise<void> {
   if (_db) {
-    _db.close();
+    await _db.close();
     _db = null;
   }
   if (typeof globalThis !== "undefined") {
     globalThis.__merrylaneDb = undefined;
   }
 }
+
+export type { PGliteDatabase };

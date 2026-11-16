@@ -5,11 +5,26 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Icon } from "@/components/Icons";
 import { useFeedback } from "@/components/Feedback";
-import { CustomerCancelOrderButton } from "@/components/CustomerCancelOrderButton";
+import { CustomerPageSkeleton } from "@/components/CustomerPageSkeleton";
 import { useCustomer } from "@/components/CustomerProvider";
-import type { Order } from "@/lib/types";
+import type { CartItem, Order } from "@/lib/types";
 import { peso, orderTypeLabel } from "@/lib/format";
 import { orderItemMeta } from "@/lib/orderItems";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
+
+const GCASH_CHECKOUT_DRAFT_KEY = "merrylane.gcash-checkout.v1";
+
+interface GcashCheckoutDraft {
+  customerName: string;
+  remarks: string;
+  orderType: "dine_in" | "take_out";
+}
+
+interface CheckoutQuote {
+  subtotal: number;
+  service_charge: number;
+  total: number;
+}
 
 export function PaymentClient({
   orderId,
@@ -22,8 +37,20 @@ export function PaymentClient({
 }) {
   const router = useRouter();
   const feedback = useFeedback();
-  const { setTable, table } = useCustomer();
+  const {
+    setTable,
+    table,
+    items: cartItems,
+    orderType,
+    clearCart,
+    setLastOrderId,
+    ready,
+  } = useCustomer();
   const [order, setOrder] = useState<Order | null>(null);
+  const [checkoutDraft, setCheckoutDraft] = useState<GcashCheckoutDraft | null>(
+    null
+  );
+  const [checkoutQuote, setCheckoutQuote] = useState<CheckoutQuote | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [proof, setProof] = useState("");
@@ -35,20 +62,107 @@ export function PaymentClient({
   const [gcash, setGcash] = useState("0917 123 4567");
   const [gcashName, setGcashName] = useState("Merrylane Cafe");
   const [gcashQr, setGcashQr] = useState("");
+  const isNewCheckout = !balancePayment && !orderId;
 
   useEffect(() => {
     setTable(initialTable);
   }, [initialTable, setTable]);
 
   useEffect(() => {
+    if (isNewCheckout) {
+      if (!ready) return;
+      if (cartItems.length === 0) {
+        setError("Your cart is empty. Return to checkout to choose your items.");
+        setLoading(false);
+        return;
+      }
+
+      let draft: GcashCheckoutDraft;
+      try {
+        const saved = sessionStorage.getItem(GCASH_CHECKOUT_DRAFT_KEY);
+        const parsed = saved ? JSON.parse(saved) : null;
+        if (
+          !parsed ||
+          typeof parsed.customerName !== "string" ||
+          !parsed.customerName.trim() ||
+          typeof parsed.remarks !== "string" ||
+          (parsed.orderType !== "dine_in" && parsed.orderType !== "take_out")
+        ) {
+          throw new Error("Your checkout details are missing. Return to checkout.");
+        }
+        draft = parsed;
+      } catch (cause: unknown) {
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Your checkout details are missing. Return to checkout."
+        );
+        setLoading(false);
+        return;
+      }
+      setCheckoutDraft(draft);
+
+      const requestItems = cartItems.map((item: CartItem) => ({
+        menuItemId: item.menuItemId,
+        quantity: item.quantity,
+        variantIds: item.variantIds || (item.variant ? [item.variant.id] : []),
+        addonIds: item.extras.map((extra) => extra.id),
+        sugarLevel: item.sugarLevel || undefined,
+        note: item.note || undefined,
+      }));
+      Promise.all([
+        fetchPortalApi("/api/settings").then((response) => response.json()),
+        fetchPortalApi("/api/orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            preview: true,
+            table_number: initialTable,
+            order_type: draft.orderType || orderType,
+            payment_method: "gcash",
+            customer_name: draft.customerName,
+            remarks: draft.remarks,
+            items: requestItems,
+          }),
+        }).then(async (response) => {
+          const data = await response.json();
+          if (!response.ok || !data.success) {
+            throw new Error(data.error || "Could not check the GCash amount.");
+          }
+          return data;
+        }),
+      ])
+        .then(([settingsData, quoteData]) => {
+          setCheckoutQuote({
+            subtotal: Number(quoteData.subtotal),
+            service_charge: Number(quoteData.service_charge),
+            total: Number(quoteData.total),
+          });
+          if (settingsData.settings) {
+            setGcash(settingsData.settings.gcash_number || "0917 123 4567");
+            setGcashName(settingsData.settings.gcash_name || "Merrylane Cafe");
+            setGcashQr(settingsData.settings.gcash_qr_data_url || "");
+          }
+        })
+        .catch((cause: unknown) => {
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Could not prepare GCash payment."
+          );
+        })
+        .finally(() => setLoading(false));
+      return;
+    }
+
     if (!orderId) {
       setError("We couldn't find that order.");
       setLoading(false);
       return;
     }
     Promise.all([
-      fetch(`/api/orders/${orderId}`).then((res) => res.json()),
-      fetch("/api/settings").then((res) => res.json()),
+      fetchPortalApi(`/api/orders/${orderId}`).then((res) => res.json()),
+      fetchPortalApi("/api/settings").then((res) => res.json()),
     ])
       .then(([orderData, settingsData]) => {
         if (!orderData.order) throw new Error(orderData.error || "Order not found.");
@@ -75,7 +189,16 @@ export function PaymentClient({
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [orderId, initialTable, router, balancePayment]);
+  }, [
+    orderId,
+    initialTable,
+    router,
+    balancePayment,
+    isNewCheckout,
+    ready,
+    cartItems,
+    orderType,
+  ]);
 
   const handleFile = (file: File | null) => {
     if (!file) return;
@@ -113,6 +236,12 @@ export function PaymentClient({
 
   const submit = async () => {
     setSubmitAttempted(true);
+    if (isNewCheckout && (!checkoutDraft || !checkoutQuote)) {
+      feedback.warning("Checkout is not ready", {
+        message: "Return to checkout and try again before sending your receipt.",
+      });
+      return;
+    }
     if (!proof) {
       feedback.warning("We need to see the payment", {
         message: "Add a clear screenshot of your GCash receipt before sending it for review.",
@@ -122,7 +251,9 @@ export function PaymentClient({
     if (!reference.trim()) {
       feedback.warning("One detail is missing", {
         message: "Type the GCash reference number shown on your receipt.",
-        details: [{ label: "Order", value: `#${String(orderId).padStart(3, "0")}` }],
+        details: orderId
+          ? [{ label: "Order", value: `#${String(orderId).padStart(3, "0")}` }]
+          : undefined,
       });
       return;
     }
@@ -131,33 +262,61 @@ export function PaymentClient({
       ? balancePayment
         ? order.balance_due || 0
         : order.total
-      : 0;
+      : checkoutQuote?.total || 0;
     const result = await feedback.run(
       async () => {
-        const response = await fetch(
+        const response = await fetchPortalApi(
           balancePayment
             ? `/api/orders/${orderId}/balance-payments`
-            : `/api/orders/${orderId}/pay`,
+            : isNewCheckout
+              ? "/api/orders"
+              : `/api/orders/${orderId}/pay`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(
-              balancePayment
+              isNewCheckout
                 ? {
+                    table_number: initialTable,
+                    order_type: checkoutDraft?.orderType,
                     payment_method: "gcash",
+                    customer_name: checkoutDraft?.customerName,
+                    remarks: checkoutDraft?.remarks,
+                    items: cartItems.map((item) => ({
+                      menuItemId: item.menuItemId,
+                      quantity: item.quantity,
+                      variantIds:
+                        item.variantIds ||
+                        (item.variant ? [item.variant.id] : []),
+                      addonIds: item.extras.map((extra) => extra.id),
+                      sugarLevel: item.sugarLevel || undefined,
+                      note: item.note || undefined,
+                    })),
                     payment_proof_url: proof,
                     payment_reference: reference,
                   }
-                : {
-                    payment_proof_url: proof,
-                    payment_reference: reference,
-                  }
+                : balancePayment
+                  ? {
+                      payment_method: "gcash",
+                      payment_proof_url: proof,
+                      payment_reference: reference,
+                    }
+                  : {
+                      payment_proof_url: proof,
+                      payment_reference: reference,
+                    }
             ),
           }
         );
         const data = await response.json();
         if (!response.ok || !data.success) {
           throw new Error(data.error || "Could not submit the payment proof.");
+        }
+        if (
+          isNewCheckout &&
+          (!Number.isSafeInteger(Number(data.orderId)) || Number(data.orderId) <= 0)
+        ) {
+          throw new Error("The order was submitted but its confirmation was missing.");
         }
         return data;
       },
@@ -166,14 +325,22 @@ export function PaymentClient({
           title: "Sending your receipt…",
           message: "A staff member will check it against the GCash account.",
         },
-        success: () => ({
+        success: (data) => ({
           eyebrow: balancePayment ? "Balance sent" : "Receipt sent",
           title: "Payment proof submitted",
           message:
             "We verify payments manually, usually within a few minutes. Keep this page handy.",
           duration: 3400,
           details: [
-            { label: "Order", value: `#${String(orderId).padStart(3, "0")}` },
+            {
+              label: "Order",
+              value: `#${String(
+                data.orderNumber ??
+                  data.order?.order_number ??
+                  order?.order_number ??
+                  orderId
+              ).padStart(3, "0")}`,
+            },
             { label: "Amount", value: peso(amount) },
             { label: "Reference", value: reference.trim() },
           ],
@@ -181,23 +348,43 @@ export function PaymentClient({
       }
     );
     if (result.ok) {
-      router.push(
-        balancePayment
-          ? `/customer/status?id=${orderId}&table=${initialTable}`
-          : `/customer/confirm?id=${orderId}&table=${initialTable}`
-      );
+      if (isNewCheckout && result.result) {
+        const newOrderId = Number(result.result.orderId);
+        setLastOrderId(newOrderId);
+        clearCart();
+        try {
+          sessionStorage.removeItem(GCASH_CHECKOUT_DRAFT_KEY);
+        } catch (error) {
+          console.warn("Could not clear the saved GCash checkout details.", error);
+        }
+        router.push(`/customer/confirm?id=${newOrderId}&table=${initialTable}`);
+      } else {
+        router.push(
+          balancePayment
+            ? `/customer/status?id=${orderId}&table=${initialTable}`
+            : `/customer/confirm?id=${orderId}&table=${initialTable}`
+        );
+      }
     } else {
       setSubmitting(false);
     }
   };
 
+  const amountDue = order
+    ? balancePayment
+      ? order.balance_due || 0
+      : order.total
+    : checkoutQuote?.total || 0;
+  const canReturnToCheckout =
+    isNewCheckout ||
+    (!balancePayment &&
+      order?.payment_status === "pending" &&
+      !order.payment_proof_url);
+  const displayOrderType =
+    order?.order_type || checkoutDraft?.orderType || orderType;
+
   if (loading) {
-    return (
-      <div className="loading-block">
-        <span className="spinner" />
-        Preparing your GCash payment…
-      </div>
-    );
+    return <CustomerPageSkeleton />;
   }
 
   if (error && !order) {
@@ -207,8 +394,32 @@ export function PaymentClient({
           <div className="state-icon">
             <Icon name="alert" />
           </div>
-          <h1>We lost that order.</h1>
+          <h1>{isNewCheckout ? "GCash checkout isn't ready." : "We lost that order."}</h1>
           <p>{error}</p>
+          <Link
+            href={
+              isNewCheckout
+                ? `/customer/cart?table=${initialTable}`
+                : `/customer/menu?table=${table}`
+            }
+            className="btn btn-primary"
+          >
+            {isNewCheckout ? "Back to checkout" : "Back to menu"}
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (!order && !isNewCheckout) {
+    return (
+      <div className="state-page">
+        <div className="state-card">
+          <div className="state-icon">
+            <Icon name="alert" />
+          </div>
+          <h1>Payment details are unavailable.</h1>
+          <p>{error || "Please ask a staff member for help with your order."}</p>
           <Link href={`/customer/menu?table=${table}`} className="btn btn-primary">
             Back to menu
           </Link>
@@ -217,24 +428,34 @@ export function PaymentClient({
     );
   }
 
-  if (!order) return null;
-
   return (
     <div className="pay-card">
       <Link
         href={
           balancePayment
             ? `/customer/status?id=${orderId}&table=${initialTable}`
-            : `/customer/cart?table=${initialTable}`
+            : canReturnToCheckout
+              ? `/customer/cart?table=${initialTable}`
+              : `/customer/status?id=${orderId}&table=${initialTable}`
         }
         className="back-link"
+        aria-disabled={submitting}
+        onClick={(event) => {
+          if (submitting) event.preventDefault();
+        }}
       >
-        <Icon name="chevron-left" /> Back
+        <Icon name="chevron-left" />{" "}
+        {canReturnToCheckout ? "Back to checkout" : "Back to order"}
       </Link>
       <div className="checkout-head">
         <span className="eyebrow">
-          {balancePayment ? "Additional balance" : "Pay with GCash"} · Order #
-          {String(order.id).padStart(3, "0")}
+          {balancePayment
+            ? "Additional balance"
+            : order
+              ? `Pay with GCash · Order #${String(
+                  order.order_number ?? order.id
+                ).padStart(3, "0")}`
+              : `Pay with GCash · Table ${String(initialTable).padStart(2, "0")}`}
         </span>
         <h1>{balancePayment ? "Pay the added balance." : "Pay with GCash."}</h1>
         <p>
@@ -246,7 +467,7 @@ export function PaymentClient({
 
       {error && <div className="error-strip" style={{ marginBottom: 12 }}>{error}</div>}
       {balancePayment &&
-        order.balance_payments?.some((payment) => payment.status === "pending") && (
+        order?.balance_payments?.some((payment) => payment.status === "pending") && (
           <div className="payment-note" style={{ marginBottom: 12 }}>
             <Icon name="clock" />
             <span>
@@ -261,7 +482,7 @@ export function PaymentClient({
           <div className="gcash-amount">
             <div>
               <small>Exact amount</small>
-              <strong>{peso(balancePayment ? order.balance_due || 0 : order.total)}</strong>
+              <strong>{peso(amountDue)}</strong>
             </div>
             <span className="gcash-mark">G</span>
           </div>
@@ -278,7 +499,7 @@ export function PaymentClient({
             <div className="qr-number">{gcash}</div>
             <p>
               Open GCash → Scan QR → enter{" "}
-              {peso(balancePayment ? order.balance_due || 0 : order.total)} → confirm.
+              {peso(amountDue)} → confirm.
               <br />
               Keep the receipt for your reference.
             </p>
@@ -289,7 +510,7 @@ export function PaymentClient({
               onClick={copyNumber}
               disabled={
                 balancePayment &&
-                Boolean(order.balance_payments?.some((payment) => payment.status === "pending"))
+                Boolean(order?.balance_payments?.some((payment) => payment.status === "pending"))
               }
             >
               <Icon name={copied ? "check" : "card"} className="icon-sm" />
@@ -385,8 +606,8 @@ export function PaymentClient({
           <div className="payment-note">
             <Icon name="info" />
             <span>
-              Payments are checked by a staff member against this order. You&apos;ll
-              see the queue number as soon as it&apos;s confirmed.
+              After you submit the receipt and reference, a staff member will check
+              the payment. You&apos;ll see the queue number as soon as it&apos;s confirmed.
             </span>
           </div>
 
@@ -397,7 +618,7 @@ export function PaymentClient({
               disabled={
                 submitting ||
                 (balancePayment &&
-                  Boolean(order.balance_payments?.some((payment) => payment.status === "pending")))
+                  Boolean(order?.balance_payments?.some((payment) => payment.status === "pending")))
               }
               onClick={submit}
             >
@@ -414,14 +635,21 @@ export function PaymentClient({
               )}
             </button>
             {!balancePayment && (
-              <CustomerCancelOrderButton
-                order={order}
-                onCancelled={() =>
-                  router.replace(
-                    `/customer/status?id=${order.id}&table=${initialTable}`
-                  )
+              <Link
+                href={
+                  canReturnToCheckout
+                    ? `/customer/cart?table=${initialTable}`
+                    : `/customer/status?id=${orderId}&table=${initialTable}`
                 }
-              />
+                className="btn btn-soft"
+                aria-disabled={submitting}
+                onClick={(event) => {
+                  if (submitting) event.preventDefault();
+                }}
+              >
+                <Icon name="chevron-left" className="icon-sm" />
+                {canReturnToCheckout ? "Back to checkout" : "Back to order"}
+              </Link>
             )}
           </div>
         </section>
@@ -429,7 +657,7 @@ export function PaymentClient({
         <aside className="card pay-side">
           <h2>Your order</h2>
           <div className="summary-items">
-            {order.items?.map((item) => (
+            {order?.items?.map((item) => (
               <div className="summary-item" key={item.id}>
                 <div className="summary-item-main">
                   <div className="summary-item-name">
@@ -444,9 +672,31 @@ export function PaymentClient({
                 </div>
               </div>
             ))}
+            {!order &&
+              cartItems.map((item) => (
+                <div className="summary-item" key={item.key}>
+                  <div className="summary-item-main">
+                    <div className="summary-item-name">
+                      {item.quantity} × {item.name}
+                    </div>
+                    <div className="summary-item-meta">
+                      {[
+                        item.variant?.name,
+                        item.sugarLevel ? `Sugar ${item.sugarLevel}` : null,
+                        ...item.extras.map((extra) => extra.name),
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || item.category}
+                    </div>
+                  </div>
+                  <div className="summary-item-price">
+                    {peso(item.unitPrice * item.quantity)}
+                  </div>
+                </div>
+              ))}
           </div>
           <div className="summary-totals">
-            {balancePayment ? (
+            {balancePayment && order ? (
               <>
                 <div className="totals-row">
                   <span>Current order total</span>
@@ -461,7 +711,7 @@ export function PaymentClient({
                   <span>{peso(order.balance_due || 0)}</span>
                 </div>
               </>
-            ) : (
+            ) : order ? (
               <>
                 <div className="totals-row">
                   <span>Subtotal</span>
@@ -471,22 +721,47 @@ export function PaymentClient({
                   <span>Service charge</span>
                   <span>{peso(order.service_charge)}</span>
                 </div>
+                {Number(order.discount_amount || 0) > 0 && (
+                  <div className="totals-row payment-customer-discount">
+                    <span>Discount</span>
+                    <span>−{peso(order.discount_amount || 0)}</span>
+                  </div>
+                )}
                 <div className="totals-row total">
                   <span>Total</span>
                   <span>{peso(order.total)}</span>
                 </div>
               </>
+            ) : (
+              <>
+                <div className="totals-row">
+                  <span>Subtotal</span>
+                  <span>{peso(checkoutQuote?.subtotal || 0)}</span>
+                </div>
+                <div className="totals-row">
+                  <span>Service charge</span>
+                  <span>{peso(checkoutQuote?.service_charge || 0)}</span>
+                </div>
+                <div className="totals-row total">
+                  <span>Total</span>
+                  <span>{peso(amountDue)}</span>
+                </div>
+              </>
             )}
           </div>
           <div className="status-confirm-number">
-            <span>{orderTypeLabel(order.order_type)}</span>
-            <b>Table {String(order.table_number).padStart(2, "0")}</b>
+            <span>{orderTypeLabel(displayOrderType)}</span>
+            <b>Table {String(order?.table_number || initialTable).padStart(2, "0")}</b>
           </div>
           <div className="help-card">
             <h3>Need a hand?</h3>
             <p>Call a waiter if you need help with GCash or your order.</p>
             <Link
-              href={`/customer/waiter?table=${initialTable}&order=${order.id}`}
+              href={
+                order
+                  ? `/customer/waiter?table=${initialTable}&order=${order.id}`
+                  : `/customer/waiter?table=${initialTable}`
+              }
               className="btn btn-outline btn-block btn-sm"
             >
               <Icon name="waiter" className="icon-sm" /> Call a waiter

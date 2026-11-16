@@ -2,12 +2,11 @@
 
 import Link from "next/link";
 import { useCallback, useState } from "react";
-import { PortalShell } from "@/components/PortalShell";
-import { adminNav } from "@/components/portalNav";
 import { ActivityRow } from "@/components/ActivityFeed";
 import { CoffeeArt, artKindForCategory } from "@/components/CoffeeArt";
 import { Icon } from "@/components/Icons";
 import { LoadingDots } from "@/components/LoadingDots";
+import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import type {
   AdminOverviewData,
   AdminBestSellingItem as BestSellingItem,
@@ -15,6 +14,7 @@ import type {
 } from "@/lib/adminOverview";
 import { dateTimeLabel, peso, relativeTime, shortDate } from "@/lib/format";
 import { usePolling } from "@/lib/usePolling";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { AdminAnalyticsReport } from "./analysis/AdminAnalyticsReport";
 
 type DashboardData = AdminOverviewData;
@@ -33,7 +33,7 @@ export function AdminDashboardClient({
 
   const load = useCallback(async (fresh = false) => {
     try {
-      const response = await fetch(
+      const response = await fetchPortalApi(
         `/api/analytics/overview${fresh ? "?fresh=1" : ""}`,
         { cache: "no-store" }
       );
@@ -50,14 +50,17 @@ export function AdminDashboardClient({
     }
   }, []);
 
-  usePolling(load, 30000, { immediate: !initialData });
+  usePolling(load, 30000, {
+    immediate: !initialData,
+    resources: ["accounts", "analytics", "menu", "orders", "payments", "reviews", "sales", "stock"],
+  });
 
   const markBestSeller = async (item: BestSellingItem) => {
     if (!item.menu_item_id) return;
     setBusyMenuItemId(item.menu_item_id);
     setError("");
     try {
-      const response = await fetch(`/api/menu/${item.menu_item_id}`, {
+      const response = await fetchPortalApi(`/api/menu/${item.menu_item_id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ is_best_seller: true }),
@@ -79,28 +82,11 @@ export function AdminDashboardClient({
   };
 
   return (
-    <PortalShell
-      area="admin"
-      title={mode === "analysis" ? "Business analysis." : "The cafe, in numbers."}
-      subtitle={
-        mode === "analysis"
-          ? "Sales trends, menu performance, inventory signals, and practical next steps."
-          : "Sales, queues, and what needs attention today."
-      }
-      contextLabel={mode === "analysis" ? "Admin · Analysis" : "Admin · Overview"}
-      contextTitle={new Date().toLocaleDateString("en-PH", {
-        weekday: "long",
-        month: "long",
-        day: "numeric",
-      })}
-      nav={adminNav}
-    >
+    <>
       {error && <div className="error-strip" style={{ marginBottom: 13 }}>{error}</div>}
 
       {loading || !data ? (
-        <div className="loading-block">
-          <span className="spinner" /> Gathering today&apos;s numbers…
-        </div>
+        <PortalPageSkeleton area="admin" />
       ) : mode === "analysis" ? (
         <div className="analysis-page-enter">
           <Dashboard
@@ -118,7 +104,7 @@ export function AdminDashboardClient({
           onMarkBestSeller={markBestSeller}
         />
       )}
-    </PortalShell>
+    </>
   );
 }
 
@@ -217,7 +203,7 @@ function Dashboard({
             {overview.avg_prep_time ? `${Math.round(overview.avg_prep_time)}m` : "—"}
           </div>
           <div className="stat-bottom">
-            <span>Confirmed to ready</span>
+            <span>Confirmed to served</span>
           </div>
         </div>
         <div className="stat-card">
@@ -375,8 +361,8 @@ function Dashboard({
               <h3>Promote this week&apos;s leader</h3>
               <p>
                 {weeklyLeader
-                  ? `${weeklyLeader.name} leads with ${weeklyLeader.total_quantity} sold this week. Keep it visible on the customer menu.`
-                  : "There are no confirmed orders this week yet. Once orders come in, the dashboard will identify this week's leader."}
+                  ? `${weeklyLeader.name} leads this week with ${weeklyLeader.total_quantity} sold. I recommend keeping it prominently visible on the customer menu to maximize conversions.`
+                  : "There are no confirmed orders this week yet. Once orders come in, I'll identify this week's leader and recommend promotional strategies."}
               </p>
               {weeklyLeader?.menu_item_id &&
                 weeklyLeader.is_active &&
@@ -401,8 +387,8 @@ function Dashboard({
               <p>
                 {monthlyLeader
                   ? monthlyLeaderNeedsRestock
-                    ? `${monthlyLeader.name} is one of this month's top sellers but is marked ${monthlyLeader.stock_status}. Review its stock before the next busy period.`
-                    : `${monthlyLeader.name} leads this month with ${monthlyLeader.total_quantity} sold. Review its stock in the read-only inventory snapshot below.`
+                    ? `I've identified ${monthlyLeader.name} as one of this month's top sellers, but it's currently marked ${monthlyLeader.stock_status}. I recommend restocking before the next busy period to avoid missed sales.`
+                    : `${monthlyLeader.name} leads this month with ${monthlyLeader.total_quantity} sold. I recommend reviewing its stock levels in the inventory snapshot below to ensure availability.`
                   : "Monthly stock suggestions will appear once there are confirmed orders this month."}
               </p>
             </div>
@@ -413,8 +399,8 @@ function Dashboard({
               <h3>Plan for peak hours</h3>
               <p>
                 {peak.order_count > 0
-                  ? `${peak.order_count} orders were placed around ${hourLabel(peak.hour)} in the available history. Consider preparing popular ingredients and staffing for that window.`
-                  : "More order history is needed before a busy-hour recommendation is available."}
+                  ? `I've identified that ${peak.order_count} orders were placed around ${hourLabel(peak.hour)} in the available history. I recommend preparing popular ingredients and staffing accordingly for that window.`
+                  : "More order history is needed before I can provide a busy-hour recommendation."}
               </p>
             </div>
           </article>
@@ -424,11 +410,11 @@ function Dashboard({
               <h3>Compare recent sales</h3>
               <p>
                 {periodRevenueChange === null
-                  ? "There is not enough sales history from the previous 7-day period to make a reliable comparison yet."
+                  ? "I don't have enough sales history from the previous 7-day period to make a reliable comparison yet."
                   : periodRevenueChange > 10
-                    ? `Sales are up ${periodRevenueChange}% compared with the previous 7 days. Keep tracking the items and hours driving the increase.`
+                    ? `Sales are up ${periodRevenueChange}% compared with the previous 7 days. I recommend continuing to track the items and hours driving this growth.`
                     : periodRevenueChange < -10
-                      ? `Sales are down ${Math.abs(periodRevenueChange)}% compared with the previous 7 days. Review best sellers, availability, and customer feedback for possible causes.`
+                      ? `Sales are down ${Math.abs(periodRevenueChange)}% compared with the previous 7 days. I recommend reviewing best sellers, availability, and customer feedback for possible causes.`
                       : `Sales are broadly steady, changing ${periodRevenueChange}% compared with the previous 7 days.`}
               </p>
             </div>
@@ -640,7 +626,7 @@ function Dashboard({
               <tbody>
                 {data.recent_orders.map((order) => (
                   <tr key={order.id}>
-                    <td data-label="">#{String(order.id).padStart(3, "0")}</td>
+                    <td data-label="">#{String(order.order_number ?? order.id).padStart(3, "0")}</td>
                     <td data-label="Table">{String(order.table_number).padStart(2, "0")}</td>
                     <td data-label="Items">{(order.items || []).length}</td>
                     <td data-label="Total">{peso(order.total)}</td>

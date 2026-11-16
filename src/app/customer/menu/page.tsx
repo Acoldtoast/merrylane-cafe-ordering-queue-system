@@ -21,12 +21,12 @@ export default async function MenuPage({
   let closingTime = "22:00";
 
   try {
-    categories = CategoryModel.all();
-    items = MenuItemModel.allActive() as unknown as MenuItem[];
-    ordering = SettingsModel.orderingWindow();
+    categories = await CategoryModel.all();
+    items = (await MenuItemModel.allActive()) as unknown as MenuItem[];
+    ordering = await SettingsModel.orderingWindow();
     closingTime =
       ordering.schedule.find((day) => day.day === ordering?.today)?.end ||
-      SettingsModel.get("closing_time") ||
+      (await SettingsModel.get("closing_time")) ||
       closingTime;
   } catch {
     // Render an empty menu rather than failing before the database is ready.

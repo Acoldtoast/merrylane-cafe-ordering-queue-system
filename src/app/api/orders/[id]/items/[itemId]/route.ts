@@ -50,7 +50,7 @@ export async function PATCH(
       );
     }
 
-    const result = OrderModel.updateStaffOrderItem({
+    const result = await OrderModel.updateStaffOrderItem({
       orderId,
       orderItemId,
       quantity,
@@ -115,7 +115,10 @@ export async function DELETE(
       );
     }
 
-    const result = OrderModel.removeStaffOrderItem({ orderId, orderItemId });
+    const result = await OrderModel.removeStaffOrderItem({
+      orderId,
+      orderItemId,
+    });
     if (!result.ok) {
       return Response.json(
         { error: result.error, success: false },

@@ -4,14 +4,14 @@ import { SettingsModel } from "@/lib/models";
 
 export const dynamic = "force-dynamic";
 
-export default function CustomerLayout({
+export default async function CustomerLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
   let initialOrderingOpen: boolean | null = null;
   try {
-    initialOrderingOpen = SettingsModel.isOrderingOpen();
+    initialOrderingOpen = await SettingsModel.isOrderingOpen();
   } catch (error) {
     console.error("Could not load the initial ordering status.", error);
   }

@@ -2,6 +2,8 @@
  * Shared API-facing types for the Merrylane Cafe system.
  */
 
+import type { OrderDiscount } from "./orderDiscount";
+
 export interface Category {
   id: number;
   name: string;
@@ -112,6 +114,8 @@ export interface OrderItem {
 export interface SalesTransaction {
   transaction_id: string;
   order_id: number;
+  order_number?: number;
+  handled_by?: string | null;
   table_number: number;
   customer_name: string;
   payment_method: "gcash" | "counter";
@@ -119,6 +123,21 @@ export interface SalesTransaction {
   paid_at: string;
   payment_reference: string | null;
   transaction_type: "order" | "additional";
+}
+
+export interface RejectedPayment {
+  rejection_id: number;
+  order_id: number;
+  order_number: number;
+  table_number: number;
+  customer_name: string;
+  payment_method: string;
+  amount: number;
+  rejected_at: string;
+  rejected_by: string | null;
+  payment_reference: string | null;
+  proof_type: "inline" | "external" | null;
+  external_proof_url: string | null;
 }
 
 export interface Order {
@@ -132,8 +151,11 @@ export interface Order {
   subtotal: number;
   service_charge: number;
   total: number;
+  discount_amount?: number;
+  discounts?: OrderDiscount[];
   remarks?: string | null;
   queue_number?: number | null;
+  order_number?: number;
   created_at: string;
   updated_at: string;
   confirmed_at?: string | null;
@@ -222,6 +244,16 @@ export interface CartItem {
 export interface User {
   id: number;
   name: string;
+  username: string;
   email: string;
+  contact_number?: string | null;
+  address?: string | null;
+  duty_hours?: string | null;
   role: "admin" | "staff";
+  is_active?: number;
+  last_login_at?: string | null;
+  last_logout_at?: string | null;
+  duty_minutes?: number;
+  session_id?: string | null;
+  created_at?: string;
 }

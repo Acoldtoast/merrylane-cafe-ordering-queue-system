@@ -2,11 +2,18 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brand } from "./Brand";
+import { SocialMediaIcons } from "./SocialMediaIcons";
 import { Icon } from "./Icons";
 import { useCustomer } from "./CustomerProvider";
 import { useIdleRoutePrefetch } from "@/lib/useIdleRoutePrefetch";
+import {
+  fetchPortalApi,
+  prefetchPortalRouteData,
+} from "@/lib/portalPrefetch";
+import { preloadPortalRouteCode } from "@/lib/preloadPortalRouteCode";
+import { usePolling } from "@/lib/usePolling";
 import { useFeedback } from "./Feedback";
 
 const LAST_ORDER_WARNING_ACKNOWLEDGED_KEY =
@@ -38,16 +45,98 @@ export function CustomerShell({
   const warnedTodayRef = useRef<string | null>(null);
   const orderingOpenRef = useRef(initialOrderingOpen);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [socialLinks, setSocialLinks] = useState<Record<string, string>>({});
+  const [socialEnabled, setSocialEnabled] = useState(true);
+  const refreshSocialSettings = useCallback(async () => {
+    try {
+      const response = await fetch("/api/public/cafe-settings", {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`Cafe settings request failed (${response.status}).`);
+      }
+      const data = await response.json();
+      setSocialLinks({
+        facebook_url: data.facebook_url || "",
+        twitter_url: data.twitter_url || "",
+        tiktok_url: data.tiktok_url || "",
+        instagram_url: data.instagram_url || "",
+      });
+      setSocialEnabled(Boolean(data.social_media_enabled));
+    } catch (error) {
+      console.error("Could not refresh cafe social links.", error);
+    }
+  }, []);
   const statusHref = "/customer/orders";
   const prefetchPaths = useMemo(
     () => [
+      `/customer/welcome?table=${table}`,
       `/customer/menu?table=${table}`,
       statusHref,
+      `/customer/status?table=${table}`,
+      `/customer/payment?table=${table}`,
+      `/customer/confirm?table=${table}`,
       `/customer/waiter?table=${table}`,
+      "/customer/hours",
+      `/customer/cart?table=${table}`,
+      "/customer/feedback",
+      "/customer/thanks",
     ],
     [table]
   );
-  useIdleRoutePrefetch(prefetchPaths);
+  const prefetchPathsKey = prefetchPaths.join("\n");
+  useIdleRoutePrefetch(prefetchPaths, true, true);
+  usePolling(refreshSocialSettings, 30_000, { resources: ["settings"] });
+  const warmCustomerRoute = (href: string) => {
+    router.prefetch(href);
+    void preloadPortalRouteCode("customer", href);
+    prefetchPortalRouteData("customer", href);
+  };
+
+  useEffect(() => {
+    const network = (
+      navigator as Navigator & {
+        connection?: { saveData?: boolean; effectiveType?: string };
+      }
+    ).connection;
+    if (
+      network?.saveData ||
+      network?.effectiveType === "slow-2g" ||
+      network?.effectiveType === "2g"
+    ) {
+      return;
+    }
+
+    let disposed = false;
+    const prefetch = () => {
+      if (disposed || document.visibilityState !== "visible") return;
+      const currentPath = pathname;
+      for (const href of prefetchPathsKey.split("\n").filter(Boolean)) {
+        if (new URL(href, window.location.origin).pathname === currentPath) continue;
+        void preloadPortalRouteCode("customer", href);
+        prefetchPortalRouteData("customer", href);
+      }
+      if (pathname.startsWith("/customer/status")) {
+        const params = new URLSearchParams(window.location.search);
+        const orderId = Number(params.get("id")) || 0;
+        if (orderId > 0) {
+          prefetchPortalRouteData(
+            "customer",
+            `/customer/payment?id=${orderId}&table=${table}`
+          );
+        }
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") prefetch();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    onVisibilityChange();
+    return () => {
+      disposed = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [pathname, prefetchPathsKey, table]);
 
   useEffect(() => {
     let active = true;
@@ -57,7 +146,7 @@ export function CustomerShell({
       if (checking) return;
       checking = true;
       try {
-        const response = await fetch("/api/settings", { cache: "no-store" });
+        const response = await fetchPortalApi("/api/settings", { cache: "no-store" });
         const data = await response.json();
         if (!response.ok || !data.success) {
           throw new Error(data.error || "Unable to check ordering hours.");
@@ -155,24 +244,41 @@ export function CustomerShell({
     <div className="customer-app">
       <header className="customer-topbar">
         <div className="customer-topbar-inner">
-          <Brand href={`/customer/menu?table=${table}`} />
+          <div className="customer-brand-block">
+            <Brand href={`/customer/menu?table=${table}`} />
+            <SocialMediaIcons links={socialLinks} enabled={socialEnabled} />
+          </div>
           <nav className="customer-nav" aria-label="Customer navigation">
             <Link
               href={`/customer/menu?table=${table}`}
               className={isMenu ? "active" : ""}
+              onMouseEnter={() => warmCustomerRoute(`/customer/menu?table=${table}`)}
+              onFocus={() => warmCustomerRoute(`/customer/menu?table=${table}`)}
             >
               Menu
             </Link>
-            <Link href={statusHref} className={isOrder ? "active" : ""}>
+            <Link
+              href={statusHref}
+              className={isOrder ? "active" : ""}
+              onMouseEnter={() => warmCustomerRoute(statusHref)}
+              onFocus={() => warmCustomerRoute(statusHref)}
+            >
               Your orders
             </Link>
             <Link
               href={`/customer/waiter?table=${table}`}
               className={isWaiter ? "active" : ""}
+              onMouseEnter={() => warmCustomerRoute(`/customer/waiter?table=${table}`)}
+              onFocus={() => warmCustomerRoute(`/customer/waiter?table=${table}`)}
             >
               Call waiter
             </Link>
-            <Link href="/customer/hours" className={isHours ? "active" : ""}>
+            <Link
+              href="/customer/hours"
+              className={isHours ? "active" : ""}
+              onMouseEnter={() => warmCustomerRoute("/customer/hours")}
+              onFocus={() => warmCustomerRoute("/customer/hours")}
+            >
               View hours
             </Link>
           </nav>
@@ -184,6 +290,8 @@ export function CustomerShell({
               href={`/customer/cart?table=${table}`}
               className="cart-icon-button"
               aria-label={`View cart, ${count} items`}
+              onMouseEnter={() => warmCustomerRoute(`/customer/cart?table=${table}`)}
+              onFocus={() => warmCustomerRoute(`/customer/cart?table=${table}`)}
             >
               <Icon name="bag" />
               {count > 0 && <span className="cart-icon-count">{count}</span>}
@@ -234,6 +342,8 @@ export function CustomerShell({
               <Link
                 href={`/customer/menu?table=${table}`}
                 className={isMenu ? "active" : ""}
+                onMouseEnter={() => warmCustomerRoute(`/customer/menu?table=${table}`)}
+                onFocus={() => warmCustomerRoute(`/customer/menu?table=${table}`)}
                 onClick={() => setMenuOpen(false)}
               >
                 <Icon name="coffee" />
@@ -243,6 +353,8 @@ export function CustomerShell({
               <Link
                 href={statusHref}
                 className={isOrder ? "active" : ""}
+                onMouseEnter={() => warmCustomerRoute(statusHref)}
+                onFocus={() => warmCustomerRoute(statusHref)}
                 onClick={() => setMenuOpen(false)}
               >
                 <Icon name="receipt" />
@@ -252,6 +364,8 @@ export function CustomerShell({
               <Link
                 href={`/customer/waiter?table=${table}`}
                 className={isWaiter ? "active" : ""}
+                onMouseEnter={() => warmCustomerRoute(`/customer/waiter?table=${table}`)}
+                onFocus={() => warmCustomerRoute(`/customer/waiter?table=${table}`)}
                 onClick={() => setMenuOpen(false)}
               >
                 <Icon name="waiter" />
@@ -261,6 +375,8 @@ export function CustomerShell({
               <Link
                 href="/customer/hours"
                 className={isHours ? "active" : ""}
+                onMouseEnter={() => warmCustomerRoute("/customer/hours")}
+                onFocus={() => warmCustomerRoute("/customer/hours")}
                 onClick={() => setMenuOpen(false)}
               >
                 <Icon name="clock" />
@@ -269,6 +385,8 @@ export function CustomerShell({
               </Link>
               <Link
                 href={`/customer/cart?table=${table}`}
+                onMouseEnter={() => warmCustomerRoute(`/customer/cart?table=${table}`)}
+                onFocus={() => warmCustomerRoute(`/customer/cart?table=${table}`)}
                 onClick={() => setMenuOpen(false)}
               >
                 <Icon name="bag" />

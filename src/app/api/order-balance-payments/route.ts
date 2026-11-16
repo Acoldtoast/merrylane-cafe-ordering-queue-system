@@ -6,11 +6,21 @@ import {
   orderRef,
 } from "@/lib/activityLog";
 
+function manilaDate(): string {
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  return `${parts.find((part) => part.type === "year")?.value}-${parts.find((part) => part.type === "month")?.value}-${parts.find((part) => part.type === "day")?.value}`;
+}
+
 export async function GET(request: Request) {
   const auth = await requireStaff(request);
   if (auth.error) return auth.error;
   return Response.json({
-    payments: OrderModel.pendingBalancePayments(),
+    payments: await OrderModel.pendingBalancePayments(manilaDate()),
     success: true,
   });
 }
@@ -32,7 +42,11 @@ export async function PATCH(request: Request) {
         { status: 400 }
       );
     }
-    const result = OrderModel.decideBalancePayment(id, status, auth.user!.id);
+    const result = await OrderModel.decideBalancePayment(
+      id,
+      status,
+      auth.user!.id
+    );
     if (!result.ok) {
       return Response.json(
         { error: result.error, success: false },

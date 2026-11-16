@@ -1,5 +1,6 @@
 import {
   OrderModel,
+  SettingsModel,
   WAITER_DAILY_ATTEMPT_LIMIT,
   WaiterRequestModel,
   waiterCooldownAfterAttempt,
@@ -32,9 +33,12 @@ export async function GET(request: Request) {
         );
       }
       const guestId = await getGuestId();
-      const attempts = WaiterRequestModel.attemptStatus(guestId, tableNumber);
+      const [attempts, requests] = await Promise.all([
+        WaiterRequestModel.attemptStatus(guestId, tableNumber),
+        WaiterRequestModel.listByTable(tableNumber),
+      ]);
       return Response.json({
-        requests: WaiterRequestModel.listByTable(tableNumber),
+        requests,
         cooldown: {
           active: attempts.cooldown_active,
           retry_after_seconds: attempts.retry_after_seconds,
@@ -48,16 +52,25 @@ export async function GET(request: Request) {
 
     const auth = await requireStaff(request);
     if (auth.error) return auth.error;
-    WaiterRequestModel.resolveAcknowledgedOlderThan(25);
-    const requestsByTable = WaiterRequestModel.activeByTable();
+    await WaiterRequestModel.resolveAcknowledgedOlderThan(25);
+    const [requestsByTable, stats] = await Promise.all([
+      WaiterRequestModel.activeByTable(),
+      WaiterRequestModel.stats(),
+    ]);
     return Response.json({
       requestsByTable,
-      stats: WaiterRequestModel.stats(),
+      stats,
       success: true,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not load waiter requests.",
+        success: false,
+      },
       { status: 500 }
     );
   }
@@ -65,6 +78,18 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const ordering = await SettingsModel.orderingWindow();
+    if (!ordering.open) {
+      return Response.json(
+        {
+          error: "Waiter service is unavailable while the cafe is closed.",
+          shop_closed: true,
+          success: false,
+        },
+        { status: 403 }
+      );
+    }
+
     const body = await request.json();
     const { table_number, order_id, request_type, message } = body;
     if (!table_number || !request_type) {
@@ -87,7 +112,7 @@ export async function POST(request: Request) {
     let attemptNumber: number | undefined;
 
     if (!isFollowUp) {
-      const attempts = WaiterRequestModel.attemptStatus(guestId, tableNumber);
+      const attempts = await WaiterRequestModel.attemptStatus(guestId, tableNumber);
 
       if (attempts.remaining <= 0) {
         return Response.json(
@@ -131,7 +156,7 @@ export async function POST(request: Request) {
           { status: 400 }
         );
       }
-      const order = OrderModel.byId(orderId);
+      const order = await OrderModel.byId(orderId);
       if (
         !order ||
         order.table_number !== tableNumber ||
@@ -144,13 +169,13 @@ export async function POST(request: Request) {
           { status: 400 }
         );
       }
-      const existing = WaiterRequestModel.activeFollowUp(orderId);
+      const existing = await WaiterRequestModel.activeFollowUp(orderId);
       if (existing) {
         return Response.json({ id: existing.id, request: existing, success: true });
       }
     }
 
-    const id = WaiterRequestModel.create({
+    const id = await WaiterRequestModel.create({
       table_number: tableNumber,
       order_id: order_id ? Number(order_id) : undefined,
       guest_id: guestId,
@@ -158,8 +183,10 @@ export async function POST(request: Request) {
       request_type: String(request_type).slice(0, 60),
       message: message || "",
     });
-    const createdRequest = WaiterRequestModel.byId(id);
-    const attempts = WaiterRequestModel.attemptStatus(guestId, tableNumber);
+    const [createdRequest, attempts] = await Promise.all([
+      WaiterRequestModel.byId(id),
+      WaiterRequestModel.attemptStatus(guestId, tableNumber),
+    ]);
     return Response.json({
       id,
       request: createdRequest,
@@ -170,9 +197,15 @@ export async function POST(request: Request) {
       daily_limit: WAITER_DAILY_ATTEMPT_LIMIT,
       success: true,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not create the waiter request.",
+        success: false,
+      },
       { status: 500 }
     );
   }
@@ -202,14 +235,14 @@ export async function PATCH(request: Request) {
         { status: 400 }
       );
     }
-    const updated = WaiterRequestModel.update(id, { status });
+    const updated = await WaiterRequestModel.update(id, { status });
     if (!updated) {
       return Response.json(
         { error: "This request has already changed or is no longer active.", success: false },
         { status: 409 }
       );
     }
-    const requestRow = WaiterRequestModel.byId(id);
+    const requestRow = await WaiterRequestModel.byId(id);
     if (requestRow) {
       logActivity(auth.user, {
         area: "Requests",

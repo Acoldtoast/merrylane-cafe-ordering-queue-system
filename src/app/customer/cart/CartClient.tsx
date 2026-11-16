@@ -2,12 +2,16 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "@/components/Icons";
 import { useFeedback } from "@/components/Feedback";
 import { useCustomer } from "@/components/CustomerProvider";
+import { CustomerPageSkeleton } from "@/components/CustomerPageSkeleton";
 import { peso } from "@/lib/format";
-import type { MenuItem } from "@/lib/types";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
+import type { CartItem, MenuItem } from "@/lib/types";
+
+const GCASH_CHECKOUT_DRAFT_KEY = "merrylane.gcash-checkout.v1";
 
 export function CartClient({ initialTable }: { initialTable: number }) {
   const router = useRouter();
@@ -31,8 +35,12 @@ export function CartClient({ initialTable }: { initialTable: number }) {
   const [paymentMethod, setPaymentMethod] = useState<"gcash" | "counter">("counter");
   const [customerName, setCustomerName] = useState("");
   const [remarks, setRemarks] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [submitPhase, setSubmitPhase] = useState<
+    "idle" | "checking-stock" | "sending" | "navigating"
+  >("idle");
+  const submitting = submitPhase !== "idle";
   const [submitAttempted, setSubmitAttempted] = useState(false);
+  const [nameErrorAttempt, setNameErrorAttempt] = useState(0);
   const [pendingRemoval, setPendingRemoval] = useState<{
     key: string;
     name: string;
@@ -43,11 +51,83 @@ export function CartClient({ initialTable }: { initialTable: number }) {
     setTable(initialTable);
   }, [initialTable, setTable]);
 
+  useEffect(() => {
+    if (!ready) return;
+    try {
+      const saved = sessionStorage.getItem(GCASH_CHECKOUT_DRAFT_KEY);
+      if (!saved) return;
+      const draft = JSON.parse(saved);
+      if (
+        !draft ||
+        typeof draft.customerName !== "string" ||
+        typeof draft.remarks !== "string"
+      ) {
+        throw new Error("Saved GCash checkout details are invalid.");
+      }
+      setCustomerName(draft.customerName);
+      setRemarks(draft.remarks);
+    } catch (error) {
+      console.warn("Could not restore the GCash checkout details.", error);
+      try {
+        sessionStorage.removeItem(GCASH_CHECKOUT_DRAFT_KEY);
+      } catch (cleanupError) {
+        console.warn("Could not clear invalid GCash checkout details.", cleanupError);
+      }
+    }
+  }, [ready]);
+
   // Re-check every line against the latest stock counts so a cart that sat
   // open overnight cannot send more portions than the counter has left.
   const itemsRef = useRef(items);
-  itemsRef.current = items;
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
   const stockChecked = useRef(false);
+
+  const readCurrentMenu = useCallback(async () => {
+    const response = await fetchPortalApi("/api/menu", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok || !data.success || !Array.isArray(data.items)) {
+      throw new Error(data.error || "Could not check the latest stock.");
+    }
+    return data.items as MenuItem[];
+  }, []);
+
+  const reconcileStock = useCallback(
+    (menuItems: MenuItem[], lines: CartItem[]) => {
+      const limits: Record<number, number | null> = {};
+      for (const entry of menuItems) {
+        limits[entry.id] =
+          entry.stock_status === "out"
+            ? 0
+            : entry.stock_tracking_enabled
+              ? Math.max(0, entry.stock_count)
+              : null;
+      }
+      const listedIds = new Set(menuItems.map((entry) => entry.id));
+      for (const line of lines) {
+        if (!listedIds.has(line.menuItemId)) limits[line.menuItemId] = 0;
+      }
+      setStockLimits(limits);
+
+      const remaining = new Map<number, number>();
+      const adjusted: { name: string; from: number; to: number }[] = [];
+      for (const line of lines) {
+        const limit = limits[line.menuItemId];
+        if (limit === null || limit === undefined) continue;
+        const available = remaining.get(line.menuItemId) ?? limit;
+        const allowed = Math.min(line.quantity, available);
+        remaining.set(line.menuItemId, available - allowed);
+        if (allowed === line.quantity) continue;
+
+        adjusted.push({ name: line.name, from: line.quantity, to: allowed });
+        if (allowed === 0) removeItem(line.key);
+        else setQuantity(line.key, allowed);
+      }
+      return adjusted;
+    },
+    [removeItem, setQuantity, setStockLimits]
+  );
 
   useEffect(() => {
     if (!ready || stockChecked.current) return;
@@ -55,28 +135,9 @@ export function CartClient({ initialTable }: { initialTable: number }) {
     let alive = true;
     (async () => {
       try {
-        const response = await fetch("/api/menu", { cache: "no-store" });
-        const data = await response.json();
-        if (!alive || !response.ok || !data.success) return;
-        const limits: Record<number, number | null> = {};
-        for (const entry of (data.items || []) as MenuItem[]) {
-          limits[entry.id] = entry.stock_tracking_enabled
-            ? Math.max(0, entry.stock_count)
-            : null;
-        }
-        setStockLimits(limits);
-        const adjusted: { name: string; from: number; to: number }[] = [];
-        for (const line of itemsRef.current) {
-          if (!Object.prototype.hasOwnProperty.call(limits, line.menuItemId)) {
-            continue;
-          }
-          const limit = limits[line.menuItemId];
-          if (limit === null) continue;
-          if (line.quantity > limit) {
-            adjusted.push({ name: line.name, from: line.quantity, to: limit });
-            setQuantity(line.key, limit);
-          }
-        }
+        const menuItems = await readCurrentMenu();
+        if (!alive) return;
+        const adjusted = reconcileStock(menuItems, itemsRef.current);
         if (adjusted.length > 0) {
           feedback.warning("Your cart was adjusted", {
             eyebrow: "Stock changed",
@@ -91,19 +152,20 @@ export function CartClient({ initialTable }: { initialTable: number }) {
             })),
           });
         }
-      } catch {
-        // If the check fails the server still guards the order when it is sent.
+      } catch (error) {
+        if (alive) console.warn("Could not refresh stock for the customer cart.", error);
       }
     })();
     return () => {
       alive = false;
     };
-  }, [ready, feedback, setQuantity, setStockLimits]);
+  }, [ready, feedback, readCurrentMenu, reconcileStock]);
 
   const placeOrder = async () => {
     if (!items.length || submitting) return;
     setSubmitAttempted(true);
     if (!customerName.trim()) {
+      setNameErrorAttempt((attempt) => attempt + 1);
       customerNameRef.current?.scrollIntoView({
         behavior: "smooth",
         block: "center",
@@ -116,13 +178,63 @@ export function CartClient({ initialTable }: { initialTable: number }) {
       });
       return;
     }
-    setSubmitting(true);
+    setSubmitPhase("checking-stock");
+    // Re-check stock right before sending so a race during checkout is caught
+    // before the request instead of after the customer waits.
+    try {
+      const menuItems = await readCurrentMenu();
+      const adjusted = reconcileStock(menuItems, itemsRef.current);
+      if (adjusted.length > 0) {
+        setSubmitPhase("idle");
+        feedback.warning("Some items sold out", {
+          eyebrow: "Stock changed",
+          message:
+            "A few portions sold while you were checking out. We updated your cart — please review it and try again.",
+          details: adjusted.map((entry) => ({
+            label: entry.name,
+            value:
+              entry.to > 0
+                ? `${entry.from} → ${entry.to} left`
+                : "Removed · sold out",
+          })),
+        });
+        return;
+      }
+    } catch (error) {
+      console.warn("Could not refresh stock before placing the order.", error);
+    }
+    if (paymentMethod === "gcash") {
+      try {
+        sessionStorage.setItem(
+          GCASH_CHECKOUT_DRAFT_KEY,
+          JSON.stringify({
+            customerName: customerName.trim(),
+            remarks,
+            orderType,
+          })
+        );
+      } catch (error) {
+        console.error("Could not save the GCash checkout details.", error);
+        feedback.error("Couldn't continue to GCash", {
+          message:
+            "Your checkout details could not be saved in this browser. Please try again.",
+        });
+        setSubmitPhase("idle");
+        return;
+      }
+      setSubmitPhase("idle");
+      router.push(`/customer/payment?table=${table}`);
+      return;
+    }
+
+    setSubmitPhase("sending");
     const itemCount = count;
     const total = subtotal;
-    const methodLabel = paymentMethod === "gcash" ? "GCash" : "Pay at counter";
+    const methodLabel = "Pay at counter";
+    let stockConflict = false;
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/orders", {
+        const response = await fetchPortalApi("/api/orders", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -143,6 +255,15 @@ export function CartClient({ initialTable }: { initialTable: number }) {
         });
         const data = await response.json();
         if (!response.ok || !data.success) {
+          if (response.status === 409) {
+            stockConflict = true;
+            try {
+              const menuItems = await readCurrentMenu();
+              reconcileStock(menuItems, itemsRef.current);
+            } catch (error) {
+              console.warn("Could not refresh the cart after a stock conflict.", error);
+            }
+          }
           throw new Error(data.error || "We couldn't place your order.");
         }
         return data;
@@ -155,15 +276,12 @@ export function CartClient({ initialTable }: { initialTable: number }) {
         success: (data) => ({
           eyebrow: "Order placed",
           title: `Thank you, ${customerName.trim().split(" ")[0]}!`,
-          message:
-            paymentMethod === "gcash"
-              ? "Next, send your GCash receipt so we can start preparing."
-              : "The counter has your order. Please pay when you're ready.",
+          message: "The counter has your order. Please pay when you're ready.",
           duration: 3600,
           details: [
             {
               label: "Order",
-              value: `#${String(data.orderId).padStart(3, "0")}`,
+              value: `#${String(data.orderNumber ?? data.orderId).padStart(3, "0")}`,
             },
             { label: "Table", value: String(table).padStart(2, "0") },
             { label: "Items", value: String(itemCount) },
@@ -171,26 +289,38 @@ export function CartClient({ initialTable }: { initialTable: number }) {
             { label: "Payment", value: methodLabel },
           ],
         }),
+        error: (error) => ({
+          title: stockConflict
+            ? "Stock changed before checkout"
+            : "Your order wasn't placed",
+          message: stockConflict
+            ? `${error.message} We refreshed your cart where possible. Review it and try again.`
+            : error.message,
+        }),
       }
     );
     if (result.ok && result.result) {
+      setSubmitPhase("navigating");
       setLastOrderId(result.result.orderId);
-      clearCart();
-      if (paymentMethod === "gcash") {
-        router.push(
-          `/customer/payment?id=${result.result.orderId}&table=${table}`
-        );
-      } else {
-        router.push(
-          `/customer/confirm?id=${result.result.orderId}&table=${table}`
-        );
+      try {
+        sessionStorage.removeItem(GCASH_CHECKOUT_DRAFT_KEY);
+      } catch (error) {
+        console.warn("Could not clear the saved GCash checkout details.", error);
       }
+      clearCart();
+      router.push(
+        `/customer/confirm?id=${result.result.orderId}&table=${table}`
+      );
     } else {
-      setSubmitting(false);
+      setSubmitPhase("idle");
     }
   };
 
   if (!items.length) {
+    if (submitPhase === "navigating") {
+      return <CustomerPageSkeleton page="confirm" />;
+    }
+
     return (
       <div className="state-page">
         <div className="state-card">
@@ -293,7 +423,11 @@ export function CartClient({ initialTable }: { initialTable: number }) {
                 }
               />
               {submitAttempted && !customerName.trim() && (
-                <span className="field-error" id="customer-name-error">
+                <span
+                  key={nameErrorAttempt}
+                  className="field-error customer-name-error"
+                  id="customer-name-error"
+                >
                   Enter your name to place this order.
                 </span>
               )}
@@ -363,7 +497,7 @@ export function CartClient({ initialTable }: { initialTable: number }) {
               <Icon name={paymentMethod === "gcash" ? "info" : "shield"} />
               <span>
                 {paymentMethod === "gcash"
-                  ? "You'll see our GCash QR on the next screen. Upload a clear screenshot of the receipt so our team can verify it."
+                  ? "You'll see our GCash QR next. Staff will receive your order only after you submit the receipt and reference."
                   : "Your order will be sent to the counter. A staff member will receive payment and confirm your queue number."}
               </span>
             </div>
@@ -460,7 +594,9 @@ export function CartClient({ initialTable }: { initialTable: number }) {
             <div className="summary-note">
               <Icon name="info" />
               <span>
-                The queue number is assigned once our team confirms your order.
+                Items aren&apos;t held in your cart. We check stock again when you
+                place your order and secure it only when the order succeeds. Your
+                queue number is assigned once our team confirms it.
               </span>
             </div>
             <button
@@ -472,7 +608,9 @@ export function CartClient({ initialTable }: { initialTable: number }) {
               {submitting ? (
                 <>
                   <span className="spinner spinner-light" style={{ width: 15, height: 15 }} />
-                  Sending order…
+                  {submitPhase === "checking-stock"
+                    ? "Checking availability…"
+                    : "Sending order…"}
                 </>
               ) : (
                 <>
@@ -488,12 +626,7 @@ export function CartClient({ initialTable }: { initialTable: number }) {
         </aside>
       </div>
       {pendingRemoval && (
-        <div
-          className="feedback-layer"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setPendingRemoval(null);
-          }}
-        >
+        <div className="feedback-layer">
           <div
             className="feedback-card checkout-remove-confirm-card"
             role="alertdialog"

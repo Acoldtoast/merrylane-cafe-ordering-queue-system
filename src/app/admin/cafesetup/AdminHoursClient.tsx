@@ -2,11 +2,12 @@
 
 import Image from "next/image";
 import { useCallback, useEffect, useState } from "react";
-import { PortalShell } from "@/components/PortalShell";
 import { adminNav } from "@/components/portalNav";
 import { Icon } from "@/components/Icons";
 import { LoadingDots } from "@/components/LoadingDots";
+import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { timeLabel } from "@/lib/format";
 import { usePolling } from "@/lib/usePolling";
 
@@ -28,6 +29,11 @@ interface Settings {
   ordering_closed: boolean;
   last_order_time: string;
   weekly_schedule: ScheduleDay[];
+  facebook_url: string;
+  twitter_url: string;
+  tiktok_url: string;
+  instagram_url: string;
+  social_media_enabled: boolean;
 }
 
 const TABLE_COUNT = 12;
@@ -74,7 +80,9 @@ function cutoffWithinClosingTime(
 export function AdminHoursClient() {
   const feedback = useFeedback();
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [savedSettings, setSavedSettings] = useState<Settings | null>(null);
   const [schedule, setSchedule] = useState<ScheduleDay[]>([]);
+  const [savedSchedule, setSavedSchedule] = useState<ScheduleDay[]>([]);
   const [orderingOpen, setOrderingOpen] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -119,11 +127,14 @@ export function AdminHoursClient() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch("/api/settings", { cache: "no-store" });
+      const response = await fetchPortalApi("/api/settings", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || "Unable to load settings.");
+      const nextSchedule = data.settings.weekly_schedule || [];
       setSettings(data.settings);
-      setSchedule(data.settings.weekly_schedule || []);
+      setSavedSettings(data.settings);
+      setSchedule(nextSchedule);
+      setSavedSchedule(nextSchedule);
       setOrderingOpen(Boolean(data.ordering_open));
       setError("");
     } catch (err: any) {
@@ -140,7 +151,7 @@ export function AdminHoursClient() {
 
   const refreshOrderingStatus = useCallback(async () => {
     try {
-      const response = await fetch("/api/settings", { cache: "no-store" });
+      const response = await fetchPortalApi("/api/settings", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok || !data.success) {
         throw new Error(data.error || "Unable to refresh ordering status.");
@@ -155,9 +166,15 @@ export function AdminHoursClient() {
     }
   }, []);
 
-  usePolling(refreshOrderingStatus, 30_000, { immediate: false });
+  usePolling(refreshOrderingStatus, 30_000, {
+    immediate: false,
+    resources: ["hours", "settings"],
+  });
 
-  const save = async (extra?: Record<string, unknown>) => {
+  const save = async (
+    extra?: Record<string, unknown>,
+    mode: "hours" | "setup" = "hours"
+  ) => {
     if (!settings) return;
     setSaving(true);
     setError("");
@@ -179,7 +196,7 @@ export function AdminHoursClient() {
 
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/settings", {
+        const response = await fetchPortalApi("/api/settings", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(snapshot),
@@ -192,25 +209,35 @@ export function AdminHoursClient() {
       },
       {
         loading: {
-          title: "Saving your hours…",
-          message: "Updating the schedule customers see.",
+          title: mode === "setup" ? "Saving your setup…" : "Saving your hours…",
+          message:
+            mode === "setup"
+              ? "Updating your cafe details."
+              : "Updating the schedule customers see.",
         },
-        success: () => ({
-          eyebrow: "Saved",
-          title: "Hours updated",
-          message: "The customer menu now follows this schedule.",
-          details: [
-            {
-              label: "Manual pause",
-              value: snapshot.ordering_closed ? "On" : "Off",
-            },
-            { label: `Today · ${todayName}`, value: todayHours },
-            {
-              label: "Today's last order",
-              value: timeLabel(todaySchedule?.last_order),
-            },
-          ],
-        }),
+        success: () =>
+          mode === "setup"
+            ? {
+                eyebrow: "Saved",
+                title: "Setup updated",
+                message: "Your cafe details are now up to date.",
+              }
+            : {
+                eyebrow: "Saved",
+                title: "Hours updated",
+                message: "The customer menu now follows this schedule.",
+                details: [
+                  {
+                    label: "Manual pause",
+                    value: snapshot.ordering_closed ? "On" : "Off",
+                  },
+                  { label: `Today · ${todayName}`, value: todayHours },
+                  {
+                    label: "Today's last order",
+                    value: timeLabel(todaySchedule?.last_order),
+                  },
+                ],
+              },
       }
     );
     if (result.ok) await load();
@@ -223,20 +250,11 @@ export function AdminHoursClient() {
   };
 
   return (
-    <PortalShell
-      area="admin"
-      title="Hours & tables."
-      subtitle="Control when ordering opens, when it closes, and what each table QR points to."
-      contextLabel="Admin · Hours & tables"
-      contextTitle={orderingOpen ? "Ordering is open" : "Ordering is paused"}
-      nav={adminNav}
-    >
+    <>
       {error && <div className="error-strip" style={{ marginBottom: 13 }}>{error}</div>}
 
       {loading || !settings ? (
-        <div className="loading-block">
-          <span className="spinner" /> Loading your schedule…
-        </div>
+        <PortalPageSkeleton area="admin" />
       ) : (
         <div className="hours-layout">
           <div>
@@ -297,8 +315,8 @@ export function AdminHoursClient() {
                     <tbody>
                       {schedule.map((day, index) => (
                         <tr key={day.day}>
-                          <td>{day.day}</td>
-                          <td>
+                          <td className="schedule-day-name">{day.day}</td>
+                          <td className="schedule-open-cell" data-label="Open">
                             <label className="toggle-switch">
                               <input
                                 type="checkbox"
@@ -316,7 +334,7 @@ export function AdminHoursClient() {
                               <span className="toggle-track" />
                             </label>
                           </td>
-                          <td>
+                          <td data-label="Opens">
                             <input
                               type="time"
                               value={day.start}
@@ -337,7 +355,7 @@ export function AdminHoursClient() {
                               aria-label={`${day.day} opening`}
                             />
                           </td>
-                          <td>
+                          <td data-label="Closes">
                             <input
                               type="time"
                               value={day.end}
@@ -358,7 +376,7 @@ export function AdminHoursClient() {
                               aria-label={`${day.day} closing`}
                             />
                           </td>
-                          <td>
+                          <td data-label="Last order">
                             <input
                               type="time"
                               value={day.last_order}
@@ -386,7 +404,10 @@ export function AdminHoursClient() {
                 <button
                   type="button"
                   className="btn btn-primary btn-block mt-2"
-                  disabled={saving}
+                  disabled={
+                    saving ||
+                    JSON.stringify(schedule) === JSON.stringify(savedSchedule)
+                  }
                   onClick={() => save()}
                 >
                   {saving ? <LoadingDots label="Saving" /> : "Save schedule & hours"}
@@ -515,11 +536,88 @@ export function AdminHoursClient() {
                     </span>
                   </div>
                 </div>
+                <div className="modal-form-row mt-2">
+                  <div className="field">
+                    <label className="label" htmlFor="social-media-enabled">Social media icons</label>
+                    <label className="toggle-switch">
+                      <input
+                        id="social-media-enabled"
+                        type="checkbox"
+                        checked={settings.social_media_enabled}
+                        onChange={(event) =>
+                          setSettings({ ...settings, social_media_enabled: event.target.checked })
+                        }
+                      />
+                      <span className="toggle-track" />
+                    </label>
+                    <span className="tiny muted">
+                      Show clickable social media icons beside the shop logo on the
+                      customer ordering page.
+                    </span>
+                  </div>
+                </div>
+                <div className="modal-form-row social-links-row">
+                  <label className="admin-session-select social-link-field">
+                    <span className="label">Facebook</span>
+                    <input
+                      id="facebook-url"
+                      type="url"
+                      className="input"
+                      placeholder="https://facebook.com/yourpage"
+                      value={settings.facebook_url}
+                      onChange={(event) =>
+                        setSettings({ ...settings, facebook_url: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label className="admin-session-select social-link-field">
+                    <span className="label">Twitter / X</span>
+                    <input
+                      id="twitter-url"
+                      type="url"
+                      className="input"
+                      placeholder="https://x.com/yourpage"
+                      value={settings.twitter_url}
+                      onChange={(event) =>
+                        setSettings({ ...settings, twitter_url: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label className="admin-session-select social-link-field">
+                    <span className="label">TikTok</span>
+                    <input
+                      id="tiktok-url"
+                      type="url"
+                      className="input"
+                      placeholder="https://tiktok.com/@yourpage"
+                      value={settings.tiktok_url}
+                      onChange={(event) =>
+                        setSettings({ ...settings, tiktok_url: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label className="admin-session-select social-link-field">
+                    <span className="label">Instagram</span>
+                    <input
+                      id="instagram-url"
+                      type="url"
+                      className="input"
+                      placeholder="https://instagram.com/yourpage"
+                      value={settings.instagram_url}
+                      onChange={(event) =>
+                        setSettings({ ...settings, instagram_url: event.target.value })
+                      }
+                    />
+                  </label>
+                </div>
                 <button
                   type="button"
                   className="btn btn-outline btn-block mt-2"
-                  disabled={saving}
-                  onClick={() => save()}
+                  disabled={
+                    saving ||
+                    JSON.stringify(settings) === JSON.stringify(savedSettings)
+                  }
+                  onClick={() => save(undefined, "setup")}
                 >
                   Save cafe details
                 </button>
@@ -615,6 +713,6 @@ export function AdminHoursClient() {
           </div>
         </div>
       )}
-    </PortalShell>
+    </>
   );
 }

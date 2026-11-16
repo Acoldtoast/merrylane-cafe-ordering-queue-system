@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { PortalShell } from "@/components/PortalShell";
 import { staffNav } from "@/components/portalNav";
 import { Icon } from "@/components/Icons";
+import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
+import { OrderDiscountDetails } from "@/components/OrderDiscountDetails";
 import { useFeedback } from "@/components/Feedback";
 import type {
   Addon,
@@ -24,27 +25,30 @@ import {
   smartDateTime,
 } from "@/lib/format";
 import { orderItemMeta } from "@/lib/orderItems";
+import {
+  preparationEtaHasPassed,
+  preparationMinutesElapsed,
+  preparationReminderLevel,
+  readyMinutesElapsed,
+  readyReminderLevel,
+  STAFF_BOARD_ACTIVE_STATUSES,
+} from "@/lib/orderLifecycle";
+import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { usePolling } from "@/lib/usePolling";
 
-const ACTIVE: OrderStatus[] = [
-  "confirmed",
-  "preparing",
-  "ready",
-];
-
 const PREP_OPTIONS = [5, 10, 15, 20, 30];
+const ACTIVE: OrderStatus[] = [...STAFF_BOARD_ACTIVE_STATUSES];
 
-type TabKey = "all" | "preparing" | "ready" | "done";
+type TabKey = "all" | "preparing" | "ready";
 
 const tabs: { key: TabKey; label: string }[] = [
   { key: "all", label: "All active" },
   { key: "preparing", label: "Preparing" },
-  { key: "ready", label: "Ready" },
-  { key: "done", label: "Completed" },
+  { key: "ready", label: "Serving" },
 ];
 
 function code(order: Order) {
-  return `#${String(order.id).padStart(3, "0")}`;
+  return `#${String(order.order_number ?? order.id).padStart(3, "0")}`;
 }
 
 function paymentLabel(order: Order) {
@@ -103,47 +107,53 @@ function canAddMenuItem(order: Order) {
   );
 }
 
-function dateValue(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const timestamp = value.includes("T") ? value : value.replace(" ", "T");
-  const parsed = new Date(timestamp).getTime();
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function preparingMinutes(order: Order): number | null {
-  const startedAt = dateValue(order.updated_at || order.created_at);
-  return startedAt === null
-    ? null
-    : Math.floor((Date.now() - startedAt) / 60000);
+  return preparationMinutesElapsed(order);
 }
 
 function isOverduePreparingOrder(order: Order): boolean {
-  return (
-    order.status === "preparing" &&
-    (preparingMinutes(order) ?? 0) > 60
-  );
+  return order.status === "preparing" && preparationReminderLevel(order) > 0;
 }
 
 function isEtaExpired(order: Order): boolean {
-  const eta = dateValue(order.estimated_ready_at);
-  return order.status === "preparing" && eta !== null && eta < Date.now();
+  return preparationEtaHasPassed(order);
 }
 
 function prepReminder(order: Order) {
-  const overdue = isOverduePreparingOrder(order);
+  if (order.status !== "preparing") return null;
+  const level = preparationReminderLevel(order);
+  const overdue = level > 0;
   const etaExpired = isEtaExpired(order);
   if (!overdue && !etaExpired) return null;
   const elapsed = preparingMinutes(order);
   return (
     <>
-      {overdue && (
-        <span>
-          Preparing for over 1 hour{elapsed !== null ? ` · ${elapsed} min` : ""}.
-        </span>
-      )}
-      {overdue && etaExpired && " "}
-      {etaExpired && <span>ETA passed — check whether this has been served.</span>}
-      {!etaExpired && overdue && <span>Check progress and mark served when ready.</span>}
+      <span>
+        {etaExpired
+          ? "ETA passed"
+          : `Preparing for ${elapsed ?? 0} min`}
+        {level >= 3
+          ? " · Escalate to the shift lead."
+          : level === 2
+            ? " · Urgent: check this order now."
+            : ". Check progress."}
+      </span>
+    </>
+  );
+}
+
+function readyReminder(order: Order) {
+  const level = readyReminderLevel(order);
+  if (order.status !== "ready" || level === 0) return null;
+  const elapsed = readyMinutesElapsed(order) ?? 0;
+  return (
+    <>
+      Served {elapsed} min ago; awaiting customer receipt confirmation.
+      {level >= 3
+        ? " Escalate to the shift lead."
+        : level === 2
+          ? " Urgent: check with the customer."
+          : " Check with the customer."}
     </>
   );
 }
@@ -194,6 +204,7 @@ export function StaffBoardClient() {
   const [itemTarget, setItemTarget] = useState<Order | null>(null);
   const [itemReturnToAccept, setItemReturnToAccept] = useState(false);
   const [itemEditTarget, setItemEditTarget] = useState<OrderItem | null>(null);
+  const [itemEditBaseline, setItemEditBaseline] = useState<string | null>(null);
   const [menuItemId, setMenuItemId] = useState("");
   const [menuItemQty, setMenuItemQty] = useState("1");
   const [variantIds, setVariantIds] = useState<number[]>([]);
@@ -201,9 +212,11 @@ export function StaffBoardClient() {
   const [itemSugarLevel, setItemSugarLevel] = useState("");
   const [itemNote, setItemNote] = useState("");
   const counterCashReceived =
-    accepting && counterCashEntry?.orderId === accepting.id
-      ? counterCashEntry.value
-      : String(accepting?.total || "");
+    accepting
+      ? counterCashEntry?.orderId === accepting.id && counterCashEntry.value !== ""
+        ? counterCashEntry.value
+        : String(accepting.total ?? "")
+      : "";
   const counterCashAmount = Number(counterCashReceived);
   const counterCashIsSufficient =
     Number.isFinite(counterCashAmount) &&
@@ -216,10 +229,10 @@ export function StaffBoardClient() {
   const load = useCallback(async () => {
     try {
       const [ordersRes, addonsRes, menuRes, requestsRes] = await Promise.all([
-        fetch("/api/orders?board=1", { cache: "no-store" }),
-        fetch("/api/addons", { cache: "no-store" }),
-        fetch("/api/menu", { cache: "no-store" }),
-        fetch("/api/waiter", { cache: "no-store" }),
+        fetchPortalApi("/api/orders?board=1", { cache: "no-store" }),
+        fetchPortalApi("/api/addons", { cache: "no-store" }),
+        fetchPortalApi("/api/menu", { cache: "no-store" }),
+        fetchPortalApi("/api/waiter", { cache: "no-store" }),
       ]);
       const data = await ordersRes.json();
       const addonData = await addonsRes.json();
@@ -238,10 +251,10 @@ export function StaffBoardClient() {
       setWaiterRequests(requestsData.requests || []);
       if (data.stats) setStats(data.stats);
       setDetail((current) =>
-        current ? fresh.find((order) => order.id === current.id) || current : current
+        current ? fresh.find((order) => order.id === current.id) || null : null
       );
       setAccepting((current) =>
-        current ? fresh.find((order) => order.id === current.id) || current : current
+        current ? fresh.find((order) => order.id === current.id) || null : null
       );
       setError("");
     } catch (err: unknown) {
@@ -251,7 +264,7 @@ export function StaffBoardClient() {
     }
   }, []);
 
-  usePolling(load, 10000);
+  usePolling(load, 10000, { resources: ["menu", "orders", "requests", "waiter"] });
 
   useEffect(() => {
     if (!detail) return;
@@ -273,7 +286,7 @@ export function StaffBoardClient() {
     setBusyId(order.id);
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/orders", {
+        const response = await fetchPortalApi("/api/orders", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: order.id, ...payload }),
@@ -438,9 +451,9 @@ export function StaffBoardClient() {
     const selectedItem = editItem
       ? menuItems.find((item) => item.id === editItem.menu_item_id)
       : defaultItem;
-    setMenuItemId(selectedItem ? String(selectedItem.id) : "");
-    setMenuItemQty(String(editItem?.quantity || 1));
-    setVariantIds(
+    const nextMenuItemId = selectedItem ? String(selectedItem.id) : "";
+    const nextMenuItemQty = String(editItem?.quantity || 1);
+    const nextVariantIds =
       editItem && selectedItem
         ? (editItem.variant_name || "")
             .split(" · ")
@@ -448,8 +461,7 @@ export function StaffBoardClient() {
               selectedItem.variants.find((variant) => variant.name === name)?.id
             )
             .filter((id): id is number => id !== undefined)
-        : []
-    );
+        : [];
     let savedExtras: { id?: number; name?: string }[] = [];
     if (editItem?.extras) {
       try {
@@ -464,8 +476,7 @@ export function StaffBoardClient() {
         savedExtras = [];
       }
     }
-    setExtraIds(
-      selectedItem
+    const nextExtraIds = selectedItem
         ? savedExtras
             .map(
               (extra) =>
@@ -476,12 +487,39 @@ export function StaffBoardClient() {
                 )?.id
             )
             .filter((id): id is number => id !== undefined)
-        : []
+        : [];
+    const nextSugarLevel = editItem?.sugar_level || "";
+    const nextNote = editItem?.note || "";
+    setMenuItemId(nextMenuItemId);
+    setMenuItemQty(nextMenuItemQty);
+    setVariantIds(nextVariantIds);
+    setExtraIds(nextExtraIds);
+    setItemSugarLevel(nextSugarLevel);
+    setItemNote(nextNote);
+    setItemEditBaseline(
+      editItem
+        ? JSON.stringify({
+            menuItemId: nextMenuItemId,
+            menuItemQty: nextMenuItemQty,
+            variantIds: nextVariantIds,
+            extraIds: nextExtraIds,
+            itemSugarLevel: nextSugarLevel,
+            itemNote: nextNote,
+          })
+        : null
     );
-    setItemSugarLevel(editItem?.sugar_level || "");
-    setItemNote(editItem?.note || "");
   };
 
+  const itemEditHasChanges =
+    itemEditTarget !== null &&
+    JSON.stringify({
+      menuItemId,
+      menuItemQty,
+      variantIds,
+      extraIds,
+      itemSugarLevel,
+      itemNote,
+    }) !== itemEditBaseline;
   const selectedMenuItem = menuItems.find(
     (item) => item.id === Number(menuItemId)
   );
@@ -518,7 +556,7 @@ export function StaffBoardClient() {
     setBusyId(target.id);
     const result = await feedback.run(
       async () => {
-        const response = await fetch(
+        const response = await fetchPortalApi(
           itemEditTarget
             ? `/api/orders/${target.id}/items/${itemEditTarget.id}`
             : `/api/orders/${target.id}/items`,
@@ -608,7 +646,7 @@ export function StaffBoardClient() {
     setBusyId(order.id);
     const result = await feedback.run(
       async () => {
-        const response = await fetch(
+        const response = await fetchPortalApi(
           `/api/orders/${order.id}/items/${item.id}`,
           { method: "DELETE" }
         );
@@ -649,7 +687,7 @@ export function StaffBoardClient() {
     setBusyId(order.id);
     const result = await feedback.run(
       async () => {
-        const response = await fetch(`/api/orders/${order.id}/balance-payments`, {
+        const response = await fetchPortalApi(`/api/orders/${order.id}/balance-payments`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ payment_method: "counter" }),
@@ -715,7 +753,7 @@ export function StaffBoardClient() {
     setBusyId(target.order.id);
     const result = await feedback.run(
       async () => {
-        const response = await fetch(`/api/orders/${target.order.id}/addons`, {
+        const response = await fetchPortalApi(`/api/orders/${target.order.id}/addons`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -761,11 +799,6 @@ export function StaffBoardClient() {
   };
 
   const filtered = useMemo(() => {
-    if (tab === "done") {
-      return orders.filter(
-        (order) => order.status === "completed" || order.status === "cancelled"
-      );
-    }
     if (tab === "all") return orders.filter((order) => ACTIVE.includes(order.status));
     return orders.filter((order) => order.status === tab);
   }, [orders, tab]);
@@ -775,9 +808,6 @@ export function StaffBoardClient() {
       all: orders.filter((order) => ACTIVE.includes(order.status)).length,
       preparing: orders.filter((order) => order.status === "preparing").length,
       ready: orders.filter((order) => order.status === "ready").length,
-      done: orders.filter(
-        (order) => order.status === "completed" || order.status === "cancelled"
-      ).length,
     }),
     [orders]
   );
@@ -803,7 +833,7 @@ export function StaffBoardClient() {
       },
       {
         key: "ready",
-        title: "Served · waiting",
+        title: "Serving · awaiting customer",
         tone: "ready",
         orders: orders.filter((order) => order.status === "ready"),
       },
@@ -819,7 +849,7 @@ export function StaffBoardClient() {
     const table = String(request.table_number).padStart(2, "0");
     const result = await feedback.run(
       async () => {
-        const response = await fetch("/api/waiter", {
+        const response = await fetchPortalApi("/api/waiter", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: request.id, status }),
@@ -989,9 +1019,7 @@ export function StaffBoardClient() {
       {(order.status === "completed" || order.status === "cancelled") && (
         <span className="order-time">
           {order.status === "completed"
-            ? order.completion_reason === "system_timeout"
-              ? "System automatically completed"
-              : `Completed ${relativeTime(order.completed_at)}`
+            ? `Completed ${relativeTime(order.completed_at)}`
             : order.cancellation_reason === "unpaid_timeout"
               ? "Automatically cancelled · unpaid"
               : "Cancelled"}
@@ -1000,15 +1028,10 @@ export function StaffBoardClient() {
     </>
   );
 
+  if (loading) return <PortalPageSkeleton area="staff" />;
+
   return (
-    <PortalShell
-      area="staff"
-      title="Every order, in its place."
-      subtitle="Live queue board · Keep the counter moving with care."
-      contextLabel="Service · Order board"
-      contextTitle="Live order queue"
-      nav={staffNav}
-    >
+    <>
       {error && <div className="error-strip" style={{ marginBottom: 13 }}>{error}</div>}
 
       <div className="stat-grid">
@@ -1032,11 +1055,11 @@ export function StaffBoardClient() {
         </div>
         <div className="stat-card">
           <div className="stat-label">
-            <Icon name="bag" /> Served · awaiting customer
+            <Icon name="bag" /> Serving
           </div>
           <div className="stat-value">{stats.ready}</div>
           <div className="stat-bottom">
-            <span>Call the table</span>
+            <span>Awaiting customer confirmation</span>
           </div>
         </div>
       </div>
@@ -1069,13 +1092,7 @@ export function StaffBoardClient() {
         ))}
       </div>
 
-      {loading ? (
-        <div className="staff-orders">
-          {[1, 2, 3].map((n) => (
-            <div className="skeleton" style={{ height: 230 }} key={n} />
-          ))}
-        </div>
-      ) : tab === "all" ? (
+      {tab === "all" ? (
         <div className="followup-layout">
           {renderFollowUpSidebar()}
           <div className="followup-main">
@@ -1103,7 +1120,8 @@ export function StaffBoardClient() {
                           </span>
                         </div>
                         <span className="followup-card-sub">
-                          {code(order)} · {elapsedSince(order.created_at)}
+                          <span className="followup-order-number">Order {code(order)}</span>
+                          <span>{elapsedSince(order.created_at)}</span>
                         </span>
                       </div>
                       <div className="followup-lane-items">
@@ -1132,9 +1150,9 @@ export function StaffBoardClient() {
                           <span>
                             {order.status === "preparing" && order.estimated_ready_at
                               ? `ETA ${clockTime(order.estimated_ready_at)}`
-                              : order.status === "ready"
-                                ? "Served · awaiting customer"
-                                : "Awaiting preparation"}
+                              : order.status === "preparing"
+                                ? "Preparing"
+                                : "Serving · awaiting customer"}
                           </span>
                         </div>
                       </div>
@@ -1215,16 +1233,30 @@ export function StaffBoardClient() {
                   </span>
                   <span className="order-total">{peso(order.total)}</span>
                 </div>
-                {overdue && (
+                {order.status === "preparing" && overdue && (
                   <div className="order-overdue-warning" role="status">
                     <Icon name="alert" className="icon-sm" />
                     <span>{prepReminder(order)}</span>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setDetail(order)}
+                    >
+                      Still preparing · update ETA
+                    </button>
                   </div>
                 )}
-                {!overdue && isEtaExpired(order) && (
+                {order.status === "ready" && readyReminder(order) && (
                   <div className="order-overdue-warning" role="status">
                     <Icon name="alert" className="icon-sm" />
-                    <span>{prepReminder(order)}</span>
+                    <span>{readyReminder(order)}</span>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setDetail(order)}
+                    >
+                      Check receipt
+                    </button>
                   </div>
                 )}
                 {Number(order.balance_due || 0) > 0 && (
@@ -1275,10 +1307,7 @@ export function StaffBoardClient() {
                                 : "badge-blue"
                     }`}
                   >
-                    {order.status === "completed" &&
-                    order.completion_reason === "system_timeout"
-                      ? "System automatically completed"
-                      : order.status === "cancelled" &&
+                    {order.status === "cancelled" &&
                           order.cancellation_reason === "unpaid_timeout"
                         ? "Automatically cancelled"
                         : labelFor(order.status)}
@@ -1294,7 +1323,6 @@ export function StaffBoardClient() {
                         : elapsedSince(order.created_at)}
                   </span>
                 </div>
-
                 <div className="order-card-foot">
                   {renderActions(order)}
                 </div>
@@ -1313,7 +1341,7 @@ export function StaffBoardClient() {
 
       {/* Full order details ------------------------------------------------ */}
       {detail && (
-        <div className="modal-backdrop" onClick={() => setDetail(null)}>
+        <div className="modal-backdrop">
           <div
             className="modal order-detail-modal"
             onClick={(event) => event.stopPropagation()}
@@ -1322,9 +1350,8 @@ export function StaffBoardClient() {
               <div>
                 <h2>Order {code(detail)}</h2>
                 <span className="order-time">
-                  {detail.status === "completed" &&
-                  detail.completion_reason === "system_timeout"
-                    ? "System automatically completed"
+                  {detail.payment_status === "rejected"
+                    ? "Payment rejected"
                     : detail.status === "cancelled" &&
                         detail.cancellation_reason === "unpaid_timeout"
                       ? "Automatically cancelled · no payment recorded"
@@ -1338,12 +1365,6 @@ export function StaffBoardClient() {
               </button>
             </div>
             <div className="modal-body">
-              {detail.completion_reason === "system_timeout" && (
-                <div className="payment-note" role="status" style={{ marginBottom: 13 }}>
-                  This order was system automatically completed after remaining ready
-                  for 30 minutes without staff action.
-                </div>
-              )}
               {detail.cancellation_reason === "unpaid_timeout" && (
                 <div className="payment-note" role="status" style={{ marginBottom: 13 }}>
                   No cash payment was recorded within 90 minutes. The order was
@@ -1354,6 +1375,12 @@ export function StaffBoardClient() {
                 <div className="order-overdue-warning" role="status">
                   <Icon name="alert" className="icon-sm" />
                   <span>{prepReminder(detail)}</span>
+                </div>
+              )}
+              {readyReminder(detail) && (
+                <div className="order-overdue-warning" role="status">
+                  <Icon name="alert" className="icon-sm" />
+                  <span>{readyReminder(detail)}</span>
                 </div>
               )}
               <div className="order-detail-grid">
@@ -1441,7 +1468,10 @@ export function StaffBoardClient() {
                         <button
                           type="button"
                           className="btn btn-ghost btn-sm"
-                          disabled={busyId === detail.id}
+                          disabled={
+                            busyId === detail.id ||
+                            etaDraft === String(detail.prep_minutes ?? 15)
+                          }
                           onClick={() => openStaffItem(detail, false, item)}
                         >
                           <Icon name="edit" className="icon-sm" /> Edit item
@@ -1534,6 +1564,10 @@ export function StaffBoardClient() {
                   <span>Service charge</span>
                   <span>{peso(detail.service_charge)}</span>
                 </div>
+                <OrderDiscountDetails
+                  discounts={detail.discounts}
+                  discountAmount={detail.discount_amount}
+                />
                 <div className="totals-row total">
                   <span>Total</span>
                   <span>{peso(detail.total)}</span>
@@ -1634,10 +1668,7 @@ export function StaffBoardClient() {
 
       {/* Accept / verify payment with prep ETA ----------------------------- */}
       {accepting && (
-        <div
-          className="modal-backdrop order-accept-backdrop"
-          onClick={() => setAccepting(null)}
-        >
+        <div className="modal-backdrop order-accept-backdrop">
           <div
             className="modal order-accept-modal"
             onClick={(event) => event.stopPropagation()}
@@ -1946,7 +1977,7 @@ export function StaffBoardClient() {
       )}
 
       {itemTarget && (
-        <div className="modal-backdrop" onClick={closeItemPicker}>
+        <div className="modal-backdrop">
           <div
             className="modal"
             style={{ width: "min(100%, 560px)" }}
@@ -2133,6 +2164,7 @@ export function StaffBoardClient() {
                   !Number.isInteger(Number(menuItemQty)) ||
                   Number(menuItemQty) < 1 ||
                   Number(menuItemQty) > maxStaffQuantity ||
+                  (itemEditTarget !== null && !itemEditHasChanges) ||
                   busyId === itemTarget.id
                 }
                 onClick={submitStaffItem}
@@ -2150,7 +2182,7 @@ export function StaffBoardClient() {
 
       {/* Staff-added add-on ------------------------------------------------ */}
       {addonTarget && (
-        <div className="modal-backdrop" onClick={closeAddonPicker}>
+        <div className="modal-backdrop">
           <div
             className="modal"
             style={{ width: "min(100%, 430px)" }}
@@ -2228,7 +2260,7 @@ export function StaffBoardClient() {
           </div>
         </div>
       )}
-    </PortalShell>
+    </>
   );
 }
 
@@ -2243,7 +2275,7 @@ export function labelFor(status: OrderStatus) {
     case "preparing":
       return "Preparing";
     case "ready":
-      return "Ready";
+      return "Serving";
     case "completed":
       return "Completed";
     case "cancelled":

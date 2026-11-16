@@ -1,17 +1,34 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Icon } from "@/components/Icons";
+import { CustomerPageSkeleton } from "@/components/CustomerPageSkeleton";
 import { useCustomer } from "@/components/CustomerProvider";
 import { dateTimeLabel, orderTypeLabel, peso, statusLabel } from "@/lib/format";
+import { fetchPortalApi, prefetchPortalRouteData } from "@/lib/portalPrefetch";
+import { useRealtimeRefresh } from "@/lib/usePolling";
 import type { Order } from "@/lib/types";
+
+type OrdersView = "orders" | "history";
+
+const ordersTabs: { key: OrdersView; label: string }[] = [
+  { key: "orders", label: "Orders" },
+  { key: "history", label: "History" },
+];
 
 export function OrderHistoryClient() {
   const { legacyOrderId, ready, table } = useCustomer();
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [view, setView] = useState<OrdersView>("orders");
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const requestRefresh = useCallback(
+    () => setRefreshRevision((revision) => revision + 1),
+    []
+  );
+  useRealtimeRefresh(requestRefresh, ["history", "orders", "payments"]);
 
   useEffect(() => {
     if (!ready) return;
@@ -21,7 +38,7 @@ export function OrderHistoryClient() {
       setLoading(true);
       setError("");
       try {
-        const response = await fetch("/api/orders/history", {
+        const response = await fetchPortalApi("/api/orders/history", {
           cache: "no-store",
         });
         const data = await response.json();
@@ -29,7 +46,10 @@ export function OrderHistoryClient() {
           throw new Error(data.error || "Could not load your order history.");
         }
 
-        const guestOrders = (data.orders || []) as Order[];
+        if (!Array.isArray(data.orders)) {
+          throw new Error("Order history returned an invalid response.");
+        }
+        const guestOrders = data.orders as Order[];
         const legacyOrder =
           legacyOrderId &&
           !guestOrders.some((order) => order.id === legacyOrderId)
@@ -65,40 +85,90 @@ export function OrderHistoryClient() {
     return () => {
       cancelled = true;
     };
-  }, [legacyOrderId, ready]);
+  }, [legacyOrderId, ready, refreshRevision]);
+
+  const isHistoryOrder = (order: Order) =>
+    order.payment_status === "rejected" ||
+    order.status === "completed";
+  const visibleOrders = orders.filter(
+    (order) =>
+      order.status !== "cancelled" &&
+      (view === "history"
+        ? isHistoryOrder(order)
+        : !isHistoryOrder(order))
+  );
+  const tabCounts = {
+    orders: orders.filter(
+      (order) => order.status !== "cancelled" && !isHistoryOrder(order)
+    ).length,
+    history: orders.filter(
+      (order) => order.status !== "cancelled" && isHistoryOrder(order)
+    ).length,
+  };
 
   if (loading) {
-    return (
-      <div className="loading-block">
-        <span className="spinner" />
-        Finding your orders…
-      </div>
-    );
+    return <CustomerPageSkeleton page="orders" />;
   }
 
   return (
     <div className="order-history-page">
       <div className="order-history-head">
         <span className="eyebrow" style={{ color: "var(--brown)" }}>
-          Guest order history
+          Guest orders
         </span>
         <h1>Your orders</h1>
-        <p>Every order from this browser is saved here for you to revisit.</p>
+        <p>
+          Track orders being prepared or served, and revisit completed or rejected orders.
+        </p>
       </div>
 
       {error && <div className="error-strip">{error}</div>}
 
-      {orders.length ? (
+      <div className="tabs" role="tablist" aria-label="Your orders">
+        {ordersTabs.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            role="tab"
+            aria-selected={view === item.key}
+            className={`tab ${view === item.key ? "active" : ""}`}
+            onClick={() => setView(item.key)}
+          >
+            {item.label}
+            <span className="tab-count">{tabCounts[item.key]}</span>
+          </button>
+        ))}
+      </div>
+
+      {visibleOrders.length ? (
         <div className="order-history-list">
-          {orders.map((order) => (
+          {visibleOrders.map((order) => (
             <Link
               className="card order-history-card"
               href={`/customer/status?id=${order.id}&table=${order.table_number}`}
+              onMouseEnter={() =>
+                prefetchPortalRouteData(
+                  "customer",
+                  `/customer/status?id=${order.id}&table=${order.table_number}`
+                )
+              }
+              onFocus={() =>
+                prefetchPortalRouteData(
+                  "customer",
+                  `/customer/status?id=${order.id}&table=${order.table_number}`
+                )
+              }
+              onTouchStart={() =>
+                prefetchPortalRouteData(
+                  "customer",
+                  `/customer/status?id=${order.id}&table=${order.table_number}`
+                )
+              }
               key={order.id}
             >
               <div className="order-history-main">
                 <span className="eyebrow">
-                  Order #{String(order.id).padStart(3, "0")} ·{" "}
+                  Order #{String(order.order_number ?? order.id).padStart(3, "0")} ·{" "}
                   {orderTypeLabel(order.order_type)}
                 </span>
                 <strong>{dateTimeLabel(order.created_at)}</strong>
@@ -110,15 +180,12 @@ export function OrderHistoryClient() {
               </div>
               <div className="order-history-side">
                 <span className="badge badge-cream">
-                  {order.cancellation_reason === "unpaid_timeout"
-                    ? "Automatically cancelled"
-                    : statusLabel(order.status)}
+                  {order.payment_status === "rejected"
+                    ? "Payment rejected"
+                    : order.status === "ready"
+                      ? "Serving · awaiting customer"
+                      : statusLabel(order.status)}
                 </span>
-                {order.cancellation_reason === "unpaid_timeout" && (
-                  <span className="order-history-open">
-                    No cash payment recorded within 90 minutes
-                  </span>
-                )}
                 <strong>{peso(order.total)}</strong>
                 <span className="order-history-open">
                   View order <Icon name="chevron-right" className="icon-sm" />
@@ -132,8 +199,12 @@ export function OrderHistoryClient() {
           <div className="state-icon">
             <Icon name="receipt" />
           </div>
-          <h2>No orders just yet.</h2>
-          <p>When you place an order from this browser, it will appear here.</p>
+          <h2>{view === "orders" ? "No active orders." : "No order history yet."}</h2>
+          <p>
+            {view === "orders"
+              ? "Orders waiting for payment review or preparation will appear here."
+              : "Completed and rejected-payment orders will appear here."}
+          </p>
           <Link
             href={`/customer/menu?table=${table}`}
             className="btn btn-primary"
@@ -147,7 +218,7 @@ export function OrderHistoryClient() {
 }
 
 async function fetchLegacyOrder(id: number): Promise<Order | null> {
-  const response = await fetch(`/api/orders/${id}`, { cache: "no-store" });
+  const response = await fetchPortalApi(`/api/orders/${id}`, { cache: "no-store" });
   if (response.status === 404) return null;
   const data = await response.json();
   if (!response.ok || !data.order) {

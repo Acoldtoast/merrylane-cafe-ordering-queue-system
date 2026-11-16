@@ -23,7 +23,7 @@ export async function GET(request: Request) {
     }
     const areaParam = url.searchParams.get("area") || "";
 
-    const result = ActivityModel.list({
+    const result = await ActivityModel.list({
       limit: pageSize,
       offset: (page - 1) * pageSize,
       date: dateParam || undefined,

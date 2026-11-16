@@ -7,7 +7,7 @@ export async function POST(
   try {
     const { id } = await params;
     const orderId = Number(id);
-    const order = OrderModel.byId(orderId);
+    const order = await OrderModel.byId(orderId);
     if (!order) {
       return Response.json(
         { error: "Order not found.", success: false },
@@ -56,7 +56,7 @@ export async function POST(
         { status: 400 }
       );
     }
-    if (OrderModel.gcashReferenceIsInUse(reference, orderId)) {
+    if (await OrderModel.gcashReferenceIsInUse(reference, orderId)) {
       return Response.json(
         {
           error: "That GCash reference has already been submitted for another payment.",
@@ -72,7 +72,7 @@ export async function POST(
       );
     }
 
-    OrderModel.update(orderId, {
+    await OrderModel.update(orderId, {
       payment_proof_url: proof,
       payment_reference: reference,
       payment_amount: order.total,
@@ -81,7 +81,7 @@ export async function POST(
     });
 
     return Response.json({
-      order: OrderModel.byId(orderId),
+      order: await OrderModel.byId(orderId),
       success: true,
       message: "Payment proof submitted. Staff will verify it shortly.",
     });

@@ -14,7 +14,7 @@ export async function GET(request: Request) {
       return Response.json({ error: "Invalid order ID.", success: false }, { status: 400 });
     }
 
-    const row = getDb()
+    const row = await getDb()
       .prepare(
         `SELECT payment_proof_url FROM orders
          WHERE id = ? AND payment_method = 'gcash' AND payment_status = 'pending'`

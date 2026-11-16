@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
-export function useIdleRoutePrefetch(paths: string[], enabled = true) {
+export function useIdleRoutePrefetch(
+  paths: string[],
+  enabled = true,
+  eager = false
+) {
   const router = useRouter();
   const pathname = usePathname();
   const pathsKey = paths.join("\n");
+  const prefetchedRoutes = useRef(new Set<string>());
 
   useEffect(() => {
     if (!enabled) return;
@@ -25,7 +30,8 @@ export function useIdleRoutePrefetch(paths: string[], enabled = true) {
     }
 
     const routes = [...new Set(pathsKey.split("\n").filter(Boolean))].filter(
-      (path) => path.split("?")[0] !== pathname
+      (path) =>
+        path.split("?")[0] !== pathname && !prefetchedRoutes.current.has(path)
     );
     if (!routes.length) return;
 
@@ -47,6 +53,7 @@ export function useIdleRoutePrefetch(paths: string[], enabled = true) {
       for (const route of routes) {
         try {
           router.prefetch(route);
+          prefetchedRoutes.current.add(route);
         } catch (error: unknown) {
           console.warn(`Could not prefetch route "${route}".`, error);
         }
@@ -63,6 +70,10 @@ export function useIdleRoutePrefetch(paths: string[], enabled = true) {
         return;
       }
       if (disposed || prefetched || scheduled) return;
+      if (eager) {
+        prefetchRoutes();
+        return;
+      }
       scheduled = true;
       if (requestIdle) {
         idleId = requestIdle(prefetchRoutes, { timeout: 600 });
@@ -79,5 +90,5 @@ export function useIdleRoutePrefetch(paths: string[], enabled = true) {
       if (idleId !== undefined) cancelIdle?.(idleId);
       if (timerId !== undefined) window.clearTimeout(timerId);
     };
-  }, [enabled, pathname, pathsKey, router]);
+  }, [eager, enabled, pathname, pathsKey, router]);
 }
