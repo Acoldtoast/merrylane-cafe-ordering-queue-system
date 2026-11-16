@@ -686,6 +686,40 @@ test("an administrator can clear a staff email with the correct confirmation pas
   assert.equal(updated.email, "");
 });
 
+test("several accounts can have no saved email at the same time", async (t) => {
+  await createAuthDatabase(t, "blank-emails");
+  const { UserModel } = await import("../src/lib/models.ts");
+  const firstId = await UserModel.create({
+    name: "One Person",
+    username: "one-person-merrylane",
+    role: "staff",
+    password: "password-one",
+  });
+  const secondId = await UserModel.create({
+    name: "Two Person",
+    username: "two-person-merrylane",
+    role: "staff",
+    password: "password-two",
+  });
+  assert.ok(firstId);
+  assert.ok(secondId);
+  assert.notEqual(firstId, secondId);
+  assert.equal(await UserModel.byEmail(""), undefined);
+
+  const { POST: requestRecoveryCode } = await import(
+    "../src/app/api/auth/password-recovery/route.ts"
+  );
+  const firstResponse = await requestRecoveryCode(
+    recoveryCodeRequest("one-person-merrylane")
+  );
+  const secondResponse = await requestRecoveryCode(
+    recoveryCodeRequest("two-person-merrylane")
+  );
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+  assert.deepEqual(await firstResponse.json(), await secondResponse.json());
+});
+
 test("staff sessions remain available at closing and sign out after the closing idle threshold", async (t) => {
   const database = await createAuthDatabase(t, "staff-idle-close");
   const { JWT_SECRET } = await import("../src/lib/auth.ts");

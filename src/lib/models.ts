@@ -3512,6 +3512,14 @@ async function ensureUserColumns(): Promise<void> {
     await add("address", "ALTER TABLE users ADD COLUMN address TEXT");
     await add("duty_hours", "ALTER TABLE users ADD COLUMN duty_hours TEXT");
     await add("username", "ALTER TABLE users ADD COLUMN username TEXT");
+    // Email is optional for accounts. Drop the old table-wide UNIQUE rule (which
+    // would let only one account have no email) and keep real addresses unique
+    // with a partial index instead.
+    await db.exec("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key");
+    await db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nonblank
+       ON users (lower(email)) WHERE trim(email) <> ''`
+    );
     // Backfill usernames for existing users
     await getDb()
       .prepare(
