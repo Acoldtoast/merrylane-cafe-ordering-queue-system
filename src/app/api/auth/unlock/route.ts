@@ -20,11 +20,13 @@ export async function POST(request: Request) {
       );
     }
 
-    const user = await UserModel.byEmail(auth.user.email);
+    const user = await UserModel.byId(auth.user.id);
+    const passwordHash = await UserModel.passwordHashById(auth.user.id);
     if (
       !user ||
       user.role !== "staff" ||
-      !verifyPassword(password, user.password_hash)
+      !passwordHash ||
+      !verifyPassword(password, passwordHash)
     ) {
       return Response.json(
         { error: "That password doesn't match your staff account.", success: false },

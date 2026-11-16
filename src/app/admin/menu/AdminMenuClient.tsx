@@ -623,9 +623,9 @@ export function AdminMenuClient() {
         success: () => ({
           eyebrow: "Account created",
           title: `${account.name} can sign in`,
-          message: "Share the email and temporary password with them.",
+          message: "Share the username and temporary password with them.",
           details: [
-            { label: "Email", value: account.email.toLowerCase().trim() },
+            { label: "Email", value: account.email.toLowerCase().trim() || "Not set" },
             { label: "Role", value: account.role === "admin" ? "Admin" : "Staff" },
           ],
         }),
@@ -664,7 +664,7 @@ export function AdminMenuClient() {
           title: `${user.name} removed`,
           message: "They can no longer sign in. Past activity stays in the log.",
           details: [
-            { label: "Email", value: user.email },
+            { label: "Email", value: user.email || "Not set" },
             { label: "Role", value: user.role === "admin" ? "Admin" : "Staff" },
           ],
         }),

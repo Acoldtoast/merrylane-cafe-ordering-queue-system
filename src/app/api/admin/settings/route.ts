@@ -180,12 +180,12 @@ export async function PATCH(request: Request) {
     }
     if (
       personalEmail !== undefined &&
+      personalEmail !== "" &&
       (personalEmail.length > 254 ||
-        !personalEmail ||
         !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personalEmail))
     ) {
       return Response.json(
-        { error: "A valid personal email address is required.", success: false },
+        { error: "Enter a valid email address, or leave it blank.", success: false },
         { status: 400 }
       );
     }
@@ -208,7 +208,7 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const account = await UserModel.byEmail(auth.user.email);
+    const account = await UserModel.byId(auth.user.id);
     if (!account) {
       return Response.json(
         { error: "Administrator account was not found.", success: false },
@@ -218,9 +218,11 @@ export async function PATCH(request: Request) {
 
     let newPassword: string | undefined;
     if (hasNewPassword) {
+      const currentPasswordHash = await UserModel.passwordHashById(auth.user.id);
       if (
         typeof body.current_password !== "string" ||
-        !verifyPassword(body.current_password, account.password_hash)
+        !currentPasswordHash ||
+        !verifyPassword(body.current_password, currentPasswordHash)
       ) {
         return Response.json(
           { error: "Your current password is incorrect.", success: false },

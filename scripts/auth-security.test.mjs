@@ -271,7 +271,6 @@ test("staff session unlock accepts the same scrypt password as sign-in", async (
   const userId = await UserModel.create({
     name: "Angelu Dela Cruz",
     username: "angelu-merrylane",
-    email: "angelu@example.test",
     role: "staff",
     password,
   });
@@ -618,6 +617,73 @@ test("recovery answers the same for an account with no saved email and creates n
     .prepare("SELECT id FROM activity_logs WHERE user_id = ?")
     .all(user.id);
   assert.equal(storedRows.length, 0);
+});
+
+test("an administrator can clear a staff email with the correct confirmation password", async (t) => {
+  const database = await createAuthDatabase(t, "staff-email-clear");
+  const { hashPassword } = await import("../src/lib/models.ts");
+  const admin = await database
+    .prepare(
+      `INSERT INTO users (name, username, email, role, password_hash)
+       VALUES (?, ?, ?, ?, ?)
+       RETURNING id`
+    )
+    .get(
+      "Administrator",
+      "admin-edit-merrylane",
+      "admin-edit@example.test",
+      "admin",
+      hashPassword("admin-password")
+    );
+  const staff = await database
+    .prepare(
+      `INSERT INTO users (name, username, email, role, password_hash)
+       VALUES (?, ?, ?, ?, ?)
+       RETURNING id`
+    )
+    .get(
+      "Staff Member",
+      "staff-edit-merrylane",
+      "placeholder@example.test",
+      "staff",
+      hashPassword("staff-password")
+    );
+  assert.ok(admin.id);
+  assert.ok(staff.id);
+
+  const { POST: login } = await import("../src/app/api/auth/login/route.ts");
+  const loginResponse = await login(
+    loginRequest("admin-edit-merrylane", "admin-password")
+  );
+  assert.equal(loginResponse.status, 200);
+  const token = loginResponse.cookies.get("auth-admin-token")?.value;
+  assert.ok(token);
+
+  const { PATCH: updateUser } = await import("../src/app/api/users/route.ts");
+  const patchRequest = (confirmationPassword) =>
+    new Request("http://localhost/api/users", {
+      method: "PATCH",
+      headers: {
+        cookie: `auth-admin-token=${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: staff.id,
+        email: "",
+        reason: "Remove placeholder account email",
+        confirmation_password: confirmationPassword,
+      }),
+    });
+
+  const wrongPasswordResponse = await updateUser(patchRequest("wrong-password"));
+  assert.equal(wrongPasswordResponse.status, 401);
+
+  const response = await updateUser(patchRequest("admin-password"));
+  assert.equal(response.status, 200);
+  const updated = await database
+    .prepare("SELECT email FROM users WHERE id = ?")
+    .get(staff.id);
+  assert.equal(updated.email, "");
 });
 
 test("staff sessions remain available at closing and sign out after the closing idle threshold", async (t) => {

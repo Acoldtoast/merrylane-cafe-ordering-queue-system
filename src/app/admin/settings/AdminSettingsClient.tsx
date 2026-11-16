@@ -909,7 +909,7 @@ export function AdminSettingsClient() {
             <div className="admin-settings-fields">
               <div className="field">
                 <label className="label" htmlFor="admin-settings-personal-email">
-                  Personal email
+                  Personal email (optional)
                 </label>
                 <input
                   id="admin-settings-personal-email"
@@ -920,10 +920,10 @@ export function AdminSettingsClient() {
                   autoComplete="email"
                   maxLength={254}
                   placeholder="you@example.com"
-                  required
                 />
                 <span className="tiny">
-                  All administrator notification emails and password recovery codes are sent here.
+                  Administrator notification emails and password recovery codes go here. Leave it
+                  blank to skip them; an account with no email can still sign in.
                 </span>
               </div>
             </div>

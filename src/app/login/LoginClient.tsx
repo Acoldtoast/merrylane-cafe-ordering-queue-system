@@ -200,14 +200,14 @@ export function LoginClient() {
       // switching accounts in the same browser never mixes sessions.
       clearPortalSessionCache();
       removeBrowserStorageItem(
-        `merrylane:admin:last-activity:${data.user.email}`
+        `merrylane:admin:last-activity:${data.user.username}`
       );
       removeBrowserStorageItem(
-        `merrylane:staff:last-activity:${data.user.email}`
+        `merrylane:staff:last-activity:${data.user.username}`
       );
 
       setBrowserStorageItem(
-        `merrylane:${role}:last-activity:${data.user.email}`,
+        `merrylane:${role}:last-activity:${data.user.username}`,
         String(Date.now())
       );
       const fallback = role === "admin" ? "/admin" : "/staff/payments";

@@ -30,7 +30,7 @@ import {
 
 export const portalSessionCache = new Map<
   string,
-  { name: string; email: string; role: string }
+  { name: string; username: string; email: string; role: string }
 >();
 
 export function clearPortalSessionCache() {
@@ -144,7 +144,7 @@ export function PortalShell({
   // items (which remounts this shell) does not blank the whole screen while
   // the session is re-checked.
   const cachedUser = portalSessionCache.get(area) ?? null;
-  const [user, setUser] = useState<{ name: string; email: string; role: string } | null>(
+  const [user, setUser] = useState<{ name: string; username: string; email: string; role: string } | null>(
     cachedUser
   );
   const [sessionReady, setSessionReady] = useState(Boolean(cachedUser));
@@ -190,9 +190,9 @@ export function PortalShell({
         window.clearInterval(idleWarningTimerRef.current);
         idleWarningTimerRef.current = undefined;
         setIdleWarning(null);
-        if (user?.email) {
+        if (user?.username) {
           removeBrowserStorageItem(
-            `merrylane:staff:last-activity:${user.email}`
+            `merrylane:staff:last-activity:${user.username}`
           );
         }
         notifyPortalDataChanged("/api/auth/staff-idle");
@@ -213,9 +213,9 @@ export function PortalShell({
       idleWarningTimerRef.current = undefined;
     }
     setIdleWarning(null);
-    if (user?.email) {
+    if (user?.username) {
       setBrowserStorageItem(
-        `merrylane:staff:last-activity:${user.email}`,
+        `merrylane:staff:last-activity:${user.username}`,
         String(Date.now())
       );
     }
@@ -258,6 +258,7 @@ export function PortalShell({
           setAuthCheckError(false);
           const sessionUser = data.user as {
             name: string;
+            username: string;
             email: string;
             role: string;
           };
@@ -285,7 +286,7 @@ export function PortalShell({
               setUnlockPassword("");
             }
           }
-          const lastActivityKey = `merrylane:${area}:last-activity:${sessionUser.email}`;
+          const lastActivityKey = `merrylane:${area}:last-activity:${sessionUser.username}`;
           const lastActivity = Number(getBrowserStorageItem(lastActivityKey));
           const idleLimit = idleTimeoutMinutes * 60 * 1000;
           if (idleTimeoutMinutes === 0 && !lastActivity) {
@@ -365,12 +366,12 @@ export function PortalShell({
         name: detail.name ?? user.name,
         email: detail.email ?? user.email,
       };
-      if (updatedUser.email !== user.email) {
-        const activityKey = `merrylane:${area}:last-activity:${user.email}`;
+      if (updatedUser.username !== user.username) {
+        const activityKey = `merrylane:${area}:last-activity:${user.username}`;
         const lastActivity = getBrowserStorageItem(activityKey);
         if (lastActivity) {
           setBrowserStorageItem(
-            `merrylane:${area}:last-activity:${updatedUser.email}`,
+            `merrylane:${area}:last-activity:${updatedUser.username}`,
             lastActivity
           );
           removeBrowserStorageItem(activityKey);
@@ -401,7 +402,7 @@ export function PortalShell({
           if (detail.minutes === 0) {
             if (user) {
               setBrowserStorageItem(
-                `merrylane:staff:last-activity:${user.email}`,
+                `merrylane:staff:last-activity:${user.username}`,
                 String(Date.now())
               );
             }
@@ -536,7 +537,7 @@ export function PortalShell({
     }
 
     const idleLimit = idleTimeoutMinutes * 60 * 1000;
-    const activityKey = `merrylane:${area}:last-activity:${user.email}`;
+    const activityKey = `merrylane:${area}:last-activity:${user.username}`;
     let idleTimer = 0;
     let lastHeartbeatAt = 0;
     let heartbeatInFlight = false;
@@ -751,7 +752,7 @@ export function PortalShell({
       return;
     }
 
-    const activityKey = `merrylane:staff:last-activity:${user.email}`;
+    const activityKey = `merrylane:staff:last-activity:${user.username}`;
     const markActivity = () => {
       if (document.visibilityState === "hidden") return;
       setBrowserStorageItem(activityKey, String(Date.now()));
@@ -793,7 +794,7 @@ export function PortalShell({
             last_activity_at:
               Number(
                 getBrowserStorageItem(
-                  `merrylane:staff:last-activity:${user.email}`
+                  `merrylane:staff:last-activity:${user.username}`
                 )
               ) || Date.now(),
           }),
@@ -813,7 +814,7 @@ export function PortalShell({
           authRedirectingRef.current = true;
           portalSessionCache.delete("staff");
           removeBrowserStorageItem(
-            `merrylane:staff:last-activity:${user.email}`
+            `merrylane:staff:last-activity:${user.username}`
           );
           router.replace("/login?next=/staff&reason=session_expired");
           return;
@@ -1042,7 +1043,7 @@ export function PortalShell({
         notifyPortalDataChanged("/api/auth/login");
       }
       removeBrowserStorageItem(
-        `merrylane:${area}:last-activity:${user?.email}`
+        `merrylane:${area}:last-activity:${user?.username}`
       );
       portalSessionCache.delete(area);
       router.push(`/login?next=/${area}`);
@@ -1076,7 +1077,7 @@ export function PortalShell({
       }
 
       setBrowserStorageItem(
-        `merrylane:staff:last-activity:${user?.email}`,
+        `merrylane:staff:last-activity:${user?.username}`,
         String(Date.now())
       );
       staffLockedRef.current = false;
@@ -1100,9 +1101,9 @@ export function PortalShell({
       });
       if (!response.ok) throw new Error("Could not switch accounts. Please try again.");
       notifyPortalDataChanged("/api/auth/login");
-      if (user?.email) {
+      if (user?.username) {
         removeBrowserStorageItem(
-          `merrylane:staff:last-activity:${user.email}`
+          `merrylane:staff:last-activity:${user.username}`
         );
       }
       router.replace("/login?next=/staff");

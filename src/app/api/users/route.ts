@@ -30,8 +30,8 @@ function validEmail(value: unknown): value is string {
 
 async function hasAdminPassword(authUserId: number, value: unknown): Promise<boolean> {
   if (typeof value !== "string" || !value) return false;
-  const admin = await UserModel.byId(authUserId);
-  return Boolean(admin && verifyPassword(value, admin.password_hash));
+  const passwordHash = await UserModel.passwordHashById(authUserId);
+  return Boolean(passwordHash && verifyPassword(value, passwordHash));
 }
 
 function validProfileFields(body: Record<string, unknown>): boolean {

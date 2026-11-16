@@ -810,7 +810,7 @@ export function AdminStaffClient() {
                       <span className="account-info">
                         <strong>{user.name}</strong>
                         <span>{user.username || "—"}</span>
-                        <span>{user.email}</span>
+                        <span>{user.email || "No email saved"}</span>
                         <span className="muted account-duty">
                           Profile, attendance &amp; sales
                         </span>

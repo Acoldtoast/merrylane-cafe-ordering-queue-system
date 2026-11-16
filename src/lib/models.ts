@@ -3587,6 +3587,14 @@ export const UserModel = {
       .get(id) as User | undefined;
   },
 
+  async passwordHashById(id: number): Promise<string | undefined> {
+    await ensureUserColumns();
+    const row = (await getDb()
+      .prepare("SELECT password_hash FROM users WHERE id = ?")
+      .get(id)) as { password_hash?: string } | undefined;
+    return row?.password_hash;
+  },
+
   async all(): Promise<User[]> {
     await ensureUserColumns();
     return await getDb()
