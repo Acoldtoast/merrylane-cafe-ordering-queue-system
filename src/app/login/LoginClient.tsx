@@ -23,13 +23,13 @@ const accounts = [
     role: "Administrator",
     username: "admin-merrylane",
     password: "admin123",
-    name: "Mira Dela Cruz",
+    name: "Kirsten Baromma",
   },
   {
     role: "Staff",
     username: "angelu-merrylane",
     password: "staff123",
-    name: "Angelu Dela Cruz",
+    name: "Angelu Macaraig",
   },
 ];
 

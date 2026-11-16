@@ -52,20 +52,21 @@ The database is **not** in version control: it holds customer orders, payment pr
 hashes. To set up a fresh checkout, copy a PGlite directory (or a snapshot from `data/backups`) into
 `data/merrylane-pglite`, or point `MERRYLANE_DB_DIR` at an existing copy.
 
-`data/merrylane.db` is a legacy SQLite file kept only as a historical import source. The running app
-never reads it; all data access goes through PGlite.
+All data access goes through PGlite. SQLite is not read or written anywhere in the running app.
 
-### Demo accounts
+### Accounts
 
-The development database ships with these accounts. The login screen has one-tap buttons that fill
-them in.
+Sign-in uses the account **username**, not the email address. The development database currently
+holds these two accounts, and the login screen has one-tap buttons that fill them in:
 
-| Role          | Email                  | Password   | Lands on |
-| ------------- | ---------------------- | ---------- | -------- |
-| Administrator | `admin@merrylane.com`  | `admin123` | `/admin` |
-| Staff         | `barista@merrylane.com`| `staff123` | `/staff` |
+| Role          | Username           | Password   | Name            | Lands on |
+| ------------- | ------------------ | ---------- | --------------- | -------- |
+| Administrator | `admin-merrylane`  | `admin123` | Kirsten Baromma | `/admin` |
+| Staff         | `angelu-merrylane` | `staff123` | Angelu Macaraig | `/staff` |
 
-Change them under **Admin → Staff management** before any real use.
+Each account also stores an email address (`admin@merrylane.com`, `barista@merrylane.com`), which is
+used only for password recovery. Add or edit accounts under **Admin → Staff management**, and change
+these passwords before any real use.
 
 ### Open it on a phone
 
@@ -119,7 +120,7 @@ of waiting for a second API request.
 | `/customer/orders` | Guest order history for this browser, with links back to each live order |
 | `/customer/feedback?order=N` | Star rating + comment |
 | `/customer/thanks?order=N` | Thank-you and return to menu |
-| `/customer/waiter?table=N` | Call a waiter (water, cutlery, bill, help); one request every 5 minutes with a live countdown |
+| `/customer/waiter?table=N` | Call a waiter (water, cutlery, bill, help); 5 minutes between the first and second call, 10 minutes between the second and third, 3 calls per table per day |
 | `/customer/hours` | Opening hours and last-order cutoff |
 | `/network-required` | Shown when not on the cafe network; retries automatically and supports “Skip for now” |
 
@@ -152,13 +153,14 @@ idle lock with password unlock, and route/data prefetching so menu switches feel
 
 **Auth**
 
-- `/login` — staff/admin sign-in (JWT in an HttpOnly cookie)
+- `/login` — staff/admin sign-in with a username and password (JWT in an HttpOnly cookie)
 - After five failed sign-in attempts from the same browser, a recovery link appears for staff and
-  administrators. The device-wide streak includes unregistered email addresses and clears after a
+  administrators. The device-wide streak includes unregistered usernames and clears after a
   successful sign-in to any account. Cooldowns increase to 1, 2, 3, then 5 minutes; after that,
   each further failure following a 5-minute cooldown starts another 5-minute cooldown. Recovery
-  sends a one-time code to the active account's saved email address, then opens the code-entry
-  form; the code expires after 10 minutes. A successful password reset clears that browser's streak,
+  works from the username already typed on the sign-in form: a one-time code is emailed to that
+  account's saved address, then the code-entry form opens. The code expires after 5 minutes, and
+  five wrong entries cancel it. A successful password reset clears that browser's streak,
   and security events appear under Admin Activity → Access. The device identifier is an HttpOnly
   browser cookie, not a hardware fingerprint; clearing site cookies starts a new device streak. The
   cookie expires after 30 days.
