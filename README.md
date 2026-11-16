@@ -52,11 +52,12 @@ The database is **not** in version control: it holds customer orders, payment pr
 hashes. To set up a fresh checkout, copy a PGlite directory (or a snapshot from `data/backups`) into
 `data/merrylane-pglite`, or point `MERRYLANE_DB_DIR` at an existing copy.
 
-All data access goes through PGlite. SQLite is not read or written anywhere in the running app.
+PGlite is the only database. The app reads and writes it through `src/lib/db/`, and all new tables
+and queries use native PostgreSQL syntax.
 
 ### Accounts
 
-Sign-in uses the account **username**, not the email address. The development database currently
+Sign-in uses the account **username**, not an email address. The development database currently
 holds these two accounts, and the login screen has one-tap buttons that fill them in:
 
 | Role          | Username           | Password   | Name            | Lands on |
@@ -64,9 +65,9 @@ holds these two accounts, and the login screen has one-tap buttons that fill the
 | Administrator | `admin-merrylane`  | `admin123` | Kirsten Baromma | `/admin` |
 | Staff         | `angelu-merrylane` | `staff123` | Angelu Macaraig | `/staff` |
 
-Each account also stores an email address (`admin@merrylane.com`, `barista@merrylane.com`), which is
-used only for password recovery. Add or edit accounts under **Admin → Staff management**, and change
-these passwords before any real use.
+Add or edit accounts under **Admin → Staff management**, and change these passwords before any real
+use. A personal email address is **optional** and is used only for password recovery. An account with
+no saved email still works normally; a password reset for it has to be done by an administrator.
 
 ### Open it on a phone
 
@@ -160,10 +161,13 @@ idle lock with password unlock, and route/data prefetching so menu switches feel
   each further failure following a 5-minute cooldown starts another 5-minute cooldown. Recovery
   works from the username already typed on the sign-in form: a one-time code is emailed to that
   account's saved address, then the code-entry form opens. The code expires after 5 minutes, and
-  five wrong entries cancel it. A successful password reset clears that browser's streak,
-  and security events appear under Admin Activity → Access. The device identifier is an HttpOnly
-  browser cookie, not a hardware fingerprint; clearing site cookies starts a new device streak. The
-  cookie expires after 30 days.
+  five wrong entries cancel it. The request always answers the same way — whether the account does
+  not exist, has no saved email, or received a code — so it cannot be used to discover usernames or
+  email addresses. When an account has no saved email, nothing is sent and no code is created; an
+  administrator resets the password instead. A successful password reset clears that browser's
+  streak, and security events appear under Admin Activity → Access. The device identifier is an
+  HttpOnly browser cookie, not a hardware fingerprint; clearing site cookies starts a new device
+  streak. The cookie expires after 30 days.
 
 ---
 
@@ -208,8 +212,8 @@ saved in the same browser, but older orders cannot be reliably assigned to a gue
 ## Database
 
 The app stores everything in `data/merrylane-pglite`, a local [PGlite](https://pglite.dev/)
-(PostgreSQL compiled to WebAssembly) database. New tables, columns, and indexes must use native
-PostgreSQL syntax — SQLite syntax is deprecated and no longer used for new code.
+(PostgreSQL compiled to WebAssembly) database. Tables, columns, and indexes use native PostgreSQL
+syntax.
 
 - The database directory can be relocated with `MERRYLANE_DB_DIR`.
 - The connection runs with `TIME ZONE 'Asia/Manila'`, matching the cafe's reporting day.
@@ -305,6 +309,8 @@ Never commit any of the following — `.gitignore` already blocks them:
 Other practices baked into the app:
 
 - Passwords are hashed; sessions are signed JWTs in HttpOnly cookies.
+- Password recovery and sign-in never reveal whether a username or email address exists: unknown
+  accounts, accounts without a saved email, and successful sends all return the same response.
 - Stored SMTP passwords are encrypted at rest.
 - Sign-in abuse is rate-limited per browser device, with admin-configurable idle timeouts and a
   staff lock screen.

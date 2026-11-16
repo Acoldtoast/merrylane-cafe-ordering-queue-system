@@ -28,9 +28,9 @@ function validEmail(value: unknown): value is string {
   );
 }
 
-async function hasAdminPassword(authEmail: string, value: unknown): Promise<boolean> {
+async function hasAdminPassword(authUserId: number, value: unknown): Promise<boolean> {
   if (typeof value !== "string" || !value) return false;
-  const admin = await UserModel.byEmail(authEmail);
+  const admin = await UserModel.byId(authUserId);
   return Boolean(admin && verifyPassword(value, admin.password_hash));
 }
 
@@ -88,17 +88,22 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+    const emailValue = typeof email === "string" ? email.trim() : "";
     if (
       typeof name !== "string" ||
-      typeof email !== "string" ||
       typeof role !== "string" ||
       typeof password !== "string" ||
       !name.trim() ||
-      !email.trim() ||
       !password.trim()
     ) {
       return Response.json(
-        { error: "Name, email, role and password are required.", success: false },
+        { error: "Name, role and password are required.", success: false },
+        { status: 400 }
+      );
+    }
+    if (emailValue && !validEmail(emailValue)) {
+      return Response.json(
+        { error: "Enter a valid email address, or leave it blank.", success: false },
         { status: 400 }
       );
     }
@@ -122,14 +127,14 @@ export async function POST(request: Request) {
           { status: 400 }
         );
       }
-      if (!(await hasAdminPassword(auth.user!.email, body.confirmation_password))) {
+      if (!(await hasAdminPassword(auth.user!.id, body.confirmation_password))) {
         return Response.json(
           { error: "The administrator password is incorrect.", success: false },
           { status: 401 }
         );
       }
     }
-    if (await UserModel.byEmail(email.trim())) {
+    if (emailValue && (await UserModel.byEmail(emailValue))) {
       return Response.json(
         { error: "An account with that email already exists.", success: false },
         { status: 409 }
@@ -150,7 +155,7 @@ export async function POST(request: Request) {
     const id = await UserModel.create({
       name: name.trim(),
       username,
-      email: email.trim(),
+      email: emailValue,
       role,
       password: password.trim(),
       contact_number:
@@ -202,7 +207,11 @@ export async function PATCH(request: Request) {
         { status: 400 }
       );
     }
-    if (body.email !== undefined && !validEmail(body.email)) {
+    if (
+      body.email !== undefined &&
+      String(body.email).trim() !== "" &&
+      !validEmail(body.email)
+    ) {
       return Response.json(
         { error: "Enter a valid personal email address.", success: false },
         { status: 400 }
@@ -271,7 +280,7 @@ export async function PATCH(request: Request) {
       body.username.trim().toLowerCase() !== target.username.toLowerCase();
     const emailChanged =
       typeof body.email === "string" &&
-      body.email.trim().toLowerCase() !== target.email.toLowerCase();
+      body.email.trim().toLowerCase() !== (target.email ?? "").toLowerCase();
     const highRiskChange =
       usernameChanged ||
       emailChanged ||
@@ -286,7 +295,7 @@ export async function PATCH(request: Request) {
       );
     }
     if (highRiskChange) {
-      if (!(await hasAdminPassword(auth.user!.email, body.confirmation_password))) {
+      if (!(await hasAdminPassword(auth.user!.id, body.confirmation_password))) {
         return Response.json(
           { error: "The administrator password is incorrect.", success: false },
           { status: 401 }
@@ -406,7 +415,7 @@ export async function DELETE(request: Request) {
         { status: 400 }
       );
     }
-    if (!(await hasAdminPassword(auth.user!.email, body.confirmation_password))) {
+    if (!(await hasAdminPassword(auth.user!.id, body.confirmation_password))) {
       return Response.json(
         { error: "The administrator password is incorrect.", success: false },
         { status: 401 }

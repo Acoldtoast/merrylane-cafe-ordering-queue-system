@@ -11,6 +11,19 @@ import { SettingsModel, UserModel } from "@/lib/models";
 
 const EMAIL_TTL_MINUTES = 5;
 const RESEND_COOLDOWN_SECONDS = 60;
+// One message for every outcome: unknown account, inactive account, account with
+// no saved email, throttled request, and code sent. The response must never
+// reveal whether an account exists or can receive mail.
+const RECOVERY_MESSAGE =
+  "If that account has a recovery email saved, a code is on its way. It expires in 5 minutes. Ask an administrator if you do not receive it.";
+
+function genericSuccess() {
+  return NextResponse.json({
+    success: true,
+    message: RECOVERY_MESSAGE,
+    retry_after_seconds: RESEND_COOLDOWN_SECONDS,
+  });
+}
 
 function isValidEmail(value: string) {
   return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
@@ -29,13 +42,9 @@ export async function POST(request: NextRequest) {
     }
 
     const user = await UserModel.byUsername(username);
-    // Always respond success to avoid account enumeration.
+    // Always respond the same way to avoid account enumeration.
     if (!user || user.is_active === 0) {
-      return NextResponse.json({
-        success: true,
-        message: "If the account exists, a recovery code has been sent.",
-        retry_after_seconds: RESEND_COOLDOWN_SECONDS,
-      });
+      return genericSuccess();
     }
 
     const savedAdminEmail =
@@ -47,26 +56,16 @@ export async function POST(request: NextRequest) {
         ? savedAdminEmail && isValidEmail(savedAdminEmail)
           ? savedAdminEmail
           : ""
-        : user.email;
+        : user.email?.trim() || "";
+    // No saved email: report the same success the caller would see if a code had
+    // been sent, but create no code and send nothing. This keeps the endpoint
+    // from disclosing which accounts have a recovery address on file.
     if (!recoveryEmail) {
-      return NextResponse.json(
-        {
-          error:
-            "A personal recovery email is not configured. Ask an administrator to update the account settings.",
-          success: false,
-        },
-        { status: 409 }
-      );
+      return genericSuccess();
     }
     const result = await createUserRecoveryCode(user.id);
     if (result.status === "throttled") {
-      return NextResponse.json({
-        success: true,
-        throttled: true,
-        retry_after_seconds: result.retryAfterSeconds,
-        message:
-          "A recovery code was sent recently. Please wait before requesting another.",
-      });
+      return genericSuccess();
     }
 
     const code = result.code;
@@ -84,25 +83,16 @@ export async function POST(request: NextRequest) {
       });
     } catch (mailError) {
       await invalidateUserRecoveryCode(user.id);
+      // Logged for the operator only. The caller still sees the generic response
+      // so a delivery failure cannot be used to confirm that an account exists.
       console.error("Could not send recovery code email.", mailError);
-      return NextResponse.json(
-        {
-          error:
-            "The recovery code could not be emailed. Check the email settings and try again.",
-          success: false,
-        },
-        { status: 502 }
-      );
+      return genericSuccess();
     } finally {
       transport?.close();
     }
 
     await markUserRecoveryCodeSent(user.id);
-    return NextResponse.json({
-      success: true,
-      message: "A recovery code has been sent to the saved recovery email.",
-      retry_after_seconds: RESEND_COOLDOWN_SECONDS,
-    });
+    return genericSuccess();
   } catch (error) {
     console.error("Could not create recovery code.", error);
     return NextResponse.json(

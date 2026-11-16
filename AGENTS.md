@@ -22,5 +22,5 @@ This system uses **PGlite** (PostgreSQL compiled to WASM) as its sole database. 
 - **Do NOT use SQLite syntax** (`datetime('now')`, `INSERT OR IGNORE`, `PRAGMA`, etc.) in new code. Use native PostgreSQL syntax (`CURRENT_TIMESTAMP`, `NOW()`, `INSERT ... ON CONFLICT`, `information_schema.columns`, etc.).
 - The PGlite adapter (`src/lib/db/pglite.ts`) has a `convertSql()` function that translates some SQLite syntax for backward compatibility, but new code should not rely on this.
 - **Do NOT use SQLite** as a fallback or for any new integration. All new data access must go through PGlite.
-- The legacy SQLite database (`data/merrylane.db`) is deprecated and only exists as a historical import source. Do not read from or write to it.
+- There is no SQLite database in this project any more; `data/merrylane.db` does not exist and nothing reads it.
 - New integrations, new tables, and new features must use PGlite (PostgreSQL) syntax exclusively.

@@ -3564,6 +3564,8 @@ export const UserModel = {
 
   async byEmail(email: string): Promise<User | undefined> {
     await ensureUserColumns();
+    // An account may have no saved email; never match blank values together.
+    if (!email?.trim()) return undefined;
     return await getDb()
       .prepare("SELECT * FROM users WHERE lower(email) = lower(?)")
       .get(email.trim()) as User | undefined;
@@ -3597,7 +3599,7 @@ export const UserModel = {
   async create(data: {
     name: string;
     username?: string;
-    email: string;
+    email?: string;
     role: "admin" | "staff";
     password: string;
     contact_number?: string | null;
@@ -3617,7 +3619,7 @@ export const UserModel = {
       .run(
         data.name,
         username.toLowerCase().trim(),
-        data.email.toLowerCase().trim(),
+        (data.email ?? "").toLowerCase().trim(),
         data.role,
         hashPassword(data.password),
         data.contact_number?.trim() || null,

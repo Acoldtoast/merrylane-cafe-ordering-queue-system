@@ -339,9 +339,15 @@ export function AdminStaffClient() {
 
   const createAccount = async () => {
     setAccountAttempted(true);
-    if (!accountForm.name.trim() || !accountForm.email.trim() || !accountForm.password.trim()) {
+    if (!accountForm.name.trim() || !accountForm.password.trim()) {
       feedback.warning("Some account details are missing", {
-        message: "Add a name, email address, and temporary password to create the account.",
+        message: "Add a name and temporary password to create the account.",
+      });
+      return;
+    }
+    if (accountForm.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(accountForm.email.trim())) {
+      feedback.warning("Check the personal email", {
+        message: "Enter a valid email address, or leave the field blank.",
       });
       return;
     }
@@ -401,7 +407,7 @@ export function AdminStaffClient() {
               label: "Username",
               value: createdUsername,
             },
-            { label: "Email", value: account.email.toLowerCase().trim() },
+            { label: "Email", value: account.email.toLowerCase().trim() || "Not set" },
             { label: "Role", value: account.role === "admin" ? "Admin" : "Staff" },
           ],
         }),
@@ -457,11 +463,10 @@ export function AdminStaffClient() {
     if (!editing) return;
     if (
       !editForm.name.trim() ||
-      !editForm.username.trim() ||
-      !editForm.email.trim()
+      !editForm.username.trim()
     ) {
-      feedback.warning("Name, username, and email are required", {
-        message: "Fill in the name, login username, and personal email before saving.",
+      feedback.warning("Name and username are required", {
+        message: "Fill in the name and login username before saving.",
       });
       return;
     }
@@ -475,11 +480,12 @@ export function AdminStaffClient() {
       return;
     }
     if (
-      editForm.email.trim().length > 254 ||
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editForm.email.trim())
+      editForm.email.trim() &&
+      (editForm.email.trim().length > 254 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editForm.email.trim()))
     ) {
       feedback.warning("Check the personal email", {
-        message: "Enter a valid email address before saving.",
+        message: "Enter a valid email address, or leave the field blank.",
       });
       return;
     }
@@ -847,14 +853,13 @@ export function AdminStaffClient() {
                 />
               </div>
               <div className="field">
-                <label className="label" htmlFor="acc-email">Email (required)</label>
+                <label className="label" htmlFor="acc-email">Email (optional)</label>
                 <input
                   id="acc-email"
                   className="input"
                   type="email"
                   value={accountForm.email}
-                  required
-                  aria-invalid={accountAttempted && !accountForm.email.trim()}
+                  aria-invalid={accountAttempted && Boolean(accountForm.email.trim()) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(accountForm.email.trim())}
                   onChange={(event) =>
                     setAccountForm((current) => ({ ...current, email: event.target.value }))
                   }
@@ -1093,7 +1098,7 @@ export function AdminStaffClient() {
                     </div>
                     <div>
                       <span>Email address</span>
-                      <strong>{viewingProfile.email}</strong>
+                      <strong>{viewingProfile.email || "Not set"}</strong>
                     </div>
                     <div>
                       <span>Contact number</span>
@@ -1671,7 +1676,7 @@ export function AdminStaffClient() {
                 </span>
               </div>
               <div className="field">
-                <label className="label" htmlFor="edit-email">Personal email</label>
+                <label className="label" htmlFor="edit-email">Personal email (optional)</label>
                 <input
                   id="edit-email"
                   className="input"

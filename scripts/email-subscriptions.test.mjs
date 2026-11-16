@@ -133,7 +133,7 @@ test("redirects admin login-address notifications to the saved personal email", 
     redirectEmailSubscriptionRecipients(
       [
         {
-          email: "admin@merrylane.com",
+          email: "admin-login@example.test",
           noStockAlerts: true,
           lowStockAlerts: false,
           salesCadence: "daily",
@@ -141,7 +141,7 @@ test("redirects admin login-address notifications to the saved personal email", 
           reportSendTime: "08:00",
         },
       ],
-      new Map([["admin@merrylane.com", "owner@example.com"]])
+      new Map([["admin-login@example.test", "owner@example.com"]])
     ),
     [
       {
@@ -161,7 +161,7 @@ test("does not deliver admin notifications to the login email without a personal
     redirectEmailSubscriptionRecipients(
       [
         {
-          email: "admin@merrylane.com",
+          email: "admin-login@example.test",
           noStockAlerts: true,
           lowStockAlerts: true,
           salesCadence: "daily",
@@ -177,7 +177,7 @@ test("does not deliver admin notifications to the login email without a personal
           reportSendTime: "09:00",
         },
       ],
-      new Map([["admin@merrylane.com", null]])
+      new Map([["admin-login@example.test", null]])
     ),
     [
       {
@@ -240,7 +240,7 @@ test("merges subscriptions when the personal email is already a recipient", () =
         reportSendTime: "09:00",
       },
       {
-        email: "admin@merrylane.com",
+        email: "admin-login@example.test",
         noStockAlerts: true,
         lowStockAlerts: true,
         salesCadence: "daily",
@@ -248,7 +248,7 @@ test("merges subscriptions when the personal email is already a recipient", () =
         reportSendTime: "08:00",
       },
     ],
-    new Map([["admin@merrylane.com", "owner@example.com"]])
+    new Map([["admin-login@example.test", "owner@example.com"]])
   );
 
   assert.equal(redirected.length, 1);
