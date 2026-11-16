@@ -212,6 +212,7 @@ PostgreSQL syntax — SQLite syntax is deprecated and no longer used for new cod
 - The database directory can be relocated with `MERRYLANE_DB_DIR`.
 - The connection runs with `TIME ZONE 'Asia/Manila'`, matching the cafe's reporting day.
 - A daily auto-backup copies the directory into `data/backups/` (kept out of version control).
+  The scheduler starts once the admin settings route is opened in a server session.
 - Schema upgrades are applied automatically by the models; there is no separate migrate command.
 
 ### Backups and restore
