@@ -56,7 +56,7 @@ function metaFor(pathname: string) {
   if (pathname === "/admin") {
     return {
       documentTitle: "Overview",
-      title: "The cafe, in numbers.",
+      title: "Overview.",
       contextLabel: "Admin · Overview",
       contextTitle: dateLabel,
     };

@@ -21,6 +21,7 @@ const routeModules: Record<PortalArea, Record<string, RouteModuleLoader>> = {
     "/staff/requests": () => import("@/app/staff/requests/StaffRequestsClient"),
     "/staff/sales": () => import("@/app/staff/sales/StaffSalesClient"),
     "/staff/stock": () => import("@/app/staff/stock/StaffStockClient"),
+    "/staff/profile": () => import("@/app/staff/profile/StaffProfileClient"),
   },
   customer: {
     "/customer/welcome": () => import("@/app/customer/welcome/WelcomeClient"),

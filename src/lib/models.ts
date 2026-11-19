@@ -224,6 +224,77 @@ export function normalizeVariantGroups(input: unknown): {
   });
 }
 
+function groupVariantsAndExtrasByItem<T extends { menu_item_id: number }>(
+  rows: T[]
+): Map<number, T[]> {
+  const byItem = new Map<number, T[]>();
+  for (const row of rows) {
+    const list = byItem.get(row.menu_item_id);
+    if (list) list.push(row);
+    else byItem.set(row.menu_item_id, [row]);
+  }
+  return byItem;
+}
+
+function attachOptionsFromMaps(
+  item: MenuItem,
+  variantsByItem: Map<number, Variant[]>,
+  extrasByItem: Map<number, Extra[]>
+): MenuItemFull {
+  const trackingEnabled =
+    item.stock_tracking_enabled !== false &&
+    Number(item.stock_tracking_enabled) !== 0;
+  const manualOut = Boolean(item.stock_manual_out_date);
+  const counted = trackingEnabled ? Math.max(0, Number(item.stock_count) || 0) : 0;
+  const stockCount = manualOut ? 0 : counted;
+  const stockStatus: MenuItem["stock_status"] = manualOut
+    ? "out"
+    : !trackingEnabled
+      ? "available"
+      : stockCount <= 0
+        ? "out"
+        : stockCount <= item.low_stock_threshold
+          ? "low"
+          : "available";
+  return {
+    ...item,
+    stock_count: stockCount,
+    stock_status: stockStatus,
+    variants: variantsByItem.get(item.id) || [],
+    extras: extrasByItem.get(item.id) || [],
+  };
+}
+
+async function attachOptionsBatch(
+  db: ReturnType<typeof getDb>,
+  rows: MenuItem[]
+): Promise<MenuItemFull[]> {
+  if (!rows.length) return [];
+  const ids = rows.map((row) => row.id);
+  const placeholders = ids.map(() => "?").join(", ");
+  const variants = (await db
+    .prepare(
+      `SELECT * FROM item_variants
+       WHERE menu_item_id IN (${placeholders})
+       ORDER BY menu_item_id, variant_type, display_order`
+    )
+    .all(...ids)) as unknown as Variant[];
+  const extras = (await db
+    .prepare(
+      `SELECT a.id, ia.menu_item_id, a.name, a.price_modifier
+       FROM item_addons ia
+       JOIN addons a ON a.id = ia.addon_id
+       WHERE ia.menu_item_id IN (${placeholders})
+       ORDER BY ia.menu_item_id, ia.display_order, a.display_order, a.name`
+    )
+    .all(...ids)) as unknown as Extra[];
+  const variantsByItem = groupVariantsAndExtrasByItem(variants);
+  const extrasByItem = groupVariantsAndExtrasByItem(extras);
+  return rows.map((item) =>
+    attachOptionsFromMaps(item, variantsByItem, extrasByItem)
+  );
+}
+
 const menuStockColumnsReady = new WeakMap<object, Promise<void>>();
 
 async function ensureMenuStockColumns(): Promise<void> {
@@ -429,7 +500,8 @@ export const AddonModel = {
 export const MenuItemModel = {
   async allActive(): Promise<MenuItemFull[]> {
     await resetExpiredManualStockOuts();
-    const rows = (await getDb()
+    const db = getDb();
+    const rows = (await db
       .prepare(
         `SELECT m.*, c.name AS category_name, c.display_order AS category_order
          FROM menu_items m
@@ -438,7 +510,7 @@ export const MenuItemModel = {
          ORDER BY c.display_order, m.display_order, m.name`
       )
       .all()) as unknown as MenuItem[];
-    return Promise.all(rows.map(attachOptions));
+    return attachOptionsBatch(db, rows);
   },
 
   async stockAlerts(
@@ -496,7 +568,8 @@ export const MenuItemModel = {
 
   async all(): Promise<MenuItemFull[]> {
     await resetExpiredManualStockOuts();
-    const rows = (await getDb()
+    const db = getDb();
+    const rows = (await db
       .prepare(
         `SELECT m.*, c.name AS category_name
          FROM menu_items m
@@ -504,7 +577,7 @@ export const MenuItemModel = {
          ORDER BY c.display_order, m.display_order, m.name`
       )
       .all()) as unknown as MenuItem[];
-    return Promise.all(rows.map(attachOptions));
+    return attachOptionsBatch(db, rows);
   },
 
   async byId(id: number): Promise<MenuItemFull | undefined> {
@@ -970,12 +1043,55 @@ async function ensureOrderColumns(): Promise<void> {
     await db.exec(
       "CREATE INDEX IF NOT EXISTS idx_orders_preparing_at ON orders(preparing_at)"
     );
+    await ensurePerformanceIndexes();
   })();
   orderColumnsReady.set(db, ready);
   try {
     await ready;
   } catch (error) {
     orderColumnsReady.delete(db);
+    throw error;
+  }
+}
+
+const performanceIndexesReady = new WeakMap<object, Promise<void>>();
+
+/**
+ * Indexes for the queries that run on every poll: the staff board, customer
+ * status, waiter requests and the notification counters. Adding one is cheap
+ * and idempotent; a missing optional table must never block startup.
+ */
+async function ensurePerformanceIndexes(): Promise<void> {
+  const db = getDb();
+  const existing = performanceIndexesReady.get(db);
+  if (existing) return existing;
+  const ready = (async () => {
+    const indexes = [
+      "CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at, id)",
+      "CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON orders(payment_status, status)",
+      "CREATE INDEX IF NOT EXISTS idx_orders_table_created ON orders(table_number, created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id)",
+      "CREATE INDEX IF NOT EXISTS idx_order_item_addons_order ON order_item_addons(order_id)",
+      "CREATE INDEX IF NOT EXISTS idx_order_balance_payments_order ON order_balance_payments(order_id)",
+      "CREATE INDEX IF NOT EXISTS idx_waiter_requests_table_created ON waiter_requests(table_number, created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_waiter_requests_status_created ON waiter_requests(status, created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_reviews_order ON reviews(order_id)",
+      "CREATE INDEX IF NOT EXISTS idx_reviews_created ON reviews(created_at)",
+    ];
+    for (const sql of indexes) {
+      try {
+        await db.exec(sql);
+      } catch (error) {
+        console.warn(`Could not create performance index: ${sql}`, error);
+      }
+    }
+  })();
+  performanceIndexesReady.set(db, ready);
+  try {
+    await ready;
+  } catch (error) {
+    performanceIndexesReady.delete(db);
     throw error;
   }
 }
@@ -1376,6 +1492,34 @@ async function restoreOrderStock(orderId: number): Promise<void> {
   }
 }
 
+async function cancelUnpaidGcashOrder(id: number): Promise<boolean> {
+  await ensureOrderColumns();
+  await ensureOrderStockDeductionsTable();
+  const db = getDb();
+  return db.transaction(async () => {
+    const result = await db
+      .prepare(
+        `UPDATE orders
+         SET status = 'cancelled',
+             cancelled_at = datetime('now', 'localtime'),
+             cancellation_reason = COALESCE('unpaid_timeout', cancellation_reason),
+             updated_at = datetime('now', 'localtime')
+         WHERE id = ?
+           AND status IN ('pending', 'payment_pending')
+           AND payment_method = 'gcash'
+           AND payment_status = 'pending'
+           AND payment_proof_url IS NULL
+           AND created_at <= datetime('now', 'localtime', '-1 day')`
+      )
+      .run(id);
+    if (Number(result.changes) !== 1) {
+      return false;
+    }
+    await restoreOrderStock(id);
+    return true;
+  });
+}
+
 async function cancelUnpaidOrder(
   id: number,
   guestId?: string,
@@ -1417,9 +1561,30 @@ async function cancelUnpaidOrder(
 }
 
 export const OrderModel = {
-  async autoCancelUnpaidCounterOrders(): Promise<number> {
+  async completeServedByStaff(id: number): Promise<boolean> {
     await ensureOrderColumns();
-    const orders = (await getDb()
+    const result = await getDb().prepare(
+      `UPDATE orders
+       SET status = 'completed',
+           completed_at = to_char(timezone('Asia/Manila', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS'),
+           updated_at = to_char(timezone('Asia/Manila', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS'),
+           completion_reason = 'staff_after_one_hour'
+       WHERE id = ? AND status = 'ready' AND payment_status = 'verified'
+         AND ready_at IS NOT NULL
+         AND ready_at::timestamp <= timezone('Asia/Manila', CURRENT_TIMESTAMP) - INTERVAL '1 hour'`
+    ).run(id);
+    return Number(result.changes) === 1;
+  },
+  /**
+   * Cancels counter/cash orders unpaid for over 90 minutes and GCash orders
+   * awaiting payment for over 24 hours. Reserves stock only until payment is
+   * actually verified, so abandoned GCash checkouts cannot tie up stock
+   * indefinitely.
+   */
+  async autoCancelUnpaidOrders(): Promise<{ counter: number; gcash: number }> {
+    await ensureOrderColumns();
+    const db = getDb();
+    const counterOrders = (await db
       .prepare(
         `SELECT id FROM orders
          WHERE status IN ('pending', 'payment_pending')
@@ -1429,13 +1594,31 @@ export const OrderModel = {
          ORDER BY id`
       )
       .all()) as { id: number }[];
-    let cancelled = 0;
-    for (const order of orders) {
+    const gcashOrders = (await db
+      .prepare(
+        `SELECT id FROM orders
+         WHERE status IN ('pending', 'payment_pending')
+            AND payment_method = 'gcash'
+            AND payment_status = 'pending'
+            AND payment_proof_url IS NULL
+            AND created_at <= datetime('now', 'localtime', '-1 day')
+         ORDER BY id`
+      )
+      .all()) as { id: number }[];
+
+    let counterCancelled = 0;
+    for (const order of counterOrders) {
       if (await cancelUnpaidOrder(order.id, undefined, "unpaid_timeout")) {
-        cancelled += 1;
+        counterCancelled += 1;
       }
     }
-    return cancelled;
+    let gcashCancelled = 0;
+    for (const order of gcashOrders) {
+      if (await cancelUnpaidGcashOrder(order.id)) {
+        gcashCancelled += 1;
+      }
+    }
+    return { counter: counterCancelled, gcash: gcashCancelled };
   },
 
   async recentVerified(
@@ -1487,11 +1670,15 @@ export const OrderModel = {
              COALESCE(customer_name, 'Guest') AS customer_name,
              CASE WHEN payment_method = 'gcash' THEN 'gcash' ELSE 'counter' END AS payment_method,
              COALESCE(payment_amount, total) AS amount,
+             COALESCE(discount_amount, 0) AS discount_amount,
              confirmed_at AS paid_at,
              payment_reference,
              (SELECT NULLIF(log.actor_name, 'Merrylane staff')
               FROM activity_logs AS log
-              WHERE log.action = 'payment.verified'
+              WHERE log.action = CASE
+                  WHEN orders.payment_method = 'gcash' THEN 'order.preparing'
+                  ELSE 'payment.verified'
+                END
                 AND log.entity_type = 'order'
                 AND log.entity_id = orders.id
               ORDER BY log.created_at DESC, log.id DESC
@@ -1519,6 +1706,7 @@ export const OrderModel = {
              COALESCE(orders.customer_name, 'Guest') AS customer_name,
              payments.payment_method,
              payments.amount,
+             0 AS discount_amount,
              payments.verified_at AS paid_at,
              payments.payment_reference,
              (SELECT users.name
@@ -2735,6 +2923,13 @@ export const OrderModel = {
     const db = getDb();
     const order = await OrderModel.byId(data.orderId);
     if (!order) return { ok: false, error: "Order not found.", status: 404 };
+    if (order.payment_status === "verified") {
+      return {
+        ok: false,
+        error: "Add-ons can only be added before the order is paid.",
+        status: 409,
+      };
+    }
     if (!["pending", "payment_pending", "confirmed", "preparing"].includes(order.status)) {
       return {
         ok: false,
@@ -2777,13 +2972,16 @@ export const OrderModel = {
           !["pending", "payment_pending", "confirmed", "preparing"].includes(
             current.status
           ) ||
+          current.payment_status === "verified" ||
           current.balance_payments?.some((payment) => payment.status === "pending") ||
           (current.payment_method === "gcash" &&
             current.payment_status === "pending" &&
             Boolean(current.payment_proof_url))
         ) {
           throw new OrderChangeConflict(
-            "The order can no longer be changed while its payment is being reviewed.",
+            current?.payment_status === "verified"
+              ? "Add-ons can only be added before the order is paid."
+              : "The order can no longer be changed while its payment is being reviewed.",
             409
           );
         }
@@ -3081,7 +3279,8 @@ export const OrderModel = {
         `SELECT COUNT(*) AS count
          FROM orders
          WHERE status IN ('pending', 'payment_pending')
-           AND payment_status = 'pending'`
+            AND payment_status = 'pending'
+            AND (payment_method <> 'gcash' OR payment_proof_url IS NOT NULL)`
       )
       .get()) as { count: number } | undefined;
     return Number(row?.count || 0);
@@ -3398,7 +3597,7 @@ export const WaiterRequestModel = {
 // ============================================================
 export interface Review {
   id: number;
-  order_id: number;
+  order_id: number | null;
   table_number: number;
   rating: number;
   customer_name?: string | null;
@@ -3407,16 +3606,54 @@ export interface Review {
   created_at: string;
 }
 
+const generalReviewsReady = new WeakMap<PGliteDatabase, Promise<void>>();
+
 export const ReviewModel = {
+  async unreadCount(userId: number): Promise<number> {
+    await ensureStaffNotificationReadsTable();
+    const row = await getDb().prepare(
+      `SELECT COUNT(*) AS count FROM reviews r
+       WHERE NOT EXISTS (
+         SELECT 1 FROM staff_notification_reads n
+         WHERE n.user_id = ? AND n.notification_id = 'admin-review-' || r.id::text
+       )`
+    ).get(userId) as { count: number };
+    return Number(row.count);
+  },
+
+  async markAllSeen(userId: number): Promise<void> {
+    await ensureStaffNotificationReadsTable();
+    await getDb().prepare(
+      `INSERT INTO staff_notification_reads (user_id, notification_id)
+       SELECT ?, 'admin-review-' || id::text FROM reviews
+       ON CONFLICT (user_id, notification_id) DO NOTHING`
+    ).run(userId);
+  },
+
+  async ensureGeneralReviews(): Promise<void> {
+    const db = getDb();
+    let ready = generalReviewsReady.get(db);
+    if (!ready) {
+      ready = db.exec("ALTER TABLE reviews ALTER COLUMN order_id DROP NOT NULL")
+        .catch((error: unknown) => {
+          generalReviewsReady.delete(db);
+          throw error;
+        });
+      generalReviewsReady.set(db, ready);
+    }
+    await ready;
+  },
   async create(data: {
-    order_id: number;
+    order_id: number | null;
     table_number: number;
     rating: number;
     customer_name?: string;
     comment?: string;
     photo_url?: string;
   }): Promise<number> {
-    const result = await getDb()
+    const db = getDb();
+    if (data.order_id === null) await ReviewModel.ensureGeneralReviews();
+    const result = await db
       .prepare(
         `INSERT INTO reviews (order_id, table_number, rating, customer_name, comment, photo_url)
          VALUES (?, ?, ?, ?, ?, ?)`
@@ -3479,6 +3716,7 @@ export interface User {
   duty_hours?: string | null;
   role: "admin" | "staff";
   password_hash?: string;
+  must_change_password?: number;
   created_at?: string;
   is_active?: number;
   last_login_at?: string | null;
@@ -3495,9 +3733,38 @@ async function ensureUserColumns(): Promise<void> {
   const existing = userColumnsReady.get(db);
   if (existing) return existing;
   const ready = (async () => {
-    const columns = (await db.prepare("PRAGMA table_info(users)").all()) as {
+    let columns: { name: string }[] = (await db.prepare("PRAGMA table_info(users)").all()) as {
       name: string;
     }[];
+    if (columns.length === 0) {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          name TEXT NOT NULL,
+          username TEXT,
+          email TEXT,
+          role TEXT NOT NULL,
+          password_hash TEXT NOT NULL,
+          contact_number TEXT,
+          address TEXT,
+          duty_hours TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::text,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          last_login_at TEXT,
+          last_logout_at TEXT,
+          duty_minutes INTEGER NOT NULL DEFAULT 0,
+          session_id TEXT
+        );
+      `);
+      await db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nonblank
+          ON users (lower(email)) WHERE trim(email) <> '';
+      `);
+      columns = (await db.prepare("PRAGMA table_info(users)").all()) as {
+        name: string;
+      }[];
+    }
+
     const add = async (name: string, sql: string) => {
       if (!columns.some((column) => column.name === name)) {
         await db.exec(sql);
@@ -3512,15 +3779,24 @@ async function ensureUserColumns(): Promise<void> {
     await add("address", "ALTER TABLE users ADD COLUMN address TEXT");
     await add("duty_hours", "ALTER TABLE users ADD COLUMN duty_hours TEXT");
     await add("username", "ALTER TABLE users ADD COLUMN username TEXT");
-    // Email is optional for accounts. Drop the old table-wide UNIQUE rule (which
-    // would let only one account have no email) and keep real addresses unique
-    // with a partial index instead.
+    await add("must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0");
     await db.exec("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key");
     await db.exec(
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nonblank
        ON users (lower(email)) WHERE trim(email) <> ''`
     );
-    // Backfill usernames for existing users
+    const existingUsers = (await db
+      .prepare("SELECT COUNT(*) AS count FROM users")
+      .get()) as { count: number };
+    if (existingUsers.count === 0) {
+      await db.transaction(async () => {
+        await db.prepare(
+          `INSERT INTO users (name, username, email, role, password_hash, contact_number, address, duty_hours, is_active)
+           VALUES (?, ?, '', ?, ?, NULL, NULL, NULL, 1)`
+        ).run("Administrator", "admin", "admin", hashPassword("admin123"));
+      });
+    }
+
     await getDb()
       .prepare(
         `UPDATE users SET username = lower(
@@ -3590,7 +3866,7 @@ export const UserModel = {
     await ensureUserColumns();
     return await getDb()
       .prepare(
-        "SELECT id, name, username, email, contact_number, address, duty_hours, role, created_at, is_active, last_login_at, last_logout_at, duty_minutes, session_id FROM users WHERE id = ?"
+        "SELECT id, name, username, email, contact_number, address, duty_hours, role, created_at, is_active, last_login_at, last_logout_at, duty_minutes, session_id, must_change_password FROM users WHERE id = ?"
       )
       .get(id) as User | undefined;
   },
@@ -4375,8 +4651,19 @@ function nextScheduledOpening(
   return null;
 }
 
+const settingsTableReady = new WeakMap<object, Promise<void>>();
+async function ensureSettingsTable(): Promise<void> {
+  const db = getDb();
+  let ready = settingsTableReady.get(db);
+  if (!ready) {
+    ready = db.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`).then(() => undefined);
+    settingsTableReady.set(db, ready);
+  }
+  await ready;
+}
 export const SettingsModel = {
   async get(key: string): Promise<string | undefined> {
+    await ensureSettingsTable();
     const row = await getDb()
       .prepare("SELECT value FROM settings WHERE key = ?")
       .get(key) as { value: string } | undefined;
@@ -4384,6 +4671,7 @@ export const SettingsModel = {
   },
 
   async set(key: string, value: string): Promise<void> {
+    await ensureSettingsTable();
     await getDb()
       .prepare(
         `INSERT INTO settings (key, value) VALUES (?, ?)
@@ -4393,6 +4681,7 @@ export const SettingsModel = {
   },
 
   async getAll(): Promise<Setting[]> {
+    await ensureSettingsTable();
     return (await getDb()
       .prepare("SELECT key, value FROM settings ORDER BY key")
       .all()) as unknown as Setting[];

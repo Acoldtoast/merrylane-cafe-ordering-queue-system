@@ -8,7 +8,6 @@ import { SkeletonLine, SkeletonPanel } from "@/components/PortalSkeletonPrimitiv
 import type {
   Order,
   OrderItem,
-  RejectedPayment,
   SalesTransaction,
 } from "@/lib/types";
 import { dateTimeLabel, orderTypeLabel, peso, statusLabel } from "@/lib/format";
@@ -51,7 +50,6 @@ export function StaffSalesClient({
   const [today] = useState(todayInManila);
   const [transactions, setTransactions] = useState<SalesTransaction[]>([]);
   const [cancelledOrders, setCancelledOrders] = useState<Order[]>([]);
-  const [rejectedPayments, setRejectedPayments] = useState<RejectedPayment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<SalesTransaction | null>(null);
@@ -87,7 +85,6 @@ export function StaffSalesClient({
       if (currentRequest === requestId.current) {
         setTransactions(data.transactions || []);
         setCancelledOrders(data.cancelledOrders || []);
-        setRejectedPayments(data.rejectedPayments || []);
         setError("");
       }
     } catch (cause: unknown) {
@@ -97,7 +94,6 @@ export function StaffSalesClient({
         );
         setTransactions([]);
         setCancelledOrders([]);
-        setRejectedPayments([]);
       }
     } finally {
       if (currentRequest === requestId.current) setLoading(false);
@@ -187,70 +183,49 @@ export function StaffSalesClient({
       {entries.length === 0 ? (
         <div className="daily-sales-empty">No {title.toLowerCase()} payments for this day.</div>
       ) : (
-        <div className="data-table-wrap">
-          <table className="data-table daily-sales-table data-table-stack">
-            <thead>
-              <tr>
-                <th>Order</th>
-                <th>Paid at</th>
-                <th>Table</th>
-                <th>Customer</th>
-                <th>{method === "gcash" ? "Reference" : "Payment"}</th>
-                <th>Amount</th>
-                <th>Details</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((entry) => (
-                <tr key={entry.transaction_id}>
-                  <td data-label="">
-                    <strong>
-                      #{String(entry.order_number ?? entry.order_id).padStart(3, "0")}
-                    </strong>
-                    {entry.transaction_type === "additional" && (
-                      <small className="daily-sales-additional">Additional payment</small>
-                    )}
-                  </td>
-                  <td data-label="Paid at">{dateTimeLabel(entry.paid_at)}</td>
-                  <td data-label="Table">{String(entry.table_number).padStart(2, "0")}</td>
-                  <td data-label="Customer">{entry.customer_name || "Guest"}</td>
-                  <td data-label={method === "gcash" ? "Reference" : "Payment"}>
-                    {method === "gcash" ? entry.payment_reference || "—" : "Cash / counter"}
-                  </td>
-                  <td data-label="Amount"><strong>{peso(entry.amount)}</strong></td>
-                  <td data-label="Details">
-                    <button
-                      type="button"
-                      className="text-link"
-                      onClick={() => void openDetails(entry)}
-                    >
-                      View details
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ul className="daily-sales-tickets">
+          {entries.map((entry) => (
+            <li key={entry.transaction_id}>
+              <button
+                type="button"
+                className="daily-sales-ticket"
+                onClick={() => void openDetails(entry)}
+              >
+                <span>
+                  <strong>#{String(entry.order_number ?? entry.order_id).padStart(3, "0")}</strong>
+                  {entry.transaction_type === "additional" && (
+                    <small>Additional payment</small>
+                  )}
+                  {Number(entry.discount_amount) > 0 && (
+                    <small>Discount {peso(entry.discount_amount)}</small>
+                  )}
+                </span>
+                <strong>{peso(entry.amount)}</strong>
+                <span className="text-link">View details</span>
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );
 
   return (
     <>
-      <div className="section-bar daily-sales-heading section-bar-actions-only">
+      <header className="daily-sales-page-heading">
+        <h1>Sales.</h1>
         <div className="daily-sales-date-controls">
           <button
             type="button"
-            className="btn btn-soft btn-sm"
+            className="btn btn-soft btn-sm daily-sales-nav"
             aria-label="View previous day"
             onClick={() => changeDate(shiftDate(date, -1))}
           >
             <Icon name="chevron-left" />
           </button>
           <label className="daily-sales-date">
-            <span className="sr-only">Sales date</span>
             <input
+              aria-label="Sales date"
               type="date"
               max={today}
               value={date}
@@ -263,7 +238,7 @@ export function StaffSalesClient({
           </label>
           <button
             type="button"
-            className="btn btn-soft btn-sm"
+            className="btn btn-soft btn-sm daily-sales-nav"
             aria-label="View next day"
             disabled={date >= today}
             onClick={() => changeDate(shiftDate(date, 1))}
@@ -280,7 +255,7 @@ export function StaffSalesClient({
             </button>
           )}
         </div>
-      </div>
+      </header>
       <div className="daily-sales-date-label">{displayDate(date)}</div>
       {error && <div className="error-strip" role="alert">{error}</div>}
       {loading ? (
@@ -306,17 +281,22 @@ export function StaffSalesClient({
             <div className="daily-sales-total cash">
               <span>Cash / counter</span>
               <strong>{peso(cashTotal)}</strong>
-              <small>{cash.length} payment{cash.length === 1 ? "" : "s"}</small>
             </div>
             <div className="daily-sales-total gcash">
               <span>GCash</span>
               <strong>{peso(gcashTotal)}</strong>
-              <small>{gcash.length} payment{gcash.length === 1 ? "" : "s"}</small>
             </div>
             <div className="daily-sales-total all">
               <span>Total sales</span>
               <strong>{peso(cashTotal + gcashTotal)}</strong>
-              <small>{transactions.length} recorded payment{transactions.length === 1 ? "" : "s"}</small>
+            </div>
+            <div className="daily-sales-total discount">
+              <span>Discounts</span>
+              <strong>{peso(transactions.reduce((sum, entry) => sum + Number(entry.discount_amount || 0), 0))}</strong>
+            </div>
+            <div className="daily-sales-total discount">
+              <span>Discounted tickets</span>
+              <strong>{transactions.filter((entry) => Number(entry.discount_amount || 0) > 0).length}</strong>
             </div>
           </div>
           <div className="daily-sales-lists">
@@ -327,7 +307,6 @@ export function StaffSalesClient({
             <header className="daily-sales-method-head">
               <div>
                 <span className="eyebrow">Cancelled orders</span>
-                <strong>Not included in sales totals</strong>
               </div>
               <b>{cancelledOrders.length}</b>
             </header>
@@ -367,86 +346,6 @@ export function StaffSalesClient({
                         <td data-label="Amount">{peso(cancelledOrder.total)}</td>
                       </tr>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-          <section className="daily-sales-method">
-            <header className="daily-sales-method-head">
-              <div>
-                <span className="eyebrow">Rejected payments</span>
-                <strong>Rejected proof history · not included in sales totals</strong>
-              </div>
-              <b>{rejectedPayments.length}</b>
-            </header>
-            {rejectedPayments.length === 0 ? (
-              <div className="daily-sales-empty">
-                No rejected payments for this day.
-              </div>
-            ) : (
-              <div className="data-table-wrap">
-                <table className="data-table daily-sales-table data-table-stack">
-                  <thead>
-                    <tr>
-                      <th>Order</th>
-                      <th>Rejected at</th>
-                      <th>Table</th>
-                      <th>Customer</th>
-                      <th>Reference</th>
-                      <th>Rejected by</th>
-                      <th>Amount</th>
-                      <th>Proof</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rejectedPayments.map((rejection) => {
-                      const proofHref =
-                        rejection.proof_type === "inline"
-                          ? `/api/staff/sales/rejected-proof/${rejection.rejection_id}`
-                          : rejection.external_proof_url;
-                      return (
-                        <tr key={rejection.rejection_id}>
-                          <td data-label="">
-                            <strong>
-                              #{String(rejection.order_number).padStart(3, "0")}
-                            </strong>
-                          </td>
-                          <td data-label="Rejected at">
-                            {dateTimeLabel(rejection.rejected_at)}
-                          </td>
-                          <td data-label="Table">
-                            {String(rejection.table_number).padStart(2, "0")}
-                          </td>
-                          <td data-label="Customer">
-                            {rejection.customer_name || "Guest"}
-                          </td>
-                          <td data-label="Reference">
-                            {rejection.payment_reference || "—"}
-                          </td>
-                          <td data-label="Rejected by">
-                            {rejection.rejected_by || "Not recorded"}
-                          </td>
-                          <td data-label="Amount">
-                            {peso(rejection.amount)}
-                          </td>
-                          <td data-label="Proof">
-                            {proofHref ? (
-                              <a
-                                className="text-link"
-                                href={proofHref}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                View proof
-                              </a>
-                            ) : (
-                              "No proof uploaded"
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
                   </tbody>
                 </table>
               </div>
@@ -525,16 +424,7 @@ export function StaffSalesClient({
                         {orderItemMeta(item) && <small>{orderItemMeta(item)}</small>}
                         {item.note && <small>Note: {item.note}</small>}
                       </div>
-                      <b>
-                        {peso(
-                          item.price_at_time * item.quantity +
-                            (item.addons || []).reduce(
-                              (sum, addon) =>
-                                sum + addon.price_modifier * addon.quantity,
-                              0
-                            )
-                        )}
-                      </b>
+                      <b>{peso(item.price_at_time * item.quantity)}</b>
                     </div>
                   ))}
                 </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useConfirmDialog } from "@/components/ConfirmDialog";
 import { usePathname } from "next/navigation";
 import { adminNav } from "@/components/portalNav";
 import { CoffeeArt, artKindForCategory } from "@/components/CoffeeArt";
@@ -22,9 +23,6 @@ interface ItemForm {
   image_url: string;
   price: string;
   category_id: string;
-  stock_count: string;
-  stock_status: "available" | "low" | "out";
-  stock_note: string;
   is_best_seller: boolean;
   addonIds: number[];
   optionGroups: OptionGroupForm[];
@@ -46,9 +44,6 @@ const emptyForm: ItemForm = {
   image_url: "",
   price: "",
   category_id: "",
-  stock_count: "",
-  stock_status: "available",
-  stock_note: "",
   is_best_seller: false,
   addonIds: [],
   optionGroups: [],
@@ -70,6 +65,7 @@ const emptyAddonForm: AddonForm = {
 export function AdminMenuClient() {
   const pathname = usePathname();
   const feedback = useFeedback();
+  const { confirm, dialog: confirmDialog } = useConfirmDialog();
   const [tab, setTab] = useState<Tab>("menu");
   const [items, setItems] = useState<MenuItem[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -179,14 +175,6 @@ export function AdminMenuClient() {
       image_url: item.image_url || "",
       price: String(item.price),
       category_id: String(item.category_id),
-      stock_count: item.stock_tracking_enabled
-        ? String(item.stock_count)
-        : "",
-      stock_status:
-        item.stock_tracking_enabled && item.stock_count <= 0
-          ? "out"
-          : item.stock_status,
-      stock_note: item.stock_note || "",
       is_best_seller: Boolean(item.is_best_seller),
       addonIds: item.extras.map((extra) => extra.id),
       optionGroups: Array.from(groups.values()),
@@ -233,16 +221,6 @@ export function AdminMenuClient() {
       image_url: form.image_url,
       price: Number(form.price),
       category_id: Number(form.category_id),
-      stock_count: form.stock_count.trim()
-        ? Number(form.stock_count)
-        : null,
-      stock_tracking_enabled: form.stock_count.trim() !== "",
-      stock_status: form.stock_count.trim()
-        ? form.stock_status
-        : form.stock_status === "out"
-          ? "out"
-          : "available",
-      stock_note: form.stock_note.trim() || null,
       is_best_seller: form.is_best_seller,
       addonIds: form.addonIds,
       variants: form.optionGroups.map((group) => ({
@@ -288,12 +266,6 @@ export function AdminMenuClient() {
           details: [
             { label: "Category", value: categoryName },
             { label: "Price", value: peso(payload.price) },
-            {
-              label: "Stock",
-              value: payload.stock_tracking_enabled
-                ? `${payload.stock_count} · ${payload.stock_status}`
-                : "Quantity not tracked · available",
-            },
             ...(payload.addonIds.length
               ? [{ label: "Add-ons", value: `${payload.addonIds.length} attached` }]
               : []),
@@ -438,7 +410,7 @@ export function AdminMenuClient() {
     const prompt = itemCount > 0
       ? `Remove "${category.name}" and move its ${itemCount} menu item${itemCount === 1 ? "" : "s"} to "${replacementName}"?`
       : `Remove the empty category "${category.name}"?`;
-    if (!window.confirm(prompt)) return;
+    if (!(await confirm(prompt))) return;
     setSavingCategory(true);
     setError("");
     const result = await feedback.run(
@@ -640,7 +612,7 @@ export function AdminMenuClient() {
   };
 
   const removeAccount = async (user: User) => {
-    if (!window.confirm(`Remove ${user.name}? They will lose access immediately.`)) return;
+    if (!(await confirm(`Remove ${user.name}? They will lose access immediately.`))) return;
     const result = await feedback.run(
       async () => {
         const response = await fetchPortalApi("/api/users", {
@@ -1181,87 +1153,6 @@ export function AdminMenuClient() {
                   </select>
                 </div>
               </div>
-              <div className="modal-form-row">
-                <div className="field">
-                  <label className="label" htmlFor="item-stock">Stock on hand (optional)</label>
-                  <input
-                    id="item-stock"
-                    className="input"
-                    type="number"
-                    min={0}
-                    step={1}
-                    value={form.stock_count}
-                    onChange={(event) => {
-                      const raw = event.target.value;
-                      const hasValue = raw.trim() !== "";
-                      setForm((current) => ({
-                        ...current,
-                        stock_count: raw,
-                        stock_status:
-                          !hasValue
-                            ? current.stock_status
-                            : Number(raw) <= 0
-                              ? "out"
-                              : current.stock_status === "out"
-                                ? "available"
-                                : current.stock_status,
-                      }));
-                    }}
-                  />
-                  <small className="muted">
-                    Leave blank to mark it available without tracking a quantity.
-                  </small>
-                </div>
-                <div className="field">
-                  <label className="label" htmlFor="item-status">Stock status</label>
-                  <select
-                    id="item-status"
-                    className="select"
-                    value={form.stock_status}
-                    onChange={(event) => {
-                      const next = event.target.value as ItemForm["stock_status"];
-                      setForm((current) => ({
-                        ...current,
-                        stock_status: next,
-                        // Sold out always means zero on hand.
-                        stock_count: next === "out" ? "0" : current.stock_count,
-                      }));
-                    }}
-                  >
-                    <option
-                      value="available"
-                      disabled={
-                        form.stock_count.trim() !== "" &&
-                        Number(form.stock_count) <= 0
-                      }
-                    >
-                      Available
-                    </option>
-                    <option
-                      value="low"
-                      disabled={
-                        form.stock_count.trim() === "" ||
-                        Number(form.stock_count) <= 0
-                      }
-                    >
-                      Low stock
-                    </option>
-                    <option value="out">Sold out</option>
-                  </select>
-                </div>
-              </div>
-              <div className="field">
-                <label className="label" htmlFor="item-note">Customer stock note</label>
-                <input
-                  id="item-note"
-                  className="input"
-                  value={form.stock_note}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, stock_note: event.target.value }))
-                  }
-                  placeholder="Only a few left today"
-                />
-              </div>
               <div className="field">
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                   <label className="label" style={{ margin: 0 }}>Choose-one option groups</label>
@@ -1332,20 +1223,23 @@ export function AdminMenuClient() {
                             updateOptionChoice(groupIndex, optionIndex, { name: event.target.value })
                           }
                         />
-                        <input
-                          className="input"
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          aria-label={`${option.name || "Choice"} extra price`}
-                          placeholder="Extra ₱"
-                          value={option.price_modifier}
-                          onChange={(event) =>
-                            updateOptionChoice(groupIndex, optionIndex, {
-                              price_modifier: event.target.value,
-                            })
-                          }
-                        />
+                        <div className="menu-option-price">
+                          <span aria-hidden="true">₱</span>
+                          <input
+                            className="input"
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            aria-label={`${option.name || "Choice"} extra price in pesos`}
+                            placeholder="0"
+                            value={option.price_modifier}
+                            onChange={(event) =>
+                              updateOptionChoice(groupIndex, optionIndex, {
+                                price_modifier: event.target.value,
+                              })
+                            }
+                          />
+                        </div>
                         <button
                           type="button"
                           className="table-icon-btn danger"
@@ -1715,6 +1609,7 @@ export function AdminMenuClient() {
           </div>
         </div>
       )}
+    {confirmDialog}
     </>
   );
 }

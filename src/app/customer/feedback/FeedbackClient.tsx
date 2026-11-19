@@ -1,12 +1,13 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Icon } from "@/components/Icons";
 import { useFeedback } from "@/components/Feedback";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { useCustomer } from "@/components/CustomerProvider";
+import { dateTimeLabel } from "@/lib/format";
+import type { Order } from "@/lib/types";
 
 const captions = [
   "We'd love to do better.",
@@ -32,10 +33,41 @@ export function FeedbackClient({
   const [photo, setPhoto] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [ratingAttempted, setRatingAttempted] = useState(false);
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [selectedOrderId, setSelectedOrderId] = useState(orderId);
+  const [choosingOrder, setChoosingOrder] = useState(false);
+  const [availableOrders, setAvailableOrders] = useState<Order[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(false);
+  const [orderError, setOrderError] = useState("");
+  const reviewOrderId = selectedOrderId;
+  const reviewTable = selectedOrder?.table_number ?? initialTable;
 
   useEffect(() => {
     setTable(initialTable);
   }, [initialTable, setTable]);
+
+  useEffect(() => {
+    if (!choosingOrder) return;
+    let cancelled = false;
+    async function loadOrders() {
+      setLoadingOrders(true);
+      setOrderError("");
+      try {
+        const response = await fetchPortalApi("/api/orders/history");
+        const data = await response.json();
+        if (!response.ok || !data.success || !Array.isArray(data.orders)) {
+          throw new Error(data.error || "Could not load your orders.");
+        }
+        if (!cancelled) setAvailableOrders(data.orders.filter((order: Order) => order.status === "completed"));
+      } catch (error) {
+        if (!cancelled) setOrderError(error instanceof Error ? error.message : "Could not load your orders.");
+      } finally {
+        if (!cancelled) setLoadingOrders(false);
+      }
+    }
+    void loadOrders();
+    return () => { cancelled = true; };
+  }, [choosingOrder]);
 
   const choosePhoto = (file: File | null) => {
     if (!file) return;
@@ -71,8 +103,8 @@ export function FeedbackClient({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            order_id: orderId,
-            table_number: initialTable,
+            order_id: reviewOrderId || undefined,
+            table_number: reviewTable,
             rating,
             customer_name: name.trim() || undefined,
             comment: comment.trim() || undefined,
@@ -96,16 +128,16 @@ export function FeedbackClient({
           message: `${captions[rating - 1]} The team reads every review.`,
           duration: 3400,
           details: [
-            { label: "Order", value: `#${String(orderId).padStart(3, "0")}` },
+            ...(reviewOrderId ? [{ label: "Order", value: `#${String(reviewOrderId).padStart(3, "0")}` }] : []),
             { label: "Rating", value: `${rating} of 5 stars` },
-            { label: "Table", value: String(initialTable).padStart(2, "0") },
+            { label: "Table", value: String(reviewTable).padStart(2, "0") },
             ...(photo ? [{ label: "Photo", value: "Attached" }] : []),
           ],
         }),
       }
     );
     if (result.ok) {
-      router.push(`/customer/thanks?order=${orderId}&table=${initialTable}`);
+      router.push(`/customer/thanks?${reviewOrderId ? `order=${reviewOrderId}&` : ""}table=${reviewTable}`);
     } else {
       setSubmitting(false);
     }
@@ -135,10 +167,11 @@ export function FeedbackClient({
             <button
               key={star}
               type="button"
+              role="radio"
               className={star <= rating ? "on" : ""}
               onClick={() => setRating(star)}
               aria-label={`${star} star${star === 1 ? "" : "s"}`}
-              aria-pressed={star <= rating}
+              aria-checked={star === rating}
             >
               <Icon name="star" />
             </button>
@@ -155,6 +188,41 @@ export function FeedbackClient({
       </div>
 
       <div className="feedback-form">
+        <div className="field">
+          <span className="label">Order <span className="muted">(optional)</span></span>
+          {reviewOrderId > 0 ? (
+            <div className="upload-row">
+              <span>Order #{String(selectedOrder?.order_number ?? reviewOrderId).padStart(3, "0")}</span>
+              <button type="button" className="text-link" onClick={() => { setSelectedOrder(null); setSelectedOrderId(0); }}>
+                Remove
+              </button>
+            </div>
+          ) : (
+            <button type="button" className="btn btn-outline btn-block btn-sm" onClick={() => setChoosingOrder((open) => !open)} aria-expanded={choosingOrder}>
+              <Icon name="receipt" className="icon-sm" /> {choosingOrder ? "Hide orders" : "Attach a completed order"}
+            </button>
+          )}
+          {choosingOrder && !reviewOrderId && (
+            <div className="field">
+              {loadingOrders && <span role="status">Loading your orders…</span>}
+              {orderError && <span className="field-error" role="alert">{orderError}</span>}
+              {!loadingOrders && !orderError && availableOrders.length === 0 && <span className="muted">No completed orders found. You can still submit a general review.</span>}
+              {!loadingOrders && availableOrders.length > 0 && (
+                <select className="input" aria-label="Choose a completed order" value="" onChange={(event) => {
+                  const order = availableOrders.find((entry) => entry.id === Number(event.target.value));
+                  if (order) { setSelectedOrder(order); setSelectedOrderId(order.id); setChoosingOrder(false); }
+                }}>
+                  <option value="">Choose a completed order</option>
+                  {availableOrders.map((order) => (
+                    <option key={order.id} value={order.id}>
+                      Order #{String(order.order_number ?? order.id).padStart(3, "0")} · {dateTimeLabel(order.created_at)}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
+        </div>
         <div className="field">
           <label className="label" htmlFor="name">
             Your name <span className="muted">(optional)</span>
@@ -238,12 +306,16 @@ export function FeedbackClient({
             </>
           )}
         </button>
-        <Link
-          href={`/customer/status?id=${orderId}&table=${initialTable}`}
+        <button
+          type="button"
           className="btn btn-ghost btn-block btn-sm"
+          onClick={() => {
+            if (window.history.length > 1) router.back();
+            else router.push(`/customer/menu?table=${initialTable}`);
+          }}
         >
           Maybe later
-        </Link>
+        </button>
       </div>
     </div>
   );

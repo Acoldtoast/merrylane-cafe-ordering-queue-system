@@ -6,6 +6,7 @@ import {
   WaiterRequestModel,
 } from "@/lib/models";
 import {
+  needsPaymentReview,
   preparationEtaHasPassed,
   preparationMinutesElapsed,
   preparationReminderLevel,
@@ -13,6 +14,9 @@ import {
   readyReminderLevel,
 } from "@/lib/orderLifecycle";
 import type { Order, Review } from "@/lib/types";
+import { countStaffWork } from "@/lib/staffWorkCounts";
+
+let lastAutoCancelAt = 0;
 
 type PortalNotification = {
   id: string;
@@ -27,13 +31,6 @@ function orderCode(order: Order) {
   return `#${String(order.order_number ?? order.id).padStart(3, "0")}`;
 }
 
-function needsPaymentReview(order: Order) {
-  return (
-    order.payment_status === "pending" &&
-    (order.status === "payment_pending" ||
-      (order.payment_method === "counter" && order.status === "pending"))
-  );
-}
 
 function reviewNotification(review: Review) {
   return {
@@ -55,6 +52,7 @@ export async function GET(request: Request) {
   }
 
   const entries: Omit<PortalNotification, "read">[] = [];
+  let workCounts: { payments: number; orders: number; requests: number } | undefined;
 
   if (user.role === "admin") {
     for (const item of await MenuItemModel.stockAlerts(10)) {
@@ -74,12 +72,18 @@ export async function GET(request: Request) {
       entries.push(reviewNotification(review));
     }
   } else {
-    await OrderModel.autoCancelUnpaidCounterOrders();
+    // This endpoint is polled every few seconds by every signed-in staff
+    // screen. The unpaid-order sweep is a multi-query write path, so run it at
+    // most once every 30 seconds per server process instead of on every poll.
+    const nowMs = Date.now();
+    if (nowMs - lastAutoCancelAt >= 30_000) {
+      lastAutoCancelAt = nowMs;
+      await OrderModel.autoCancelUnpaidOrders();
+    }
     const now = Date.now();
 
-    for (const order of (await OrderModel.pendingPayments()).filter(
-      needsPaymentReview
-    )) {
+    const pendingPayments = (await OrderModel.pendingPayments()).filter(needsPaymentReview);
+    for (const order of pendingPayments) {
       entries.push({
         id: `payment-${order.id}`,
         kind: "payment",
@@ -89,7 +93,8 @@ export async function GET(request: Request) {
       });
     }
 
-    for (const payment of await OrderModel.pendingBalancePayments()) {
+    const balancePayments = await OrderModel.pendingBalancePayments();
+    for (const payment of balancePayments) {
       entries.push({
         id: `balance-payment-${payment.id}`,
         kind: "payment",
@@ -155,7 +160,8 @@ export async function GET(request: Request) {
     }
 
     await WaiterRequestModel.resolveAcknowledgedOlderThan(25);
-    for (const request of await WaiterRequestModel.list("pending")) {
+    const pendingRequests = await WaiterRequestModel.list("pending");
+    for (const request of pendingRequests) {
       const followUp = request.request_type === "Order follow-up";
       entries.push({
         id: `waiter-${request.id}`,
@@ -167,6 +173,11 @@ export async function GET(request: Request) {
         href: "/staff/requests",
       });
     }
+    const counts = await countStaffWork();
+    workCounts = {
+      payments: pendingPayments.length + balancePayments.length,
+      ...counts,
+    };
   }
 
   const readIds = new Set(await OrderModel.notificationReads(user.id));
@@ -174,7 +185,8 @@ export async function GET(request: Request) {
     .map((entry) => ({ ...entry, read: readIds.has(entry.id) }))
     .sort((first, second) => Number(first.read) - Number(second.read));
 
-  return Response.json({ notifications, success: true });
+  const unreadReviews = user.role === "admin" ? await ReviewModel.unreadCount(user.id) : 0;
+  return Response.json({ notifications, workCounts, unreadReviews, success: true });
 }
 
 export async function PATCH(request: Request) {
@@ -186,7 +198,7 @@ export async function PATCH(request: Request) {
     );
   }
 
-  let body: { id?: unknown; ids?: unknown };
+  let body: { id?: unknown; ids?: unknown; markReviewsSeen?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -194,6 +206,10 @@ export async function PATCH(request: Request) {
       { error: "A valid notification ID is required.", success: false },
       { status: 400 }
     );
+  }
+  if (body.markReviewsSeen === true && user.role === "admin") {
+    await ReviewModel.markAllSeen(user.id);
+    return Response.json({ success: true });
   }
   const validPattern =
     user.role === "admin"
@@ -210,6 +226,6 @@ export async function PATCH(request: Request) {
     );
   }
 
-  OrderModel.markNotificationsRead(user.id, ids);
+  await OrderModel.markNotificationsRead(user.id, ids);
   return Response.json({ success: true, count: ids.length });
 }

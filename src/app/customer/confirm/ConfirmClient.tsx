@@ -58,26 +58,35 @@ export function ConfirmClient({
   }
 
   const gcash = order.payment_method === "gcash";
+  const gcashPending = gcash && order.payment_status !== "verified";
 
   return (
     <div className="centered-narrow">
       <div className="confirm-card">
         <div className="hourglass-illustration">
-          <Icon name={gcash ? "clock" : "check-circle"} />
+          <Icon name={gcashPending ? "clock" : "check-circle"} />
         </div>
         <span className="eyebrow">
-          {gcash ? "Payment verification" : "Order received"}
+          {gcashPending
+            ? "Payment verification"
+            : gcash
+              ? "Payment confirmed"
+              : "Order received"}
         </span>
         <h1>
-          {gcash ? (
+          {gcashPending ? (
             <>We&apos;re checking your payment.</>
+          ) : gcash ? (
+            <>Your payment is confirmed.</>
           ) : (
             <>We&apos;re getting it started.</>
           )}
         </h1>
         <p>
-          {gcash
-            ? "Our team has your receipt. Your order will move to the queue once the payment is confirmed."
+          {gcashPending
+            ? "Your GCash payment is being verified. Your order will move to the queue automatically once it is confirmed."
+            : gcash
+              ? "Your GCash payment is confirmed and your order is in the queue."
             : "Please pay at the counter to confirm your queue number."}
         </p>
 
@@ -116,15 +125,6 @@ export function ConfirmClient({
             <span>Total</span>
             <span>{peso(order.total)}</span>
           </div>
-        </div>
-
-        <div className="payment-note" style={{ textAlign: "left" }}>
-          <Icon name="info" />
-          <span>
-            {gcash
-              ? "Staff usually verify GCash receipts within 2–5 minutes. Keep this page handy."
-              : "Cash or card payments are accepted at the counter. Your queue number appears once payment is confirmed."}
-          </span>
         </div>
 
         <div className="confirm-footer">

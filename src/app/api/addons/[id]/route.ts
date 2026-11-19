@@ -1,6 +1,7 @@
 import { AddonModel } from "@/lib/models";
 import { requireAdmin } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
+import { invalidateCache } from "@/lib/serverCache";
 
 export async function PATCH(
   request: Request,
@@ -44,6 +45,7 @@ export async function PATCH(
       entity_type: "addon",
       entity_id: addonId,
     });
+    invalidateCache("menu");
     return Response.json({ addon: updated, success: true });
   } catch (error: any) {
     const duplicate = /UNIQUE/i.test(error.message || "");
@@ -78,6 +80,7 @@ export async function DELETE(
       entity_type: "addon",
       entity_id: addonId,
     });
+    invalidateCache("menu");
     return Response.json({ success: true });
   } catch (error: any) {
     return Response.json(

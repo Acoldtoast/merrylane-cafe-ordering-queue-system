@@ -23,7 +23,7 @@ function legacySmtpPasswordEncryptionKey(): Buffer {
   const secret = process.env.JWT_SECRET;
   if (!secret || secret.length < 32) {
     throw new Error(
-      "The saved SMTP password uses the previous JWT_SECRET key. Enter the Google app password again and save it to encrypt it with this installation's SMTP key."
+      "The saved SMTP password uses the previous JWT_SECRET key. JWT_SECRET must be configured in .env.local before the legacy SMTP password can be decoded; otherwise enter the Google app password again and save it to encrypt it with this installation's SMTP key."
     );
   }
   return deriveKey(secret, "merrylane:smtp-password:v1");

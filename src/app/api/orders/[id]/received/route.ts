@@ -1,4 +1,5 @@
 import { OrderModel } from "@/lib/models";
+import { getGuestId } from "@/lib/guest";
 
 function stamp() {
   return new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -18,6 +19,10 @@ export async function POST(
       );
     }
 
+    const guestId = await getGuestId();
+    if (!guestId || (await OrderModel.guestOwner(orderId)) !== guestId) {
+      return Response.json({ error: "Order not found.", success: false }, { status: 404 });
+    }
     const body = await request.json();
     const tableNumber = Number(body.table_number);
     const order = await OrderModel.byId(orderId);

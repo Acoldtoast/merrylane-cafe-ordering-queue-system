@@ -173,8 +173,11 @@ function OrdersSkeleton() {
     <div className="order-history-page">
       <header className="order-history-head">
         <SkeletonLine size="heading" />
-        <SkeletonLine size="long" />
       </header>
+      <div className="tabs customer-skeleton-tabs">
+        <SkeletonLine size="short" />
+        <SkeletonLine size="short" />
+      </div>
       <div className="order-history-list">
         {[1, 2, 3].map((order) => (
           <article className="card order-history-card" key={order}>
@@ -282,11 +285,13 @@ const pageLabels: Record<CustomerPage, string> = {
 
 export function CustomerPageSkeleton({
   page: pageOverride,
+  targetPath,
 }: {
   page?: CustomerPage;
+  targetPath?: string;
 } = {}) {
   const pathname = usePathname();
-  const page = pageOverride ?? pageFor(pathname);
+  const page = pageOverride ?? pageFor(targetPath ?? pathname);
   let content;
 
   switch (page) {

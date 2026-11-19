@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import { useCallback, useEffect, useState } from "react";
 import { adminNav } from "@/components/portalNav";
 import { Icon } from "@/components/Icons";
@@ -89,42 +88,6 @@ export function AdminHoursClient() {
   const [error, setError] = useState("");
   const [origin, setOrigin] = useState("");
 
-  const handleGcashQrFile = (file: File | null) => {
-    if (!file) return;
-    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
-      feedback.warning("That image won't work", {
-        message: "Choose a PNG, JPG, or WebP file for the GCash QR.",
-      });
-      return;
-    }
-    if (file.size > 1024 * 1024) {
-      feedback.warning("That QR image is too large", {
-        message: "Use an image that is 1 MB or smaller.",
-      });
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
-      if (typeof dataUrl !== "string") {
-        feedback.error("Couldn't read that image", {
-          message: "Try choosing the GCash QR file again.",
-        });
-        return;
-      }
-      setSettings((current) =>
-        current ? { ...current, gcash_qr_data_url: dataUrl } : current
-      );
-      setError("");
-    };
-    reader.onerror = () =>
-      feedback.error("Couldn't read that image", {
-        message: "Try choosing the GCash QR file again.",
-      });
-    reader.readAsDataURL(file);
-  };
-
   const load = useCallback(async () => {
     try {
       const response = await fetchPortalApi("/api/settings", { cache: "no-store" });
@@ -184,7 +147,15 @@ export function AdminHoursClient() {
     });
     const todaySchedule = schedule.find((day) => day.day === todayName);
     const snapshot = {
-      ...settings,
+      cafe_name: settings.cafe_name,
+      cafe_location: settings.cafe_location,
+      wifi_ssid: settings.wifi_ssid,
+      ordering_closed: settings.ordering_closed,
+      facebook_url: settings.facebook_url,
+      twitter_url: settings.twitter_url,
+      tiktok_url: settings.tiktok_url,
+      instagram_url: settings.instagram_url,
+      social_media_enabled: settings.social_media_enabled,
       ...extra,
       weekly_schedule: schedule,
       last_order_time: todaySchedule?.last_order ?? settings.last_order_time,
@@ -419,7 +390,7 @@ export function AdminHoursClient() {
               <div className="panel-head">
                 <div>
                   <h2>Cafe details</h2>
-                  <p>Shown on the welcome screen and GCash payment page.</p>
+                  <p>Shown on the welcome screen.</p>
                 </div>
               </div>
               <div className="panel-body">
@@ -461,78 +432,6 @@ export function AdminHoursClient() {
                     <span className="tiny muted">
                       Shown on the welcome and connection screens. Guests on the
                       cafe network go straight to the menu.
-                    </span>
-                  </div>
-                </div>
-                <div className="gcash-payment-settings mt-2">
-                  <div className="field">
-                    <label className="label" htmlFor="gcash-number">GCash number</label>
-                    <input
-                      id="gcash-number"
-                      className="input"
-                      value={settings.gcash_number}
-                      onChange={(event) =>
-                        setSettings({ ...settings, gcash_number: event.target.value })
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label className="label" htmlFor="gcash-name">GCash account name</label>
-                    <input
-                      id="gcash-name"
-                      className="input"
-                      value={settings.gcash_name}
-                      onChange={(event) =>
-                        setSettings({ ...settings, gcash_name: event.target.value })
-                      }
-                    />
-                  </div>
-                  <div className="field gcash-qr-settings-field">
-                    <span className="label">GCash QR image</span>
-                    <div className="gcash-qr-settings">
-                      {settings.gcash_qr_data_url ? (
-                        <Image
-                          className="gcash-qr-settings-preview"
-                          src={settings.gcash_qr_data_url}
-                          alt="Uploaded GCash QR preview"
-                          width={112}
-                          height={112}
-                          unoptimized
-                        />
-                      ) : (
-                        <div className="gcash-qr-settings-fallback">
-                          Using the generated QR code
-                        </div>
-                      )}
-                      <div>
-                        <label className="btn btn-outline btn-sm">
-                          <Icon name="upload" className="icon-sm" />
-                          {settings.gcash_qr_data_url ? "Change QR image" : "Upload QR image"}
-                          <input
-                            className="gcash-qr-settings-input"
-                            type="file"
-                            accept="image/png,image/jpeg,image/webp"
-                            onChange={(event) => {
-                              handleGcashQrFile(event.target.files?.[0] || null);
-                              event.currentTarget.value = "";
-                            }}
-                          />
-                        </label>
-                        {settings.gcash_qr_data_url && (
-                          <button
-                            type="button"
-                            className="text-link"
-                            onClick={() =>
-                              setSettings({ ...settings, gcash_qr_data_url: "" })
-                            }
-                          >
-                            Remove custom QR
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    <span className="tiny muted">
-                      PNG, JPG or WebP · 1 MB maximum. Save cafe details to apply changes.
                     </span>
                   </div>
                 </div>
@@ -667,49 +566,6 @@ export function AdminHoursClient() {
               </div>
             </section>
 
-            <section className="panel mt-2">
-              <div className="panel-head">
-                <div>
-                  <h2>Service hours</h2>
-                  <p>What guests see this week.</p>
-                </div>
-              </div>
-              <div className="panel-body">
-                <div className="hours-list">
-                  {schedule.map((day) => (
-                    <div className={`hours-line ${day.open ? "" : "closed"}`} key={day.day}>
-                      <span>{day.day}</span>
-                      <strong>
-                        {day.open
-                          ? `${timeLabel(day.start)} – ${timeLabel(day.end)}`
-                          : "Closed"}
-                      </strong>
-                    </div>
-                  ))}
-                </div>
-                <div className="status-toggle-card mt-2" style={{ marginBottom: 0 }}>
-                  <div>
-                    <strong>
-                      {orderingOpen ? "Accepting orders" : "Not accepting orders"}
-                    </strong>
-                    <span>
-                      Today&apos;s last order:{" "}
-                      {timeLabel(
-                        schedule.find(
-                          (day) =>
-                            day.day ===
-                            new Date().toLocaleDateString("en-PH", {
-                              weekday: "long",
-                              timeZone: "Asia/Manila",
-                            })
-                        )?.last_order
-                      )}
-                    </span>
-                  </div>
-                  <Icon name="clock" className="icon-lg" />
-                </div>
-              </div>
-            </section>
           </div>
         </div>
       )}

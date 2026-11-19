@@ -92,10 +92,17 @@ export function WelcomeClient({
         // Try again on the next poll.
       }
     };
-    const timer = window.setInterval(check, 5000);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void check();
+    }, 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [connected]);
 

@@ -15,6 +15,11 @@ interface PollingOptions {
   enabled?: boolean;
 }
 
+/** Spreads refresh times so many open phones do not poll in lockstep. */
+function jitterFor(intervalMs: number): number {
+  return Math.floor(Math.random() * Math.min(intervalMs * 0.1, 1500));
+}
+
 export function usePolling(
   callback: () => void | Promise<void>,
   intervalMs: number,
@@ -36,23 +41,58 @@ export function usePolling(
   useEffect(() => {
     let running = false;
     let rerunAfterCurrent = false;
-    const run = async () => {
-      if (!enabledRef.current || document.visibilityState === "hidden") return;
+    let stopped = false;
+    let failures = 0;
+    let timer: number | null = null;
+
+    const clearTimer = () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    function schedule() {
+      if (stopped) return;
+      clearTimer();
+      const backoff =
+        failures > 0
+          ? Math.min(intervalMs * 2 ** failures, 5 * 60_000)
+          : intervalMs;
+      timer = window.setTimeout(() => void run(), backoff + jitterFor(intervalMs));
+    }
+
+    async function run() {
+      if (stopped) return;
+      if (!enabledRef.current || document.visibilityState === "hidden") {
+        schedule();
+        return;
+      }
       if (running) {
         rerunAfterCurrent = true;
         return;
       }
+      clearTimer();
       running = true;
       try {
         await callbackRef.current();
+        failures = 0;
+      } catch (error) {
+        // A failing endpoint should not be hammered at full rate.
+        failures = Math.min(failures + 1, 5);
+        console.warn("Portal refresh failed; retrying more slowly.", error);
       } finally {
         running = false;
+        if (stopped) return;
         if (rerunAfterCurrent) {
           rerunAfterCurrent = false;
-          queueMicrotask(() => void run());
+          void run();
+        } else {
+          schedule();
         }
       }
-    };
+    }
+
     const unsubscribe = onPortalDataChanged((detail) => {
       const resources = resourcesRef.current;
       if (
@@ -68,14 +108,14 @@ export function usePolling(
       }
     };
 
-    if (enabled && (immediate || mountedRef.current)) void run();
+    const firstRun = !mountedRef.current;
     mountedRef.current = true;
-    const timer = window.setInterval(() => {
-      if (enabledRef.current) void run();
-    }, intervalMs);
+    if (enabled && (immediate || !firstRun)) void run();
+    else schedule();
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
-      window.clearInterval(timer);
+      stopped = true;
+      clearTimer();
       document.removeEventListener("visibilitychange", onVisibilityChange);
       unsubscribe();
     };

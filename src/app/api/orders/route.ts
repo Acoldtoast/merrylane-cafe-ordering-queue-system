@@ -18,6 +18,10 @@ const SUGAR_LEVELS = new Set(["0%", "25%", "50%", "75%", "100%"]);
 const DATA_IMAGE_PATTERN =
   /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/;
 
+// Order reads poll this route. Sweeping every unpaid order on each poll burns
+// PGlite's single connection, so run it at most once a minute per process.
+let lastAutoCancelAt = 0;
+
 function isHttpUrl(value: string) {
   try {
     const url = new URL(value);
@@ -45,7 +49,10 @@ function manilaDate() {
 
 export async function GET(request: Request) {
   try {
-    await OrderModel.autoCancelUnpaidCounterOrders();
+    if (Date.now() - lastAutoCancelAt >= 60_000) {
+      lastAutoCancelAt = Date.now();
+      await OrderModel.autoCancelUnpaidOrders();
+    }
     const url = new URL(request.url);
     const table = url.searchParams.get("table");
     const status = url.searchParams.get("status");
@@ -56,7 +63,7 @@ export async function GET(request: Request) {
       const orderId = Number(id);
       const owner = await OrderModel.guestOwner(orderId);
       const guestId = await getGuestId();
-      if (owner && owner !== guestId) {
+      if (!guestId || owner !== guestId) {
         return Response.json(
           { error: "Order not found.", success: false },
           { status: 404 }
@@ -67,6 +74,8 @@ export async function GET(request: Request) {
     }
 
     if (table) {
+      const auth = await requireStaff(request);
+      if (auth.error) return auth.error;
       return Response.json({
         orders: await OrderModel.byTable(Number(table), 8),
         success: true,
@@ -168,6 +177,7 @@ export async function POST(request: Request) {
       }[];
     } = body;
     const preview = body.preview === true;
+    const xendit = body.xendit === true;
     const paymentProof =
       typeof body.payment_proof_url === "string"
         ? body.payment_proof_url.trim()
@@ -206,7 +216,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    if (payment_method === "gcash" && !preview) {
+    if (payment_method === "gcash" && !preview && (paymentProof || paymentReference)) {
       if (!paymentProof || !(DATA_IMAGE_PATTERN.test(paymentProof) || isHttpUrl(paymentProof))) {
         return Response.json(
           { error: "Attach a valid GCash payment proof before submitting.", success: false },
@@ -260,9 +270,9 @@ export async function POST(request: Request) {
     for (const line of items) {
       const quantity =
         line.quantity === undefined ? 1 : Number(line.quantity);
-      if (!Number.isSafeInteger(quantity) || quantity < 1) {
+      if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 20) {
         return Response.json(
-          { error: "Each item quantity must be a whole number greater than zero.", success: false },
+          { error: "Each item quantity must be a whole number between 1 and 20.", success: false },
           { status: 400 }
         );
       }
@@ -386,9 +396,12 @@ export async function POST(request: Request) {
         total,
         remarks: remarks?.trim() || undefined,
         status: payment_method === "gcash" ? "payment_pending" : "pending",
-        payment_proof_url: payment_method === "gcash" ? paymentProof : null,
-        payment_reference: payment_method === "gcash" ? paymentReference : null,
-        payment_amount: payment_method === "gcash" ? total : null,
+        payment_proof_url:
+          payment_method === "gcash" && paymentProof ? paymentProof : null,
+        payment_reference:
+          payment_method === "gcash" && paymentReference ? paymentReference : null,
+        payment_amount:
+          payment_method === "gcash" && paymentProof ? total : null,
         guest_id: guestId,
       },
       items: priced.map((line) => ({
@@ -449,6 +462,22 @@ export async function PATCH(request: Request) {
 
     const updates: Record<string, unknown> = {};
     let nextStatus = body.status as OrderStatus | undefined;
+    if (nextStatus === "completed") {
+      if (!(await OrderModel.completeServedByStaff(id))) {
+        return Response.json(
+          { error: "Only paid orders served at least one hour ago can be completed by staff.", success: false },
+          { status: 409 }
+        );
+      }
+      logActivity(auth.user, {
+        area: "Orders",
+        action: "order.completed_by_staff",
+        summary: `Staff completed ${orderRef(order)} after waiting for customer confirmation`,
+        entity_type: "order",
+        entity_id: id,
+      });
+      return Response.json({ order: await OrderModel.byId(id), success: true, message: "Order completed by staff." });
+    }
     if (nextStatus === "cancelled") {
       if (
         order.status === "cancelled" ||
@@ -632,7 +661,9 @@ export async function PATCH(request: Request) {
         } else if (order.payment_amount == null) {
           updates.payment_amount = payableTotal;
         }
-        if (!nextStatus) nextStatus = "preparing";
+        if (!nextStatus) {
+          nextStatus = order.payment_method === "gcash" ? "confirmed" : "preparing";
+        }
       }
       if (body.payment_status === "rejected") {
         updates.payment_status = "rejected";
@@ -661,6 +692,19 @@ export async function PATCH(request: Request) {
         updates.confirmed_at = order.confirmed_at || stamp();
       }
       if (nextStatus === "preparing") {
+        if (
+          order.payment_method === "gcash" &&
+          order.payment_status !== "verified"
+        ) {
+          return Response.json(
+            {
+              error:
+                "Verify the GCash payment first, then start preparation from the order board.",
+              success: false,
+            },
+            { status: 409 }
+          );
+        }
         const paymentStatus = (updates.payment_status as string) || order.payment_status;
         if (paymentStatus !== "verified") {
           return Response.json(
@@ -686,9 +730,6 @@ export async function PATCH(request: Request) {
             order.queue_number || await OrderModel.nextQueueNumber(manilaDate());
         }
       }
-      if (nextStatus === "completed") {
-        updates.completed_at = stamp();
-      }
     }
 
     // Grab-style ETA: the accepting staff member sets how many minutes the
@@ -696,10 +737,7 @@ export async function PATCH(request: Request) {
     if (prepMinutes !== undefined) {
       updates.prep_minutes = prepMinutes;
       updates.estimated_ready_at = stamp(prepMinutes);
-    } else if (
-      (nextStatus === "confirmed" || nextStatus === "preparing") &&
-      !order.prep_minutes
-    ) {
+    } else if (nextStatus === "preparing" && !order.prep_minutes) {
       updates.prep_minutes = 15;
       updates.estimated_ready_at = stamp(15);
     }

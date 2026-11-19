@@ -1,12 +1,41 @@
 /**
  * Session helpers. JWT is stored in an httpOnly cookie and verified with jose.
+ *
+ * JWT_SECRET must be set in .env.local. There is no insecure default: a shared
+ * hardcoded secret would let anyone forge admin and staff session cookies.
  */
 import { jwtVerify } from "jose";
 import { SettingsModel, UserModel } from "./models";
 import type { User } from "./types";
 
-export const JWT_SECRET =
-  process.env.JWT_SECRET || "merrylane-secret-change-me-in-production";
+const INSECURE_JWT_DEFAULT = "merrylane-secret-change-me-in-production";
+
+let resolvedJwtSecret: string | null = null;
+
+/**
+ * Returns the configured JWT secret, failing closed when it is missing or is
+ * still the insecure shipped default. Resolved lazily so module loading does
+ * not break builds before .env.local is configured; every sign and verify site
+ * must go through this function.
+ */
+export function getJwtSecret(): string {
+  if (resolvedJwtSecret !== null) return resolvedJwtSecret;
+  const secret = process.env.JWT_SECRET;
+  if (!secret || secret === INSECURE_JWT_DEFAULT) {
+    throw new Error(
+      "JWT_SECRET is not configured. Generate a strong secret and set it in .env.local:\n" +
+        '  node -e "console.log(require(\'node:crypto\').randomBytes(32).toString(\'hex\'))"'
+    );
+  }
+  resolvedJwtSecret = secret;
+  return secret;
+}
+
+/**
+ * Kept for callers that still reference the constant directly. Prefer
+ * getJwtSecret() so the not-configured error is raised at the call site.
+ */
+export const JWT_SECRET = process.env.JWT_SECRET ?? "";
 
 export const ADMIN_IDLE_TIMEOUT_OPTIONS = [5, 10, 15, 30, 60] as const;
 export const STAFF_IDLE_TIMEOUT_OPTIONS = [5, 10, 15, 30, 60, 0] as const;
@@ -51,17 +80,23 @@ export function isStaffIdleTimeoutMinutes(
 
 export interface UserAuthStatus {
   user: User | null;
-  reason?: "session_conflict" | "session_expired";
+  reason?: "session_conflict" | "session_expired" | "face_required" | "password_change_required" | "face_reset";
 }
 
 export async function getUserAuthStatus(
   request: Request,
-  expectedRole?: "admin" | "staff"
+  expectedRole?: "admin" | "staff",
+  allowPendingFace = false,
+  allowPendingPassword = false
 ): Promise<UserAuthStatus> {
   const cookieHeader = request.headers.get("cookie");
   // No cookie at all means the user never signed in on this browser;
   // don't report it as an expired session.
   if (!cookieHeader) return { user: null };
+
+  // Fail closed when signing is not configured: no session can be trusted.
+  const secret = getJwtSecret();
+  const key = new TextEncoder().encode(secret);
 
   const cookies = Object.fromEntries(
     cookieHeader
@@ -80,10 +115,7 @@ export async function getUserAuthStatus(
   for (const token of tokens) {
     if (!token) continue;
     try {
-      const { payload } = await jwtVerify(
-        token,
-        new TextEncoder().encode(JWT_SECRET)
-      );
+      const { payload } = await jwtVerify(token, key);
       if (
         expectedRole &&
         payload.role !== expectedRole
@@ -96,8 +128,21 @@ export async function getUserAuthStatus(
       if (!user || user.is_active === 0 || (expectedRole && user.role !== expectedRole)) continue;
       const tokenSessionId = payload.sid ? String(payload.sid) : null;
       if (tokenSessionId !== (user.session_id || null)) {
+        if (user.role === "staff" && tokenSessionId) {
+          const { wasSessionResetForFaceCheck } = await import("./staffFaceAccess");
+          if (await wasSessionResetForFaceCheck(user.id, tokenSessionId)) return { user: null, reason: "face_reset" };
+        }
         sessionConflict = true;
         continue;
+      }
+      if (user.role === "staff" && user.must_change_password === 1 && !allowPendingPassword) {
+        return { user: null, reason: "password_change_required" };
+      }
+      if (user.role === "staff" && !allowPendingFace) {
+        const { staffFaceAccess } = await import("./staffFaceAccess");
+        if ((await staffFaceAccess(user.id)).required) {
+          return { user: null, reason: "face_required" };
+        }
       }
       return {
         user: {

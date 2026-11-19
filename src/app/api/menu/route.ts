@@ -7,6 +7,7 @@ import {
 import { requireAdmin } from "@/lib/auth";
 import { menuImageValidationError } from "@/lib/menuImage";
 import { logActivity } from "@/lib/activityLog";
+import { cached, invalidateCache } from "@/lib/serverCache";
 
 export async function GET(request: Request) {
   try {
@@ -18,11 +19,24 @@ export async function GET(request: Request) {
       if (auth.error) return auth.error;
     }
 
-    const items = includeInactive
-      ? await MenuItemModel.all()
-      : await MenuItemModel.allActive();
-    const categories = await CategoryModel.all();
-    return Response.json({ categories, items, success: true });
+    const payload = await cached(
+      `menu:${includeInactive ? "all" : "active"}`,
+      10_000,
+      async () => {
+        const items = includeInactive
+          ? await MenuItemModel.all()
+          : await MenuItemModel.allActive();
+        const categories = await CategoryModel.all();
+        return { categories, items, success: true };
+      }
+    );
+    return Response.json(payload, {
+      headers: {
+        "Cache-Control": includeInactive
+          ? "private, no-store"
+          : "private, max-age=5, stale-while-revalidate=20",
+      },
+    });
   } catch (error: any) {
     return Response.json(
       { error: error.message, success: false },
@@ -113,6 +127,7 @@ export async function POST(request: Request) {
       entity_type: "menu_item",
       entity_id: id,
     });
+    invalidateCache("menu");
     return Response.json({
       id,
       item: await MenuItemModel.byId(id),

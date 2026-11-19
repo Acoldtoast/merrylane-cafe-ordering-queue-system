@@ -113,13 +113,7 @@ export function OrderHistoryClient() {
   return (
     <div className="order-history-page">
       <div className="order-history-head">
-        <span className="eyebrow" style={{ color: "var(--brown)" }}>
-          Guest orders
-        </span>
         <h1>Your orders</h1>
-        <p>
-          Track orders being prepared or served, and revisit completed or rejected orders.
-        </p>
       </div>
 
       {error && <div className="error-strip">{error}</div>}

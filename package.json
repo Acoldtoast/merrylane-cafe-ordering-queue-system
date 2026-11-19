@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --webpack --hostname 0.0.0.0 -p 3112",
+    "dev:https": "node scripts/dev-https.mjs",
     "build": "next build --webpack",
     "start": "next start --hostname 0.0.0.0 -p 3112",
     "lint": "eslint",
@@ -12,12 +13,14 @@
     "test:pglite-adapter": "node --experimental-strip-types --test scripts/pglite-db.test.mjs",
     "test:models-pglite": "node --experimental-strip-types --experimental-loader ./scripts/test-ts-loader.mjs --test scripts/models-pglite.test.mjs",
     "test:orders": "node --experimental-strip-types --experimental-loader ./scripts/test-ts-loader.mjs --test scripts/order-lifecycle.test.mjs scripts/models-pglite.test.mjs",
+    "test:xendit": "node --experimental-strip-types --experimental-loader ./scripts/test-ts-loader.mjs --test scripts/xendit-payment.test.mjs",
     "postinstall": "node scripts/fix-next-dev-debug-stream.js"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.16",
+    "@mediapipe/tasks-vision": "^1.2.2",
     "jose": "^6.2.13",
-    "next": "16.4.3",
+    "next": "16.4.6",
     "nodemailer": "^10.5.0",
     "qrcode": "^1.5.4",
     "react": "19.3.0",
@@ -31,7 +34,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.4.3",
+    "eslint-config-next": "16.4.6",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

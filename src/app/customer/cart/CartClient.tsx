@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "@/components/Icons";
@@ -351,7 +352,6 @@ export function CartClient({ initialTable }: { initialTable: number }) {
       <div className="checkout-head">
         <span className="eyebrow">Checkout · Table {String(table).padStart(2, "0")}</span>
         <h1>A lovely little order.</h1>
-        <p>Make it yours, add a note, and send it to our counter.</p>
       </div>
 
       <div className="checkout-layout">
@@ -453,7 +453,7 @@ export function CartClient({ initialTable }: { initialTable: number }) {
                 <span className="section-index">02</span>
                 <div>
                   <h2>How would you like to pay?</h2>
-                  <p>Pay at the counter, or scan our GCash QR.</p>
+                  <p>Pay at the counter, or continue to secure GCash checkout.</p>
                 </div>
               </div>
             </div>
@@ -466,12 +466,16 @@ export function CartClient({ initialTable }: { initialTable: number }) {
                   onChange={() => setPaymentMethod("gcash")}
                 />
                 <span>
-                  <span className="pay-icon" style={{ background: "#e8f0ff", color: "#1b63c9" }}>
-                    G
-                  </span>
+                  <Image
+                    src="/gcash-logo.png"
+                    alt=""
+                    width={32}
+                    height={32}
+                    className="pay-icon"
+                  />
                   <span>
                     <strong>GCash</strong>
-                    <em>Scan, pay, upload receipt</em>
+                    <em>Pay securely with automatic confirmation</em>
                   </span>
                 </span>
               </label>
@@ -492,14 +496,6 @@ export function CartClient({ initialTable }: { initialTable: number }) {
                   </span>
                 </span>
               </label>
-            </div>
-            <div className="payment-note">
-              <Icon name={paymentMethod === "gcash" ? "info" : "shield"} />
-              <span>
-                {paymentMethod === "gcash"
-                  ? "You'll see our GCash QR next. Staff will receive your order only after you submit the receipt and reference."
-                  : "Your order will be sent to the counter. A staff member will receive payment and confirm your queue number."}
-              </span>
             </div>
           </section>
 
@@ -591,14 +587,6 @@ export function CartClient({ initialTable }: { initialTable: number }) {
                 <span>{peso(subtotal)}</span>
               </div>
             </div>
-            <div className="summary-note">
-              <Icon name="info" />
-              <span>
-                Items aren&apos;t held in your cart. We check stock again when you
-                place your order and secure it only when the order succeeds. Your
-                queue number is assigned once our team confirms it.
-              </span>
-            </div>
             <button
               type="button"
               className="btn btn-primary btn-block"
@@ -619,9 +607,6 @@ export function CartClient({ initialTable }: { initialTable: number }) {
                 </>
               )}
             </button>
-            <div className="status-refresh" style={{ marginTop: 10 }}>
-              <span className="live-dot" /> Secure ordering on the cafe network
-            </div>
           </div>
         </aside>
       </div>

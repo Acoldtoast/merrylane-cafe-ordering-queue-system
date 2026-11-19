@@ -120,6 +120,7 @@ export interface SalesTransaction {
   customer_name: string;
   payment_method: "gcash" | "counter";
   amount: number;
+  discount_amount: number;
   paid_at: string;
   payment_reference: string | null;
   transaction_type: "order" | "additional";
@@ -194,7 +195,7 @@ export interface WaiterRequest {
 
 export interface Review {
   id: number;
-  order_id: number;
+  order_id: number | null;
   table_number: number;
   rating: number;
   customer_name?: string | null;

@@ -1,5 +1,6 @@
 import { CategoryModel } from "@/lib/models";
 import { requireAdmin } from "@/lib/auth";
+import { invalidateCache } from "@/lib/serverCache";
 
 export async function POST(request: Request) {
   try {
@@ -31,6 +32,7 @@ export async function POST(request: Request) {
     const displayOrder = await CategoryModel.nextDisplayOrder();
     const id = await CategoryModel.create(name, slug, displayOrder);
     const category = await CategoryModel.byId(id);
+    invalidateCache("menu");
     return Response.json({ category, success: true });
   } catch (error: any) {
     return Response.json(
@@ -66,6 +68,7 @@ export async function DELETE(request: Request) {
     }
 
     await CategoryModel.remove(id, replacementId);
+    invalidateCache("menu");
     return Response.json({ success: true });
   } catch (error: any) {
     const status = /not found/i.test(error.message) ? 404 : 400;

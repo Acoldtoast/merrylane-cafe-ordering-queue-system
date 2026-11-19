@@ -1,4 +1,6 @@
 import { OrderModel } from "@/lib/models";
+import { getGuestId } from "@/lib/guest";
+import { getDb } from "@/lib/db";
 
 export async function POST(
   request: Request,
@@ -7,6 +9,11 @@ export async function POST(
   try {
     const { id } = await params;
     const orderId = Number(id);
+    const guestId = await getGuestId();
+    if (!Number.isSafeInteger(orderId) || orderId < 1 || !guestId ||
+        (await OrderModel.guestOwner(orderId)) !== guestId) {
+      return Response.json({ error: "Order not found.", success: false }, { status: 404 });
+    }
     const order = await OrderModel.byId(orderId);
     if (!order) {
       return Response.json(
@@ -72,13 +79,21 @@ export async function POST(
       );
     }
 
-    await OrderModel.update(orderId, {
-      payment_proof_url: proof,
-      payment_reference: reference,
-      payment_amount: order.total,
-      payment_status: "pending",
-      status: "payment_pending",
-    });
+    const update = await getDb().prepare(
+      `UPDATE orders
+       SET payment_proof_url = ?, payment_reference = ?, payment_amount = total,
+           payment_status = 'pending', status = 'payment_pending',
+           updated_at = to_char(timezone('Asia/Manila', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS')
+       WHERE id = ? AND guest_id = ? AND payment_method = 'gcash'
+         AND payment_status <> 'verified'
+         AND status IN ('pending', 'payment_pending')`
+    ).run(proof, reference, orderId, guestId);
+    if (Number(update.changes) !== 1) {
+      return Response.json(
+        { error: "This payment can no longer be changed.", success: false },
+        { status: 409 }
+      );
+    }
 
     return Response.json({
       order: await OrderModel.byId(orderId),

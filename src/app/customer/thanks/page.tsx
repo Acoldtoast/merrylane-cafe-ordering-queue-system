@@ -26,12 +26,14 @@ export default async function ThanksPage({
         you know to a small cafe like ours.
       </p>
       <div className="confirm-footer">
-        <Link
-          href={`/customer/status?id=${order}&table=${table}`}
-          className="btn btn-primary btn-block"
-        >
-          Back to my order
-        </Link>
+        {order > 0 && (
+          <Link
+            href={`/customer/status?id=${order}&table=${table}`}
+            className="btn btn-primary btn-block"
+          >
+            Back to my order
+          </Link>
+        )}
         <Link href={`/customer/menu?table=${table}`} className="btn btn-outline btn-block btn-sm">
           Order again
         </Link>

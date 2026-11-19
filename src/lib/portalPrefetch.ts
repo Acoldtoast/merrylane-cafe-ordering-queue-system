@@ -240,7 +240,8 @@ export function prefetchPortalRouteData(
   if (area === "customer") {
     const orderId = Number(url.searchParams.get("id"));
     const table = Number(url.searchParams.get("table")) || 7;
-    if (path === "/customer/orders") {
+    if (path === "/customer/orders" ||
+        (path === "/customer/feedback" && !Number(url.searchParams.get("order")))) {
       requests = ["/api/orders/history"];
     } else if (path === "/customer/status" && orderId > 0) {
       requests = [
@@ -291,6 +292,8 @@ export function prefetchPortalRouteData(
       requests = [`/api/staff/sales?date=${manilaDate()}`];
     } else if (path === "/staff/stock") {
       requests = ["/api/stock"];
+    } else if (path === "/staff/profile") {
+      requests = ["/api/staff/profile"];
     }
   } else if (area === "admin") {
     if (path === "/admin" || path === "/admin/analysis") {

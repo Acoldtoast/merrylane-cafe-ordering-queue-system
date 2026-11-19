@@ -1,12 +1,15 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { jwtVerify } from "jose";
-import { hasWifiSkipCookie, isCafeNetwork } from "@/lib/network";
-
-const JWT_SECRET =
-  process.env.JWT_SECRET || "merrylane-secret-change-me-in-production";
+import {
+  hasWifiSkipCookie,
+  isCafeNetwork,
+} from "@/lib/network";
+import { getJwtSecret } from "@/lib/auth";
 
 async function readSession(request: NextRequest, expectedRole: "admin" | "staff") {
+  // Fail closed when signing is not configured.
+  const key = new TextEncoder().encode(getJwtSecret());
   const tokens = [
     request.cookies.get(`auth-${expectedRole}-token`)?.value,
     request.cookies.get("auth-token")?.value,
@@ -14,10 +17,7 @@ async function readSession(request: NextRequest, expectedRole: "admin" | "staff"
   for (const token of tokens) {
     if (!token) continue;
     try {
-      const { payload } = await jwtVerify(
-        token,
-        new TextEncoder().encode(JWT_SECRET)
-      );
+      const { payload } = await jwtVerify(token, key);
       if (payload.role !== expectedRole) continue;
       return { userId: Number(payload.userId), role: expectedRole };
     } catch {
@@ -52,7 +52,12 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (hasWifiSkipCookie(request.headers) || isCafeNetwork(request.headers)) {
+  // This is a convenience prompt, not an access-control boundary: users can
+  // skip it and forwarded headers may be supplied by the client.
+  if (
+    hasWifiSkipCookie(request.headers) ||
+    isCafeNetwork(request.headers)
+  ) {
     return NextResponse.next();
   }
 

@@ -249,9 +249,6 @@ export function MenuClient({
         <div>
           <h1>{timeOfDay()} · Table {String(initialTable).padStart(2, "0")}</h1>
         </div>
-        <span className="badge badge-sage" style={{ marginBottom: 4 }}>
-          <span className="dot" /> Freshly brewing
-        </span>
       </div>
 
       <div className="menu-layout">
@@ -422,13 +419,6 @@ export function MenuClient({
             ))
           )}
 
-          <div className="menu-featured-note">
-            <Icon name="leaf" />
-            <span>
-              Prices are VAT inclusive. Ask our team about oat milk, allergens, and
-              today&apos;s decaf option.
-            </span>
-          </div>
         </section>
 
         <div className="desktop-only">

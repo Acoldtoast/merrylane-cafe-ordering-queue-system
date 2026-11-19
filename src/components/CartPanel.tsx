@@ -156,13 +156,6 @@ export function CartPanel({
                   </>
                 )}
               </button>
-              <div className="cart-panel-note">
-                <Icon name="info" />
-                <span>
-                  You can review your order, add a note, and choose a payment
-                  method before sending it to the counter.
-                </span>
-              </div>
             </>
           ) : null}
         </div>

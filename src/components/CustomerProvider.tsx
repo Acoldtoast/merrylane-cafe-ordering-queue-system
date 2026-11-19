@@ -292,7 +292,10 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
     setItems((current) => current.filter((item) => item.key !== key));
   }, []);
 
-  const clearCart = useCallback(() => setItems([]), []);
+  const clearCart = useCallback(() => {
+    setItems([]);
+    setOrderType("dine_in");
+  }, [setOrderType]);
 
   const count = useMemo(
     () => items.reduce((sum, item) => sum + item.quantity, 0),

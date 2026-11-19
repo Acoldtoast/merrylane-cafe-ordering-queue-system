@@ -1,6 +1,7 @@
 import { AddonModel } from "@/lib/models";
 import { requireAdmin } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
+import { cached, invalidateCache } from "@/lib/serverCache";
 
 export async function GET(request: Request) {
   try {
@@ -12,9 +13,20 @@ export async function GET(request: Request) {
       if (auth.error) return auth.error;
     }
 
-    return Response.json({
-      addons: await AddonModel.all(includeInactive),
-      success: true,
+    const payload = await cached(
+      `menu:addons:${includeInactive ? "all" : "active"}`,
+      30_000,
+      async () => ({
+        addons: await AddonModel.all(includeInactive),
+        success: true,
+      })
+    );
+    return Response.json(payload, {
+      headers: {
+        "Cache-Control": includeInactive
+          ? "private, no-store"
+          : "private, max-age=15, stale-while-revalidate=30",
+      },
     });
   } catch (error: any) {
     return Response.json(
@@ -51,6 +63,7 @@ export async function POST(request: Request) {
       entity_type: "addon",
       entity_id: id,
     });
+    invalidateCache("menu");
     return Response.json({
       id,
       addon: await AddonModel.byId(id),

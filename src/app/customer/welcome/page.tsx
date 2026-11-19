@@ -1,7 +1,9 @@
-import { headers } from "next/headers";
+import { cookies, headers } from "next/headers";
+import { redirect } from "next/navigation";
 import { SettingsModel } from "@/lib/models";
 import type { OrderingWindow } from "@/lib/models";
 import { isCafeNetwork } from "@/lib/network";
+import { INTRO_SEEN_COOKIE } from "@/lib/introSeen";
 import { WelcomeClient } from "./WelcomeClient";
 
 export const metadata = { title: "Welcome to Merrylane" };
@@ -15,6 +17,10 @@ export default async function WelcomePage({
   const params = await searchParams;
   const table = Math.max(1, Number(params.table) || 7);
   const requestHeaders = await headers();
+
+  // New phones see the intro page once; after that the QR opens the menu flow.
+  const introSeen = (await cookies()).get(INTRO_SEEN_COOKIE)?.value;
+  if (!introSeen) redirect(`/start?table=${table}`);
 
   let wifi = "MERLYLANE-WIFI";
   let opening = "09:00";

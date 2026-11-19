@@ -2,6 +2,7 @@ import { SettingsModel } from "@/lib/models";
 import { requireAdmin } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
 import { settingsAuditChanges } from "@/lib/settingsAudit";
+import { cached, invalidateCache } from "@/lib/serverCache";
 
 const MAX_GCASH_QR_BYTES = 1024 * 1024;
 const GCASH_QR_DATA_URL =
@@ -32,44 +33,75 @@ function isValidGcashQr(value: unknown): value is string {
   );
 }
 
-export async function GET() {
+async function buildSettingsPayload() {
+  const [values, ordering] = await Promise.all([
+    SettingsModel.object(),
+    SettingsModel.orderingWindow(),
+  ]);
+  const todaySchedule = ordering.schedule.find((day) => day.day === ordering.today);
+  return {
+    settings: {
+      cafe_name: values.cafe_name || "Merrylane Cafe",
+      cafe_location: values.cafe_location || "Lipa City, Batangas",
+      wifi_ssid: values.wifi_ssid || "MERLYLANE-WIFI",
+      gcash_number: values.gcash_number || "0917 123 4567",
+      gcash_name: values.gcash_name || "Merrylane Cafe",
+      gcash_qr_data_url: values.gcash_qr_data_url || "",
+      ordering_closed: values.ordering_closed === "true",
+      last_order_time:
+        ordering.last_order_at ||
+        todaySchedule?.last_order ||
+        values.last_order_time ||
+        "21:00",
+      opening_time: todaySchedule?.start || values.opening_time || "09:00",
+      closing_time: todaySchedule?.end || values.closing_time || "22:00",
+      service_charge_pct: Number(values.service_charge_pct || 0),
+      vat_inclusive: values.vat_inclusive !== "false",
+      days_operating:
+        values.days_operating ||
+        "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday",
+      weekly_schedule: ordering.schedule,
+      facebook_url: values.facebook_url || "",
+      twitter_url: values.twitter_url || "",
+      tiktok_url: values.tiktok_url || "",
+      instagram_url: values.instagram_url || "",
+      social_media_enabled: values.social_media_enabled !== "false",
+    },
+    ordering_open: ordering.open,
+    last_order_warning: ordering.last_order_warning,
+    success: true,
+  };
+}
+
+export async function GET(request: Request) {
   try {
-    const [values, ordering] = await Promise.all([
-      SettingsModel.object(),
-      SettingsModel.orderingWindow(),
-    ]);
-    const todaySchedule = ordering.schedule.find((day) => day.day === ordering.today);
-    return Response.json({
-      settings: {
-        cafe_name: values.cafe_name || "Merrylane Cafe",
-        cafe_location: values.cafe_location || "Lipa City, Batangas",
-        wifi_ssid: values.wifi_ssid || "MERLYLANE-WIFI",
-        gcash_number: values.gcash_number || "0917 123 4567",
-        gcash_name: values.gcash_name || "Merrylane Cafe",
-        gcash_qr_data_url: values.gcash_qr_data_url || "",
-        ordering_closed: values.ordering_closed === "true",
-        last_order_time:
-          ordering.last_order_at ||
-          todaySchedule?.last_order ||
-          values.last_order_time ||
-          "21:00",
-        opening_time: todaySchedule?.start || values.opening_time || "09:00",
-        closing_time: todaySchedule?.end || values.closing_time || "22:00",
-        service_charge_pct: Number(values.service_charge_pct || 0),
-        vat_inclusive: values.vat_inclusive !== "false",
-        days_operating:
-          values.days_operating ||
-          "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday",
-        weekly_schedule: ordering.schedule,
-        facebook_url: values.facebook_url || "",
-        twitter_url: values.twitter_url || "",
-        tiktok_url: values.tiktok_url || "",
-        instagram_url: values.instagram_url || "",
-        social_media_enabled: values.social_media_enabled !== "false",
+    const scope = new URL(request.url).searchParams.get("scope");
+    // Polling clients only need the live ordering window. Skipping the full
+    // payload keeps the (potentially ~1 MB) GCash QR data URL off their wire.
+    if (scope === "ordering") {
+      const ordering = await SettingsModel.orderingWindow();
+      return Response.json(
+        {
+          ordering_open: ordering.open,
+          last_order_warning: ordering.last_order_warning,
+          success: true,
+        },
+        {
+          headers: {
+            "Cache-Control": "private, max-age=5, stale-while-revalidate=10",
+          },
+        }
+      );
+    }
+
+    const body = await cached("settings:full", 10_000, async () =>
+      JSON.stringify(await buildSettingsPayload())
+    );
+    return new Response(body, {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "private, max-age=5, stale-while-revalidate=10",
       },
-      ordering_open: ordering.open,
-      last_order_warning: ordering.last_order_warning,
-      success: true,
     });
   } catch (error: any) {
     return Response.json(
@@ -182,6 +214,7 @@ export async function PATCH(request: Request) {
       });
     }
 
+    invalidateCache("settings");
     return Response.json({
       success: true,
       message: "Settings saved.",

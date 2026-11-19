@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { Brand } from "@/components/Brand";
 import { Icon } from "@/components/Icons";
 import { adminNav, staffNav } from "@/components/portalNav";
@@ -18,27 +18,18 @@ import {
   setBrowserStorageItem,
 } from "@/lib/browserStorage";
 
-const accounts = [
-  {
-    role: "Administrator",
-    username: "admin-merrylane",
-    password: "admin123",
-    name: "Kirsten Baromma",
-  },
-  {
-    role: "Staff",
-    username: "angelu-merrylane",
-    password: "staff123",
-    name: "Angelu Macaraig",
-  },
-];
+const StaffFaceCheck = lazy(() => import("@/app/staff/StaffFaceCheck").then(({ StaffFaceCheck }) => ({ default: StaffFaceCheck })));
+const StaffPasswordChange = lazy(() => import("@/app/staff/StaffPasswordChange").then(({ StaffPasswordChange }) => ({ default: StaffPasswordChange })));
 
 export function LoginClient() {
   const router = useRouter();
   const params = useSearchParams();
   const reason = params.get("reason") || "";
+  const loginQuery = params.toString();
+  const loginHref = loginQuery ? `/login?${loginQuery}` : "/login";
 
   const [username, setUsername] = useState("");
+  const [staffStep, setStaffStep] = useState<"login" | "password" | "face" | "unenrolled">("login");
   const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
   const [loginFailure, setLoginFailure] = useState<{ attempts: number } | null>(
@@ -47,6 +38,8 @@ export function LoginClient() {
   const [error, setError] = useState(
     reason === "session_conflict"
       ? "You were signed out because your account was used on another device."
+      : reason === "face_reset"
+        ? "An administrator reset your face check. Sign in again to verify your face."
       : ""
   );
   const [loginNotice, setLoginNotice] = useState("");
@@ -110,6 +103,32 @@ export function LoginClient() {
     [router]
   );
   const [busy, setBusy] = useState(false);
+  const continueStaff = useCallback(async () => {
+    try {
+      const response = await fetch("/api/auth/face-check", { cache: "no-store" });
+      const data = await response.json();
+      if (response.status === 401 && data.reason === "face_reset") {
+        setStaffStep("login");
+        setPassword("");
+        setError("An administrator reset your face check. Sign in again to verify your face.");
+        setBusy(false);
+        loginInProgressRef.current = false;
+        return;
+      }
+      if (!response.ok || !data.success) throw new Error(data.error || "Could not check verification status.");
+      if (data.password_change_required) setStaffStep("password");
+      else if (data.required) setStaffStep(data.enrolled ? "face" : "unenrolled");
+      else {
+        warmPortal("staff", "/staff/payments", false);
+        router.replace("/staff/payments");
+      }
+      setBusy(false);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not check verification status.");
+      setBusy(false);
+      loginInProgressRef.current = false;
+    }
+  }, [router, warmPortal]);
   const loginInProgressRef = useRef(false);
   const initialVerifyControllerRef = useRef<AbortController | null>(null);
 
@@ -127,6 +146,14 @@ export function LoginClient() {
       .then(async (response) => {
         const data = await response.json();
         if (!active || loginInProgressRef.current) return;
+        if (data.reason === "face_reset") {
+          setError("An administrator reset your face check. Sign in again to verify your face.");
+          return;
+        }
+        if (data.reason === "face_required" || data.reason === "password_change_required") {
+          void continueStaff();
+          return;
+        }
         if (data.authenticated && data.user) {
           if (data.user.role === "admin") {
             warmPortal("admin", "/admin", false);
@@ -149,7 +176,7 @@ export function LoginClient() {
         initialVerifyControllerRef.current = null;
       }
     };
-  }, [router, warmPortal]);
+  }, [router, warmPortal, continueStaff]);
 
   const signIn = async (overrideUsername?: string, overridePassword?: string) => {
     if (loginInProgressRef.current) return;
@@ -213,6 +240,10 @@ export function LoginClient() {
       const fallback = role === "admin" ? "/admin" : "/staff/payments";
       const destination = fallback;
 
+      if (role === "staff") {
+        await continueStaff();
+        return;
+      }
       warmPortal(role, destination, false);
       try {
         router.replace(destination);
@@ -374,26 +405,14 @@ export function LoginClient() {
   return (
     <div className="auth-page">
       <section className="auth-visual">
-        <Brand href="/" onDark />
-
+        <div className="auth-brand"><Brand href="/" onDark /></div>
         <div className="auth-visual-center">
-          <h1>
-            Where the
-            <br />
-            <em>warmth</em>
-            <br className="auth-desktop-break" />
-            {" "}happens.
-          </h1>
-          <p>
-            One console for the counter, the kitchen, and the numbers behind every
-            cup. Sign in to start your shift.
-          </p>
           <div className="auth-art">
             <Image
               src="/merrylane-cafe-illustration.png"
               alt="Illustration of the Merrylane Cafe storefront"
-              width={600}
-              height={400}
+              width={1086}
+              height={768}
               loading="eager"
             />
           </div>
@@ -401,15 +420,28 @@ export function LoginClient() {
       </section>
 
       <section className="auth-form-side">
+        <div className="auth-signin-layout">
+        <h2 className="auth-welcome">Where the <em>warmth</em><br /><span>happens.</span></h2>
         <div className="auth-form">
+          {staffStep !== "login" ? (
+            <div key={staffStep} className="auth-step-slide">
+              <Suspense fallback={<p role="status">Loading…</p>}>
+                {staffStep === "password"
+                  ? <StaffPasswordChange onChanged={continueStaff} />
+                  : <StaffFaceCheck embedded enrolled={staffStep === "face"} onVerified={continueStaff} />}
+              </Suspense>
+              {error && <p role="alert">{error}</p>}
+            </div>
+          ) : <>
           <div className="auth-form-head">
-            <h2>{isRecovering ? "Reset password." : "Sign in."}</h2>
+            <h1>{isRecovering ? "Reset password." : "Sign in."}</h1>
             {isRecovering && (
               <p>
                 We&apos;ll send a code to the recovery email saved in your
                 account settings. Verify it first, then choose a new password.
               </p>
             )}
+            {!isRecovering && <p>Enter your account details to continue.</p>}
           </div>
 
           {isRecovering ? (
@@ -447,22 +479,43 @@ export function LoginClient() {
                     <label className="label" htmlFor="recovery-code">
                       Six-digit code
                     </label>
-                    <input
-                      id="recovery-code"
-                      ref={recoveryCodeInputRef}
-                      type="text"
-                      className="input"
-                      value={recoveryCode}
-                      onChange={(event) =>
-                        setRecoveryCode(event.target.value.replace(/\D/g, "").slice(0, 6))
-                      }
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      pattern="\d{6}"
-                      maxLength={6}
-                      disabled={!recoveryCodeRequested || recoveryBusy}
-                      required
-                    />
+                    <div className="recovery-code-control">
+                      <input
+                        id="recovery-code"
+                        ref={recoveryCodeInputRef}
+                        type="text"
+                        className="input"
+                        value={recoveryCode}
+                        onChange={(event) =>
+                          setRecoveryCode(
+                            event.target.value.replace(/\D/g, "").slice(0, 6)
+                          )
+                        }
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        pattern="\d{6}"
+                        maxLength={6}
+                        disabled={!recoveryCodeRequested || recoveryBusy}
+                        required
+                      />
+                      {recoveryCodeRequested && (
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm recovery-resend-button"
+                          disabled={recoveryBusy || recoveryResendSeconds > 0}
+                          aria-label={
+                            recoveryResendSeconds > 0
+                              ? `Resend code available in ${recoveryResendSeconds} seconds`
+                              : "Resend recovery code"
+                          }
+                          onClick={() => void requestRecoveryCode()}
+                        >
+                          {recoveryResendSeconds > 0
+                            ? `Resend in ${recoveryResendSeconds}s`
+                            : "Resend code"}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <>
@@ -567,20 +620,6 @@ export function LoginClient() {
                 </button>
               </form>
 
-              {recoveryCodeRequested && !recoveryCodeVerified && !recoveryBusy && (
-                <div className="auth-form-row">
-                  <button
-                    type="button"
-                    className="text-link"
-                    disabled={recoveryResendSeconds > 0}
-                    onClick={() => void requestRecoveryCode()}
-                  >
-                    {recoveryResendSeconds > 0
-                      ? `Resend code in ${recoveryResendSeconds}s`
-                      : "Resend code"}
-                  </button>
-                </div>
-              )}
               {!recoveryCodeRequested && !recoveryBusy && (
                 <div className="auth-form-row">
                   <button
@@ -625,7 +664,7 @@ export function LoginClient() {
                       className="input"
                       value={username}
                       onChange={(event) => setUsername(event.target.value)}
-                      placeholder="admin-merrylane"
+                      placeholder="Username"
                       autoComplete="username"
                       required
                       aria-invalid={Boolean(error) && !username.trim()}
@@ -637,7 +676,7 @@ export function LoginClient() {
                   <label className="label" htmlFor="login-password">
                     Password
                   </label>
-                  <div style={{ position: "relative" }}>
+                  <div className="password-input-control">
                     <input
                       id="login-password"
                       type={show ? "text" : "password"}
@@ -646,25 +685,15 @@ export function LoginClient() {
                       onChange={(event) => setPassword(event.target.value)}
                       placeholder="Your password"
                       autoComplete="current-password"
-                      style={{ paddingRight: 44 }}
                       required
                       aria-invalid={Boolean(error) && !password}
                     />
                     <button
                       type="button"
+                      className="password-input-toggle"
                       onClick={() => setShow((current) => !current)}
                       aria-label={show ? "Hide password" : "Show password"}
-                      style={{
-                        position: "absolute",
-                        right: 10,
-                        top: "50%",
-                        transform: "translateY(-50%)",
-                        border: 0,
-                        background: "transparent",
-                        color: "var(--muted)",
-                        display: "flex",
-                        padding: 4,
-                      }}
+                      aria-pressed={show}
                     >
                       <Icon name={show ? "eye-off" : "eye"} size={16} />
                     </button>
@@ -706,45 +735,31 @@ export function LoginClient() {
                 )}
               </form>
 
-              <div className="auth-demo">
-                <p>Demo accounts · tap to fill</p>
-                <div className="demo-accounts">
-                  {accounts.map((account) => (
-                    <button
-                      key={account.username}
-                      type="button"
-                      className="demo-account"
-                      onClick={() => {
-                        setUsername(account.username);
-                        setPassword(account.password);
-                        setError("");
-                      }}
-                    >
-                      <span className="avatar">
-                        {account.name
-                          .split(" ")
-                          .map((part) => part[0])
-                          .slice(0, 2)
-                          .join("")}
-                      </span>
-                      <span style={{ flex: 1 }}>
-                        <strong>{account.role}</strong>
-                        <br />
-                        {account.username} · {account.password}
-                      </span>
-                      <Icon name="arrow-right" size={13} />
-                    </button>
-                  ))}
-                </div>
-              </div>
             </>
           )}
 
           <div className="auth-back">
-            <Link href="/" prefetch={false}>
-              ← Back to the cafe home
+            <Link
+              href={isRecovering ? loginHref : "/"}
+              prefetch={false}
+              onClick={() => {
+                if (!isRecovering) return;
+                setIsRecovering(false);
+                setRecoveryCode("");
+                setRecoveryCodeRequested(false);
+                setRecoveryCodeVerified(false);
+                setRecoveryResendSeconds(0);
+                setNewPassword("");
+                setConfirmNewPassword("");
+                setRecoveryError("");
+                setRecoveryMessage("");
+              }}
+            >
+              {isRecovering ? "← Back to sign in" : "← Back to the cafe home"}
             </Link>
           </div>
+          </>}
+        </div>
         </div>
       </section>
     </div>

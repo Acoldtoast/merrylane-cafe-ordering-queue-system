@@ -7,6 +7,7 @@ import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { SkeletonLine } from "@/components/PortalSkeletonPrimitives";
 import { MAX_AUTOMATIC_EMAIL_ATTEMPTS } from "@/lib/emailRetryPolicy";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
+import { useConfirmDialog } from "@/components/ConfirmDialog";
 
 type SettingsTab = "general" | "session" | "email" | "delivery";
 
@@ -99,6 +100,12 @@ function formatDeliveryTimestamp(value: string) {
 
 export function AdminSettingsClient() {
   const [tab, setTab] = useState<SettingsTab>("general");
+  useEffect(() => {
+    const openEmail = () => { if (window.location.hash === "#email") setTab("email"); };
+    openEmail();
+    window.addEventListener("hashchange", openEmail);
+    return () => window.removeEventListener("hashchange", openEmail);
+  }, []);
   const [user, setUser] = useState<AdminSettingsUser | null>(null);
   const [name, setName] = useState("");
   const [personalEmail, setPersonalEmail] = useState("");
@@ -111,6 +118,9 @@ export function AdminSettingsClient() {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [idleTimeout, setIdleTimeout] = useState(5);
   const [staffIdleTimeout, setStaffIdleTimeout] = useState(15);
+  const [faceCheckEnabled, setFaceCheckEnabled] = useState(false);
+  const [faceDutyHours, setFaceDutyHours] = useState(9);
+  const [savedFaceSettings, setSavedFaceSettings] = useState({ enabled: false, hours: 9 });
   const [autoBackupEnabled, setAutoBackupEnabled] = useState(true);
   const [lastBackupAt, setLastBackupAt] = useState<string | null>(null);
   const [backups, setBackups] = useState<
@@ -149,7 +159,7 @@ export function AdminSettingsClient() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-
+  const { confirm, dialog: confirmDialog } = useConfirmDialog();
   const loadEmailDeliveryLog = useCallback(
     async (before?: number, append = false) => {
       setDeliveryLoading(true);
@@ -299,7 +309,9 @@ export function AdminSettingsClient() {
     user &&
       (name !== user.name ||
         personalEmail !== savedPersonalEmail ||
-        newPassword.length > 0)
+        newPassword.length > 0 ||
+        faceCheckEnabled !== savedFaceSettings.enabled ||
+        faceDutyHours !== savedFaceSettings.hours)
   );
   const sessionSettingsDirty =
     JSON.stringify({
@@ -353,6 +365,9 @@ export function AdminSettingsClient() {
         setName(profile.user.name);
         setPersonalEmail(profile.personal_email);
         setSavedPersonalEmail(profile.personal_email);
+        setFaceCheckEnabled(data.staff_face_check_enabled === true);
+        setFaceDutyHours(data.staff_face_duty_hours);
+        setSavedFaceSettings({ enabled: data.staff_face_check_enabled === true, hours: data.staff_face_duty_hours });
         const nextSessionSettings = {
           idleTimeout: ADMIN_IDLE_TIMEOUT_OPTIONS.includes(data.idle_timeout_minutes)
             ? data.idle_timeout_minutes
@@ -408,6 +423,10 @@ export function AdminSettingsClient() {
       setError("Use a password with at least 6 characters.");
       return;
     }
+    if (!personalEmail.trim()) {
+      setError("Enter your personal email address.");
+      return;
+    }
 
     setSaving(true);
     try {
@@ -417,6 +436,8 @@ export function AdminSettingsClient() {
         body: JSON.stringify({
           name,
           personal_email: personalEmail,
+          staff_face_check_enabled: faceCheckEnabled,
+          staff_face_duty_hours: faceDutyHours,
           ...(newPassword
             ? {
                 current_password: currentPassword,
@@ -435,6 +456,7 @@ export function AdminSettingsClient() {
       setName(updatedUser.name);
       setPersonalEmail(profile.personal_email);
       setSavedPersonalEmail(profile.personal_email);
+      setSavedFaceSettings({ enabled: faceCheckEnabled, hours: faceDutyHours });
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
@@ -773,8 +795,8 @@ export function AdminSettingsClient() {
     setRecipientError("");
   };
 
-  const removeRecipient = (email: string) => {
-    if (!window.confirm(`Remove ${email} from email notifications?`)) return;
+  const removeRecipient = async (email: string) => {
+    if (!(await confirm(`Remove ${email} from email notifications?`))) return;
     setEmailConfig((current) => ({
       ...current,
       subscriptions: current.subscriptions.filter(
@@ -900,16 +922,14 @@ export function AdminSettingsClient() {
                   autoComplete="username"
                   readOnly
                 />
-                <span className="tiny">
-                  This username is for sign-in. Your personal email is separate and is not used as a login.
-                </span>
+
               </div>
             </div>
 
             <div className="admin-settings-fields">
               <div className="field">
                 <label className="label" htmlFor="admin-settings-personal-email">
-                  Personal email (optional)
+                  Personal email (required)
                 </label>
                 <input
                   id="admin-settings-personal-email"
@@ -920,14 +940,28 @@ export function AdminSettingsClient() {
                   autoComplete="email"
                   maxLength={254}
                   placeholder="you@example.com"
+                  required
                 />
-                <span className="tiny">
-                  Administrator notification emails and password recovery codes go here. Leave it
-                  blank to skip them; an account with no email can still sign in.
-                </span>
+
               </div>
             </div>
 
+            <div className="admin-settings-divider" />
+            <div className="admin-settings-subheading">
+              <div><h3>Staff face verification</h3><p>Require a face check once per duty period. Staff without an enrolled face cannot enter.</p></div>
+            </div>
+            <div className="admin-settings-fields">
+              <div className="field">
+                <label htmlFor="staff-face-enabled">
+                  <input id="staff-face-enabled" type="checkbox" checked={faceCheckEnabled} onChange={(event) => setFaceCheckEnabled(event.target.checked)} /> Require staff face verification
+                </label>
+              </div>
+              <div className="field">
+                <label className="label" htmlFor="staff-face-hours">Duty period (hours)</label>
+                <input id="staff-face-hours" className="input" type="number" min={1} max={24} step={1} required value={faceDutyHours} onChange={(event) => setFaceDutyHours(Number(event.target.value))} />
+                <span className="tiny">Staff must verify again after this many hours.</span>
+              </div>
+            </div>
             <div className="admin-settings-divider" />
             <div className="admin-settings-subheading">
               <div>
@@ -1038,9 +1072,7 @@ export function AdminSettingsClient() {
               </div>
             </div>
             <div className="admin-settings-actions">
-              <span className="tiny">
-                Your current password is only needed when changing your password.
-              </span>
+
               <button
                 className="btn btn-primary"
                 type="submit"
@@ -1100,8 +1132,8 @@ export function AdminSettingsClient() {
                 <h3>Staff session</h3>
                 <p>
                   {staffIdleTimeout === 0
-                    ? "Never-lock sessions stay signed in while active. After shop closing, idle sessions are warned and auto signed out once past the closing idle threshold."
-                    : "Staff sessions lock after the idle timeout. Active sessions stay signed in across midnight. After shop closing, idle sessions are warned and auto signed out once past the closing idle threshold."}
+                    ? "Sessions stay signed in while active."
+                    : "Sessions lock after this idle time."}
                 </p>
               </div>
               <label className="admin-session-select" htmlFor="staff-idle-timeout">
@@ -1185,7 +1217,6 @@ export function AdminSettingsClient() {
               </span>
             </div>
             <div className="admin-settings-actions">
-              <span className="tiny">Changes take effect immediately.</span>
               <button
                 className="btn btn-primary"
                 type="submit"
@@ -1865,6 +1896,7 @@ export function AdminSettingsClient() {
           )}
         </section>
       )}
+    {confirmDialog}
     </div>
   );
 }

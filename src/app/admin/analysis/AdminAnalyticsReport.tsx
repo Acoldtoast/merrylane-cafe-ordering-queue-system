@@ -35,7 +35,7 @@ interface AnalyticsReport {
     order_change_pct: number | null;
     cancelled_orders: number;
     average_wait_minutes: number;
-    pending_payment_verifications: number;
+    discounted_orders: number;
     average_rating: number;
     review_count: number;
     items_out_of_stock: number;
@@ -556,7 +556,7 @@ function PeakHourHeatmap({ report }: { report: AnalyticsReport }) {
 
   return (
     <section className="analytics-module-card analytics-heatmap-card">
-      <header><h3>Peak-hour heatmap</h3><p>Order concentration by weekday and hour · supports staffing decisions</p></header>
+      <header><h3>Peak-hour heatmap</h3><p>Order concentration by weekday and hour</p></header>
       <div className="analytics-heatmap-scroll">
         <div className="analytics-heatmap">
           <span className="heatmap-corner" />
@@ -580,7 +580,7 @@ function PeakHourHeatmap({ report }: { report: AnalyticsReport }) {
           ))}
         </div>
       </div>
-      <small className="analytics-module-note">Darker cells indicate more served orders. Hover or tap a cell for totals.</small>
+
     </section>
   );
 }
@@ -692,7 +692,7 @@ function buildReportHtml(report: AnalyticsReport): string {
       <article><span>Served orders</span><strong>${escapeHtml(report.summary.order_count.toLocaleString("en-PH"))}</strong><small>${escapeHtml(changeText(report.summary.order_change_pct))}</small></article>
       <article><span>Average order value</span><strong>${escapeHtml(peso(report.summary.average_order_value))}</strong><small>Average of served orders</small></article>
       <article><span>Average wait</span><strong>${escapeHtml(waitSummary)}</strong><small>Confirmed to served</small></article>
-      <article><span>Pending payments</span><strong>${escapeHtml(report.summary.pending_payment_verifications.toLocaleString("en-PH"))}</strong><small>Awaiting verification</small></article>
+      <article><span>Discounted tickets</span><strong>${escapeHtml(report.summary.discounted_orders.toLocaleString("en-PH"))}</strong><small>Served orders with a discount</small></article>
       <article><span>Average rating</span><strong>${escapeHtml(ratingSummary)}</strong><small>${escapeHtml(report.summary.review_count.toLocaleString("en-PH"))} reviews</small></article>
     </section>
     <div class="visuals">
@@ -781,7 +781,13 @@ function exportReport(report: AnalyticsReport): boolean {
   }
 }
 
-export function AdminAnalyticsReport() {
+export function AdminAnalyticsReport({
+  onDailySales,
+}: {
+  onDailySales?: (
+    data: { rows: { date: string; revenue: number }[]; label: string } | null
+  ) => void;
+}) {
   const [period, setPeriod] = useState<Period>("month");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -791,6 +797,19 @@ export function AdminAnalyticsReport() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const requestId = useRef(0);
+
+  useEffect(() => {
+    onDailySales?.(
+      report
+        ? {
+            rows: report.daily_sales.map(({ date, revenue }) => ({ date, revenue })),
+            label:
+              PERIODS.find((option) => option.value === report.period)?.label ??
+              "Custom range",
+          }
+        : null
+    );
+  }, [report, onDailySales]);
 
   const load = useCallback(async (
     requestedPeriod: Period,
@@ -993,9 +1012,8 @@ export function AdminAnalyticsReport() {
         >
           <div className="portal-skeleton-content" aria-hidden="true">
             <SkeletonStats count={4} darkFirst />
-            <div className="dashboard-grid">
+            <div className="dashboard-grid analytics-chart-grid">
               <SkeletonChart />
-              <SkeletonPanel rows={5} className="portal-skeleton-best-sellers" />
             </div>
             <div className="dashboard-grid">
               <SkeletonPanel rows={4} />
@@ -1075,13 +1093,13 @@ export function AdminAnalyticsReport() {
               <small>{report.analytics.timing.confirmed_to_ready_samples > 0 ? "Minutes · only served orders with both timestamps" : "No served-time data for this period"}</small>
             </article>
             <article>
-              <span>Pending payment checks</span>
+              <span>Discounted tickets</span>
               <AnimatedKpi
-                value={report.summary.pending_payment_verifications}
+                value={report.summary.discounted_orders}
                 format="number"
-                label="Pending payment verifications"
+                label="Discounted tickets"
               />
-              <small>Orders created within this period</small>
+              <small>Served orders with a discount</small>
             </article>
             <article>
               <span>Average customer rating</span>
@@ -1153,13 +1171,27 @@ export function AdminAnalyticsReport() {
                       <svg viewBox="0 0 360 180" role="img" aria-label="Menu engineering matrix">
                         <line x1="35" y1="150" x2="345" y2="150" className="chart-grid-line" />
                         <line x1="35" y1="15" x2="35" y2="150" className="chart-grid-line" />
+                        {(() => {
+                          const maxQuantity = Math.max(1, ...menuEngineeringItems.map((row) => row.quantity_sold));
+                          const maxRevenue = Math.max(1, ...menuEngineeringItems.map((row) => row.revenue));
+                          const xs = menuEngineeringItems.map((row) => 42 + (row.quantity_sold / maxQuantity) * 290).sort((a, b) => a - b);
+                          const ys = menuEngineeringItems.map((row) => 142 - (row.revenue / maxRevenue) * 120).sort((a, b) => a - b);
+                          const medianX = xs.length ? xs[Math.floor(xs.length / 2)] : 187;
+                          const medianY = ys.length ? ys[Math.floor(ys.length / 2)] : 82;
+                          return <>
+                            <line x1={medianX} y1="15" x2={medianX} y2="150" className="chart-grid-line chart-divider" strokeDasharray="4 3" />
+                            <line x1="35" y1={medianY} x2="345" y2={medianY} className="chart-grid-line chart-divider" strokeDasharray="4 3" />
+                            <text x={medianX + 4} y="24" className="chart-quadrant-label">High popularity</text>
+                            <text x={medianX - 4} y="24" textAnchor="end" className="chart-quadrant-label">Low popularity</text>
+                          </>;
+                        })()}
                         {menuEngineeringItems.map((item) => {
                           const maxQuantity = Math.max(1, ...menuEngineeringItems.map((row) => row.quantity_sold));
                           const maxRevenue = Math.max(1, ...menuEngineeringItems.map((row) => row.revenue));
                           const x = 42 + (item.quantity_sold / maxQuantity) * 290;
                           const y = 142 - (item.revenue / maxRevenue) * 120;
                           return <circle key={item.menu_item_id} cx={x} cy={y} r="5" className={`menu-point ${item.classification.toLowerCase()}`}>
-                            <title>{item.name}: {item.quantity_sold} sold, {peso(item.revenue)}, {item.classification}</title>
+                            <title>{item.name}: {item.quantity_sold} sold, {peso(item.revenue)}</title>
                           </circle>;
                         })}
                         <text x="180" y="174" textAnchor="middle">Popularity · quantity sold</text>
@@ -1169,19 +1201,14 @@ export function AdminAnalyticsReport() {
                   ) : (
                     <div className="analytics-empty">No served item sales to compare in the menu matrix.</div>
                   )}
-                  <div className="analytics-engineering-legend">
-                    <span><i className="star" />Star · high popularity / high revenue</span>
-                    <span><i className="plowhorse" />Plowhorse · high popularity / lower revenue</span>
-                    <span><i className="puzzle" />Puzzle · lower popularity / high revenue</span>
-                    <span><i className="dog" />Dog · lower popularity / lower revenue</span>
-                  </div>
+
                   <div className="data-table-wrap">
                     <table className="data-table">
-                      <thead><tr><th>Menu item</th><th>Qty</th><th>Revenue</th><th>Share</th><th>Extras attach</th><th>Class</th></tr></thead>
+                      <thead><tr><th>Menu item</th><th>Qty</th><th>Revenue</th><th>Share</th><th>Extras attach</th></tr></thead>
                       <tbody>{report.analytics.menu_performance.map((item) => (
                         <tr key={item.menu_item_id}>
                           <td>{item.name}</td><td>{item.quantity_sold}</td><td>{peso(item.revenue)}</td>
-                          <td>{item.sales_share_pct}%</td><td>{item.extras_attach_rate_pct}%</td><td>{item.classification}</td>
+                          <td>{item.sales_share_pct}%</td><td>{item.extras_attach_rate_pct}%</td>
                         </tr>
                       ))}</tbody>
                     </table>
@@ -1191,7 +1218,7 @@ export function AdminAnalyticsReport() {
                       Lowest-selling menu items · {report.analytics.menu_bottom.map((item) => `${item.name} (${item.quantity_sold})`).join(", ")}.
                     </p>
                   )}
-                  <p className="analytics-module-note">Matrix compares each item with the active menu average; “revenue” uses item revenue, not profit (cost data is not stored).</p>
+                  <p className="analytics-module-note">Compared with the active menu average. “Revenue” is item revenue, not profit (cost data is not stored).</p>
                 </>
               ) : <div className="analytics-chart-empty">No active menu items found.</div>}
             </section>
@@ -1212,7 +1239,7 @@ export function AdminAnalyticsReport() {
                   return <div key={String(label)}><span>{label}</span><b>{Number(samples) > 0 ? `${duration.toFixed(1)} min` : "No timestamp data"}</b><i><em style={{ width: `${Math.min(100, duration * 2)}%` }} /></i></div>;
                 })}
               </div>
-              <p className="analytics-module-note">Stage averages include served orders with both timestamps. The preparing stage starts collecting data for new orders after the migration.</p>
+              <p className="analytics-module-note">Averages include served orders with both timestamps.</p>
               <h4>Open orders · oldest first</h4>
               {report.analytics.pending_orders.length ? (
                 <div className="data-table-wrap">
@@ -1231,56 +1258,7 @@ export function AdminAnalyticsReport() {
             </section>
 
             <section className="analytics-module-card">
-              <header><h3>Payment verification</h3><p>Manual workload and verification status</p></header>
-              <div className="analytics-status-bars">
-                {[
-                  ["Pending", Number(report.analytics.payment_verification.pending || 0), "pending"],
-                  ["Verified", Number(report.analytics.payment_verification.verified || 0), "verified"],
-                  ["Rejected", Number(report.analytics.payment_verification.rejected || 0), "rejected"],
-                ].map(([label, count, status]) => (
-                  <div key={String(status)}><span>{label}</span><strong>{count}</strong><i><b className={String(status)} style={{ width: `${Math.min(100, (Number(count) / Math.max(1, report.orders.length)) * 100)}%` }} /></i></div>
-                ))}
-              </div>
-              <p className="analytics-module-note">Counts include all payment methods. Balance payment verification times are available where verified timestamps exist.</p>
-              {report.analytics.payment_verification.balance_payments.length ? (
-                <div className="data-table-wrap">
-                  <table className="data-table"><thead><tr><th>Method</th><th>Status</th><th>Count</th><th>Amount</th><th>Avg verify</th></tr></thead>
-                    <tbody>{report.analytics.payment_verification.balance_payments.map((row) => (
-                      <tr key={`${row.payment_method}-${row.status}`}><td>{row.payment_method}</td><td>{row.status}</td><td>{row.payment_count}</td><td>{peso(row.amount)}</td><td>{row.average_verification_minutes.toFixed(1)} min</td></tr>
-                    ))}</tbody>
-                  </table>
-                </div>
-              ) : <div className="analytics-chart-empty">No additional balance-payment records in this range.</div>}
-              <h4>Pending order payments</h4>
-              {report.analytics.pending_orders.filter((order) => order.payment_status === "pending").length ? (
-                <div className="data-table-wrap">
-                  <table className="data-table"><thead><tr><th>Order</th><th>Method</th><th>Amount</th><th>Waiting</th></tr></thead>
-                    <tbody>{report.analytics.pending_orders.filter((order) => order.payment_status === "pending").map((order) => (
-                      <tr key={order.id}><td>#{order.id}</td><td>{order.payment_method}</td><td>{peso(order.total)}</td><td>{order.elapsed_minutes} min</td></tr>
-                    ))}</tbody>
-                  </table>
-                </div>
-              ) : <div className="analytics-chart-empty">No pending order payments in this range.</div>}
-              <p className="analytics-module-note">Receipt links are shown only on the admin analytics page and are excluded from CSV/PDF/JPG exports.</p>
-              <h4>Pending GCash proofs</h4>
-              {report.analytics.pending_gcash.length ? (
-                <div className="data-table-wrap">
-                  <table className="data-table"><thead><tr><th>Order</th><th>Amount</th><th>Waiting</th><th>Receipt</th></tr></thead>
-                    <tbody>{report.analytics.pending_gcash.map((payment) => (
-                      <tr key={payment.id}><td>#{payment.id}</td><td>{peso(payment.total)}</td><td>{payment.elapsed_minutes} min</td>
-                        <td>{payment.inline_proof
-                          ? <a href={`/api/analytics/report/payment-proof/${payment.id}`} target="_blank" rel="noreferrer">View proof</a>
-                          : payment.external_proof_url
-                            ? <a href={payment.external_proof_url} target="_blank" rel="noreferrer">View proof</a>
-                            : "Not uploaded"}</td></tr>
-                    ))}</tbody>
-                  </table>
-                </div>
-              ) : <div className="analytics-chart-empty">No pending GCash proof checks in this period.</div>}
-            </section>
-
-            <section className="analytics-module-card">
-              <header><h3>Stock availability</h3><p>Prioritize repeated stockouts and active low-stock warnings.</p></header>
+              <header><h3>Stock availability</h3></header>
               {report.analytics.stock_events.length ? (
                 <div className="analytics-horizontal-bars">
                   {report.analytics.stock_events.slice(0, 10).map((item) => {
@@ -1292,53 +1270,12 @@ export function AdminAnalyticsReport() {
                 </div>
               ) : <div className="analytics-chart-empty">No stockout events were logged during this period.</div>}
               <div className="data-table-wrap">
-                <table className="data-table"><thead><tr><th>Current item</th><th>Status</th><th>Remaining</th><th>Note</th></tr></thead>
+                <table className="data-table"><thead><tr><th>Current item</th><th>Status</th><th>Remaining</th></tr></thead>
                   <tbody>{report.analytics.current_stock.map((item) => (
-                    <tr key={item.menu_item_id}><td>{item.name}</td><td>{item.stock_status}</td><td>{item.stock_count}</td><td>{item.stock_note || "—"}</td></tr>
+                    <tr key={item.menu_item_id}><td>{item.name}</td><td>{item.stock_status}</td><td>{item.stock_count}</td></tr>
                   ))}</tbody>
                 </table>
                 {!report.analytics.current_stock.length && <div className="analytics-chart-empty">No active low/out stock warnings.</div>}
-              </div>
-            </section>
-
-            <section className="analytics-module-card">
-              <header><h3>Waiter calls</h3><p>Requests by reason and hour help plan floor coverage.</p></header>
-              {report.analytics.waiter_reason_counts.length ? (
-                <div className="analytics-waiter-bars">
-                  {report.analytics.waiter_reason_counts.slice(0, 12).map((row, index) => (
-                    <div key={`${row.request_type}-${row.hour}`}>
-                      <span>{row.request_type} · {String(row.hour).padStart(2, "0")}:00</span>
-                      <i><b style={{ height: `${Math.min(100, (row.call_count / Math.max(1, ...report.analytics.waiter_reason_counts.map((item) => item.call_count))) * 100)}%`, animationDelay: `${index * 20}ms` }} /></i>
-                      <strong>{row.call_count}</strong>
-                    </div>
-                  ))}
-                </div>
-              ) : <div className="analytics-chart-empty">No waiter requests for this period.</div>}
-              <div className="data-table-wrap">
-                <table className="data-table"><thead><tr><th>Table</th><th>Reason</th><th>Status</th><th>Time</th><th>Resolution</th></tr></thead>
-                  <tbody>{report.analytics.waiter_calls.slice(0, 20).map((call) => (
-                    <tr key={call.id}><td>{call.table_number}</td><td>{call.request_type}</td><td>{call.status}</td><td>{call.created_at}</td>
-                      <td>{call.resolution_minutes === null ? "Open" : `${call.resolution_minutes} min`}</td></tr>
-                  ))}</tbody>
-                </table>
-                {!report.analytics.waiter_calls.length && <div className="analytics-chart-empty">No waiter calls recorded.</div>}
-              </div>
-            </section>
-
-            <section className="analytics-module-card">
-              <header><h3>Customer feedback</h3><p>{report.analytics.review_rate_pct}% reviews per confirmed order · no automated sentiment analysis</p></header>
-              <div className="analytics-rating-bars">
-                {report.analytics.rating_distribution.map((row) => (
-                  <div key={row.rating}><span>{row.rating}★</span><i><b style={{ width: `${report.summary.review_count ? (row.review_count / report.summary.review_count) * 100 : 0}%` }} /></i><strong>{row.review_count}</strong></div>
-                ))}
-              </div>
-              <div className="data-table-wrap">
-                <table className="data-table"><thead><tr><th>Rating</th><th>Review</th><th>Date</th></tr></thead>
-                  <tbody>{report.analytics.recent_reviews.map((review) => (
-                    <tr key={review.id}><td>{review.rating} / 5</td><td>{review.comment || "No written comment"}</td><td>{review.created_at}</td></tr>
-                  ))}</tbody>
-                </table>
-                {!report.analytics.recent_reviews.length && <div className="analytics-chart-empty">No reviews linked to orders in this range.</div>}
               </div>
             </section>
 
@@ -1357,23 +1294,7 @@ export function AdminAnalyticsReport() {
               <div className="analytics-forecast-placeholder"><strong>Forecast vs actual</strong><span>{report.analytics.forecast_status}</span></div>
             </section>
 
-            <section className="analytics-module-card">
-              <header><h3>System health &amp; data coverage</h3><p>Signals should be instrumented before drawing operational conclusions.</p></header>
-              <div className="analytics-forecast-placeholder">
-                <strong>Wi-Fi denials and abandoned QR sessions</strong>
-                <span>The current schema does not record access denials, QR scans, or menu-view events. Those conversion-loss metrics are unavailable until access logging is added.</span>
-              </div>
-              <div className="analytics-forecast-placeholder">
-                <strong>Historical queue length</strong>
-                <span>Active orders and waiter requests are available, but queue-length snapshots are not stored. Historical average queue length cannot be calculated reliably.</span>
-              </div>
-              <div className="analytics-forecast-placeholder">
-                <strong>Cancellation reasons</strong>
-                <span>{report.analytics.cancellation_reasons.length
-                  ? report.analytics.cancellation_reasons.map((row) => `${row.cancellation_reason || "Unspecified"} (${row.order_count})`).join(" · ")
-                  : "No cancelled orders were recorded in this period."}</span>
-              </div>
-            </section>
+
           </div>
 
           <div className="analytics-report-grid">

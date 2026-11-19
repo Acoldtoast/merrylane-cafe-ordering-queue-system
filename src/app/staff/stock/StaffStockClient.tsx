@@ -263,27 +263,18 @@ export function StaffStockClient() {
             <Icon name="coffee" /> On the menu
           </div>
           <div className="stat-value">{items.length}</div>
-          <div className="stat-bottom">
-            <span>Items on the menu</span>
-          </div>
         </div>
         <div className="stat-card">
           <div className="stat-label">
             <Icon name="alert" /> Low portions
           </div>
           <div className="stat-value">{lowCount}</div>
-          <div className="stat-bottom">
-            <span>Shown automatically on the menu</span>
-          </div>
         </div>
         <div className="stat-card dark">
           <div className="stat-label">
             <Icon name="x" /> Sold out
           </div>
           <div className="stat-value">{outCount}</div>
-          <div className="stat-bottom">
-            <span>Hidden from ordering</span>
-          </div>
         </div>
       </div>
 
@@ -430,15 +421,6 @@ export function StaffStockClient() {
             </div>
           )}
         </div>
-      </div>
-
-      <div className="payment-note" style={{ marginTop: 13 }}>
-        <Icon name="info" />
-        <span>
-          Set a count when you know how many portions are left; each order deducts
-          from it. Leave it blank when you do not know. At zero, it sells out
-          automatically. Manual sell-outs can last today or until staff changes them.
-        </span>
       </div>
 
       {confirming && (

@@ -5,6 +5,32 @@ import path from "node:path";
 import test from "node:test";
 import { PGliteDatabase } from "../src/lib/db/pglite.ts";
 
+test("bootstrap creates only the default admin when users table is empty", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "merrylane-demo-users-"));
+  const database = PGliteDatabase.open(path.join(root, "pgdata"));
+  globalThis.__merrylaneDb = database;
+  t.after(async () => {
+    globalThis.__merrylaneDb = undefined;
+    await database.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const { UserModel, verifyPassword } = await import("../src/lib/models.ts");
+  await UserModel.ensureColumns();
+
+  const rows = await database.prepare("SELECT username, role FROM users ORDER BY id").all();
+  assert.deepEqual(rows.map((row) => ({ username: row.username, role: row.role })), [
+    { username: "admin", role: "admin" },
+  ]);
+  assert.equal(
+    verifyPassword("admin123", (await UserModel.byUsername("admin"))?.password_hash),
+    true
+  );
+  assert.notEqual((await UserModel.byUsername("admin"))?.password_hash, "admin123");
+  assert.match((await UserModel.byUsername("admin"))?.password_hash ?? "", /^[0-9a-f]{32}:[0-9a-f]{128}$/);
+  assert.equal(verifyPassword("incorrect", (await UserModel.byUsername("admin"))?.password_hash), false);
+});
+
 test("models preserve review aggregates and expose prior-day active staff orders", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "merrylane-model-pglite-"));
   const database = PGliteDatabase.open(path.join(root, "pgdata"));
@@ -200,6 +226,22 @@ test("models preserve review aggregates and expose prior-day active staff orders
     positive_pct: 100,
     latest_rating: 5,
   });
+  const generalReviewId = await ReviewModel.create({
+    order_id: null,
+    table_number: 7,
+    rating: 4,
+    comment: "A welcoming cafe",
+  });
+  const generalReview = (await ReviewModel.all()).find((entry) => entry.id === generalReviewId);
+  assert.equal(generalReview?.order_id, null);
+  assert.equal(generalReview?.comment, "A welcoming cafe");
+  assert.equal((await ReviewModel.stats()).total_reviews, 2);
+  assert.equal(await ReviewModel.unreadCount(1), 2);
+  await OrderModel.markNotificationRead(1, `admin-review-${id}`);
+  assert.equal(await ReviewModel.unreadCount(1), 1);
+  await ReviewModel.markAllSeen(1);
+  assert.equal(await ReviewModel.unreadCount(1), 0);
+  assert.equal(await ReviewModel.unreadCount(2), 2);
 
   const categoryId = Number(
     (await database
@@ -223,6 +265,8 @@ test("models preserve review aggregates and expose prior-day active staff orders
     stock_count: 3,
     low_stock_threshold: 4,
   });
+  assert.equal((await MenuItemModel.byId(menuItemId))?.stock_count, 3);
+  await MenuItemModel.update(menuItemId, { name: "Updated latte" });
   assert.equal((await MenuItemModel.byId(menuItemId))?.stock_count, 3);
   await MenuItemModel.delete(menuItemId);
   assert.equal(await MenuItemModel.byId(menuItemId), undefined);
@@ -304,6 +348,12 @@ test("models preserve review aggregates and expose prior-day active staff orders
   assert.equal(boardOrders[0].status, "ready");
   assert.equal((await SalesModel.overview()).total_revenue, 160);
   assert.equal((await SalesModel.overview()).total_orders, 2);
+  assert.equal(await OrderModel.completeServedByStaff(99), true);
+  assert.equal(await OrderModel.completeServedByStaff(99), false);
+  const completedByStaff = await database.prepare("SELECT status, completion_reason FROM orders WHERE id = ?").get(99);
+  assert.equal(completedByStaff.status, "completed");
+  assert.equal(completedByStaff.completion_reason, "staff_after_one_hour");
+  assert.equal(await OrderModel.completeServedByStaff(97), false);
 
   const userId = await UserModel.create({
     name: "Staff Member",
@@ -372,6 +422,44 @@ test("models preserve review aggregates and expose prior-day active staff orders
   assert.equal(sales[0].order_id, 97);
   assert.equal(sales[0].order_number, 2);
   assert.equal(sales[0].handled_by, "Updated Staff");
+  await database
+    .prepare(
+      `INSERT INTO orders
+        (id, table_number, status, payment_method, payment_status, subtotal,
+         service_charge, total, created_at, updated_at, confirmed_at,
+         payment_amount, payment_reference)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      10001,
+      7,
+      "preparing",
+      "gcash",
+      "verified",
+      150,
+      0,
+      150,
+      "2025-03-14 12:10:00",
+      "2025-03-14 12:20:00",
+      "2025-03-14 12:10:00",
+      150,
+      "pr-gcash-prep"
+    );
+  await ActivityModel.log(
+    { id: userId, name: "Prep Staff", role: "staff" },
+    {
+      area: "Orders",
+      action: "order.preparing",
+      summary: "Started preparing GCash order #10001",
+      entity_type: "order",
+      entity_id: 10001,
+    }
+  );
+  const salesWithGcash = await OrderModel.salesForDate("2025-03-14");
+  assert.equal(
+    salesWithGcash.find((sale) => sale.order_id === 10001)?.handled_by,
+    "Prep Staff"
+  );
   const completedOrder = await OrderModel.byId(sales[0].order_id);
   assert.equal(completedOrder?.status, "completed");
   assert.equal(completedOrder?.order_number, 2);
@@ -479,5 +567,25 @@ test("models preserve review aggregates and expose prior-day active staff orders
   assert.equal(
     (await WaiterRequestModel.byId(waiterRequestId))?.guest_id,
     "guest-1"
+  );
+
+  await database
+    .prepare(
+      `INSERT INTO orders
+        (id, table_number, status, payment_method, payment_status, total)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(10000, 7, "preparing", "gcash", "verified", 150);
+  assert.deepEqual(
+    await OrderModel.addStaffAddon({
+      orderId: 10000,
+      orderItemId: 1,
+      addonId: 1,
+    }),
+    {
+      ok: false,
+      error: "Add-ons can only be added before the order is paid.",
+      status: 409,
+    }
   );
 });

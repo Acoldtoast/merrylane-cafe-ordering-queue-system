@@ -304,7 +304,7 @@ export function AdminReviewsClient() {
                     <p>{review.comment || "No written note."}</p>
                     <div className="review-card-foot">
                       <span className="badge badge-cream">
-                        Order #{String(review.order_id).padStart(3, "0")}
+                        {review.order_id == null ? "General review" : `Order #${String(review.order_id).padStart(3, "0")}`}
                       </span>
                       {review.photo_url && (
                         <ReviewPhoto
