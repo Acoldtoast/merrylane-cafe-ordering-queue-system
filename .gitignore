@@ -13,8 +13,10 @@
 # ...but a scrubbed template is safe to commit.
 !.env.example
 !.env.sample
+!.env.migrate.example
 
 # Keys, certificates, signing material
+/certificates/
 *.pem
 *.key
 *.p12
@@ -105,8 +107,13 @@ yarn-error.log*
 *.log
 logs/
 /logs/
+/log.txt
 # Ad-hoc scratch scripts, not part of the app
 /scripts/_*.cjs
+/git_restored.tsx
+/original_backup.tsx
+/original_staffidentity.tsx
+/public/tmp-qr-decode.png
 
 # ============================================================
 # OS / EDITOR / MACHINE-SPECIFIC
@@ -127,7 +134,5 @@ desktop.ini
 .vercel
 .turbo
 .cache/
+/.freebuff/
 /eslintcache
-
-
-# app password - cjfz brgd nfcl ntpn
