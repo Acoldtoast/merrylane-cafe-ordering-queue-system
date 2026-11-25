@@ -1,9 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useConfirmDialog } from "@/components/ConfirmDialog";
-import { staffNav } from "@/components/portalNav";
 import { Icon } from "@/components/Icons";
 import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { OrderDiscountDetails } from "@/components/OrderDiscountDetails";
@@ -114,6 +113,14 @@ function preparingMinutes(order: Order): number | null {
   return preparationMinutesElapsed(order);
 }
 
+function isStaleUnpaidOrder(order: Order): boolean {
+  return (
+    (order.status === "pending" || order.status === "payment_pending") &&
+    Date.now() - new Date(order.created_at.replace(" ", "T")).getTime() >
+      5 * 60000
+  );
+}
+
 function isOverduePreparingOrder(order: Order): boolean {
   return order.status === "preparing" && preparationReminderLevel(order) > 0;
 }
@@ -197,7 +204,10 @@ export function StaffBoardClient() {
     orderId: number;
     value: string;
   } | null>(null);
-  const [etaDraft, setEtaDraft] = useState("15");
+  const [etaDraftState, setEtaDraftState] = useState<{
+    orderId: number | null;
+    value: string;
+  }>({ orderId: null, value: "15" });
   const [addonTarget, setAddonTarget] = useState<{
     order: Order;
     item: OrderItem;
@@ -232,21 +242,13 @@ export function StaffBoardClient() {
 
   const load = useCallback(async () => {
     try {
-      const [ordersRes, requestsRes] = await Promise.all([
-        fetchPortalApi("/api/orders?board=1", { cache: "no-store" }),
-        fetchPortalApi("/api/waiter", { cache: "no-store" }),
-      ]);
+      const ordersRes = await fetchPortalApi("/api/orders?board=1", { cache: "no-cache" });
       const data = await ordersRes.json();
-      const requestsData = await requestsRes.json();
       if (!ordersRes.ok || !data.success) {
         throw new Error(data.error || "Unable to load orders.");
       }
-      if (!requestsRes.ok || !requestsData.success) {
-        throw new Error(requestsData.error || "Unable to load customer follow-ups.");
-      }
       const fresh: Order[] = data.orders || [];
       setOrders(fresh);
-      setWaiterRequests(requestsData.requests || []);
       if (data.stats) setStats(data.stats);
       setDetail((current) =>
         current ? fresh.find((order) => order.id === current.id) || null : null
@@ -262,13 +264,22 @@ export function StaffBoardClient() {
     }
   }, []);
 
+  const loadRequests = useCallback(async () => {
+    const response = await fetchPortalApi("/api/waiter", { cache: "no-cache" });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || "Unable to load customer follow-ups.");
+    }
+    setWaiterRequests(data.requests || []);
+  }, []);
+
   // Menu and add-ons change rarely. Fetching them on the 10-second order loop
   // re-sent the whole catalog (including images) to every staff screen.
   const loadCatalog = useCallback(async () => {
     try {
       const [addonsRes, menuRes] = await Promise.all([
-        fetchPortalApi("/api/addons", { cache: "no-store" }),
-        fetchPortalApi("/api/menu", { cache: "no-store" }),
+        fetchPortalApi("/api/addons", { cache: "no-cache" }),
+        fetchPortalApi("/api/menu", { cache: "no-cache" }),
       ]);
       const addonData = await addonsRes.json();
       const menuData = await menuRes.json();
@@ -279,15 +290,21 @@ export function StaffBoardClient() {
     }
   }, []);
 
-  usePolling(load, 10000, { resources: ["orders", "requests", "waiter"] });
-  usePolling(loadCatalog, 60000, { resources: ["menu"] });
+  usePolling(load, 10000, { resources: ["orders", "payments"] });
+  usePolling(loadRequests, 10000, { enabled: !loading, resources: ["requests", "waiter"] });
+  usePolling(loadCatalog, 60000, { enabled: !loading, resources: ["menu"] });
 
-  useEffect(() => {
-    if (!detail) return;
-    setEtaDraft(String(detail.prep_minutes ?? 15));
-    // Only reset when switching to another order, not on every poll update.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail?.id]);
+  /*
+   * The draft belongs to one order, so it is derived from that order instead of
+   * being reset by an effect: switching orders shows that order's own time, and
+   * a poll update for the same order keeps whatever the staff member typed.
+   */
+  const etaDraft =
+    etaDraftState.orderId === (detail?.id ?? null)
+      ? etaDraftState.value
+      : String(detail?.prep_minutes ?? 15);
+  const setEtaDraft = (value: string) =>
+    setEtaDraftState({ orderId: detail?.id ?? null, value });
 
   const patchOrder = async (
     order: Order,
@@ -1254,10 +1271,7 @@ export function StaffBoardClient() {
         <div className="staff-orders">
           {filtered.map((order) => {
             const overdue = isOverduePreparingOrder(order);
-            const stale =
-              (order.status === "pending" || order.status === "payment_pending") &&
-              Date.now() - new Date(order.created_at.replace(" ", "T")).getTime() >
-                5 * 60000;
+            const stale = isStaleUnpaidOrder(order);
             return (
               <article
                 className={`order-card ${

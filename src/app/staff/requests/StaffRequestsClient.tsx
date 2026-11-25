@@ -1,13 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { staffNav } from "@/components/portalNav";
+import { useCallback, useState } from "react";
 import { Icon } from "@/components/Icons";
 import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
 import type { WaiterRequest } from "@/lib/types";
 import { relativeTime, smartDateTime } from "@/lib/format";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
+import { errorMessage } from "@/lib/errorMessage";
 import { usePolling } from "@/lib/usePolling";
 
 export function StaffRequestsClient() {
@@ -32,8 +32,8 @@ export function StaffRequestsClient() {
       setRequestsByTable(data.requestsByTable || {});
       if (data.stats) setStats(data.stats);
       setError("");
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Unable to load requests."));
     } finally {
       setLoading(false);
     }

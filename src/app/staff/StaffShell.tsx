@@ -115,18 +115,24 @@ export function StaffShell({ children }: { children: React.ReactNode }) {
   const meta = metaFor(pathname);
   const [faceStatus, setFaceStatus] = useState<"loading" | "allowed" | "required" | "unenrolled" | "password" | "error">("loading");
   const refreshFaceStatus = useCallback(async () => {
-    try {
-      const response = await fetch("/api/auth/face-check", { cache: "no-store" });
-      const data = await response.json();
-      if (response.status === 401) { window.location.assign(`/login?next=/staff${data.reason === "face_reset" ? "&reason=face_reset" : ""}`); return; }
-      if (!response.ok || !data.success) throw new Error("Could not check verification status.");
-      setFaceStatus(data.password_change_required ? "password" : data.required ? data.enrolled ? "required" : "unenrolled" : "allowed");
-    } catch {
-      setFaceStatus("error");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await fetch("/api/auth/face-check", { cache: "no-store" });
+        const data = await response.json();
+        if (response.status === 401) { window.location.assign(`/login?next=/staff${data.reason === "face_reset" ? "&reason=face_reset" : ""}`); return; }
+        if (!response.ok || !data.success) throw new Error("Could not check verification status.");
+        setFaceStatus(data.password_change_required ? "password" : data.required ? data.enrolled ? "required" : "unenrolled" : "allowed");
+        return;
+      } catch {
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 500));
+        else setFaceStatus("error");
+      }
     }
   }, []);
   useEffect(() => {
-    void refreshFaceStatus();
+    void (async () => {
+      await refreshFaceStatus();
+    })();
     const onRequired = () => { void refreshFaceStatus(); };
     window.addEventListener("staff-face-required", onRequired);
     const timer = window.setInterval(() => { void refreshFaceStatus(); }, 10000);

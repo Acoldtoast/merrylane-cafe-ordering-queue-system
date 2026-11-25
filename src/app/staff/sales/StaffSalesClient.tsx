@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { staffNav } from "@/components/portalNav";
 import { Icon } from "@/components/Icons";
 import { OrderDiscountDetails } from "@/components/OrderDiscountDetails";
 import { SkeletonLine, SkeletonPanel } from "@/components/PortalSkeletonPrimitives";
@@ -46,8 +45,16 @@ export function StaffSalesClient({
 }: {
   initialDate: string;
 }) {
-  const [date, setDate] = useState(initialDate);
   const [today] = useState(todayInManila);
+  const [date, setDate] = useState(() => {
+    if (typeof window === "undefined") return initialDate;
+    const requested = new URLSearchParams(window.location.search).get("date");
+    return requested &&
+      /^\d{4}-\d{2}-\d{2}$/.test(requested) &&
+      requested <= todayInManila()
+      ? requested
+      : initialDate;
+  });
   const [transactions, setTransactions] = useState<SalesTransaction[]>([]);
   const [cancelledOrders, setCancelledOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,14 +68,10 @@ export function StaffSalesClient({
   const openedInitialTransaction = useRef(false);
 
   useEffect(() => {
-    const query = new URLSearchParams(window.location.search);
-    const requestedDate = query.get("date");
-    const requestedTransaction = query.get("transaction_id");
-    if (requestedDate && /^\d{4}-\d{2}-\d{2}$/.test(requestedDate) && requestedDate <= today) {
-      setDate(requestedDate);
-    }
-    initialTransaction.current = requestedTransaction;
-  }, [today]);
+    initialTransaction.current = new URLSearchParams(
+      window.location.search
+    ).get("transaction_id");
+  }, []);
 
   const load = useCallback(async () => {
     const currentRequest = ++requestId.current;
@@ -101,7 +104,9 @@ export function StaffSalesClient({
   }, [date]);
 
   useEffect(() => {
-    load();
+    void (async () => {
+      await load();
+    })();
   }, [load]);
   useRealtimeRefresh(load, ["orders", "payments", "sales"]);
 

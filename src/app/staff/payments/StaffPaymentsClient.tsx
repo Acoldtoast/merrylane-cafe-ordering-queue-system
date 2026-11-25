@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useConfirmDialog } from "@/components/ConfirmDialog";
 import { Icon } from "@/components/Icons";
 import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
@@ -59,6 +59,9 @@ export function StaffPaymentsClient() {
   const [cashReceived, setCashReceived] = useState<string | null>(null);
   const [discountEditorOpen, setDiscountEditorOpen] = useState(false);
   const [discountRecipients, setDiscountRecipients] = useState<DiscountRecipient[]>([]);
+  const [staffAccounts, setStaffAccounts] = useState<
+    { id: number; name: string; username: string }[]
+  >([]);
   const [itemEditor, setItemEditor] = useState<{
     item: OrderItem | null;
     menuItemId: string;
@@ -122,6 +125,25 @@ export function StaffPaymentsClient() {
   };
 
   usePolling(load, 12000, { resources: ["orders", "payments", "sales"] });
+
+  // The staff list only feeds the discount picker and changes rarely, so it is
+  // loaded once per visit (reusing the route prefetch) instead of every poll.
+  useEffect(() => {
+    let active = true;
+    fetchPortalApi("/api/staff/discount-accounts")
+      .then(async (response) => {
+        const data = await response.json();
+        if (active && response.ok && data.success) {
+          setStaffAccounts(data.staff || []);
+        }
+      })
+      .catch(() => {
+        // The picker falls back to manual ID and name entry.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const pending = useMemo(
     () => pendingOrders.filter(needsPaymentReview),
@@ -348,8 +370,17 @@ export function StaffPaymentsClient() {
         (recipient) => !recipient.id_number.trim() || !recipient.name.trim()
       )
     ) {
-      setError("Enter both the ID number and name for each discount.");
+      setError("Choose a staff member, or enter an ID number and name for each discount.");
       return;
+    }
+    const seenIds = new Set<string>();
+    for (const recipient of discountRecipients) {
+      const id = recipient.id_number.trim().toLowerCase();
+      if (seenIds.has(id)) {
+        setError("Each staff member or ID can only be used once on an order.");
+        return;
+      }
+      seenIds.add(id);
     }
 
     setBusyId(target.id);
@@ -998,10 +1029,10 @@ export function StaffPaymentsClient() {
               {discountEditorOpen && (
                 <div className="payment-discount-editor">
                   <div className="payment-discount-heading">
-                    <strong>Discount IDs</strong>
+                    <strong>Discounts</strong>
                     <span>
-                      20% off one highest-priced meal and one drink per ID.
-                      Coffee and Non-Coffee items count as drinks.
+                      20% off one highest-priced meal and one drink per staff
+                      member or ID. Coffee and Non-Coffee items count as drinks.
                     </span>
                   </div>
                   {discountRecipients.map((recipient, index) => (
@@ -1011,18 +1042,23 @@ export function StaffPaymentsClient() {
                         <select
                           className="input"
                           value={recipient.type}
-                          onChange={(event) =>
+                          onChange={(event) => {
+                            const type = event.target.value as DiscountType;
                             setDiscountRecipients((current) =>
-                              current.map((entry, entryIndex) =>
-                                entryIndex === index
-                                  ? {
-                                      ...entry,
-                                      type: event.target.value as DiscountType,
-                                    }
-                                  : entry
-                              )
-                            )
-                          }
+                              current.map((entry, entryIndex) => {
+                                if (entryIndex !== index) return entry;
+                                // Staff names and ID documents are different
+                                // kinds of evidence; never carry one across.
+                                const switching = type === "staff" || entry.type === "staff";
+                                return {
+                                  ...entry,
+                                  type,
+                                  id_number: switching ? "" : entry.id_number,
+                                  name: type === "staff" ? "" : entry.name,
+                                };
+                              })
+                            );
+                          }}
                         >
                           <option value="staff">Staff</option>
                           <option value="senior">Senior citizen</option>
@@ -1030,42 +1066,94 @@ export function StaffPaymentsClient() {
                           <option value="other">Other ID</option>
                         </select>
                       </label>
-                      <label className="field">
-                        <span className="label">ID number</span>
-                        <input
-                          className="input"
-                          value={recipient.id_number}
-                          maxLength={40}
-                          onChange={(event) =>
-                            setDiscountRecipients((current) =>
-                              current.map((entry, entryIndex) =>
-                                entryIndex === index
-                                  ? { ...entry, id_number: event.target.value }
-                                  : entry
-                              )
-                            )
-                          }
-                          placeholder="Enter ID number"
-                        />
-                      </label>
-                      <label className="field">
-                        <span className="label">Name on ID</span>
-                        <input
-                          className="input"
-                          value={recipient.name}
-                          maxLength={80}
-                          onChange={(event) =>
-                            setDiscountRecipients((current) =>
-                              current.map((entry, entryIndex) =>
-                                entryIndex === index
-                                  ? { ...entry, name: event.target.value }
-                                  : entry
-                              )
-                            )
-                          }
-                          placeholder="Enter name"
-                        />
-                      </label>
+                      {recipient.type === "staff" && staffAccounts.length > 0 ? (
+                        <label className="field">
+                          <span className="label">Staff member</span>
+                          <select
+                            className="input"
+                            value={recipient.id_number}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              const selected = staffAccounts.find(
+                                (staff) => staff.username === value
+                              );
+                              setDiscountRecipients((current) =>
+                                current.map((entry, entryIndex) => {
+                                  if (entryIndex !== index) return entry;
+                                  if (selected) {
+                                    return {
+                                      ...entry,
+                                      id_number: selected.username,
+                                      name: selected.name,
+                                    };
+                                  }
+                                  if (value === "") {
+                                    return { ...entry, id_number: "", name: "" };
+                                  }
+                                  // Keep a previously saved (retired) username
+                                  // selectable instead of clearing it.
+                                  if (value === entry.id_number) return entry;
+                                  return entry;
+                                })
+                              );
+                            }}
+                          >
+                            <option value="">Select staff…</option>
+                            {recipient.id_number &&
+                              !staffAccounts.some(
+                                (staff) => staff.username === recipient.id_number
+                              ) && (
+                                <option value={recipient.id_number}>
+                                  {recipient.name || recipient.id_number} (saved)
+                                </option>
+                              )}
+                            {staffAccounts.map((staff) => (
+                              <option key={staff.id} value={staff.username}>
+                                {staff.name} ({staff.username})
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : (
+                        <>
+                          <label className="field">
+                            <span className="label">ID number</span>
+                            <input
+                              className="input"
+                              value={recipient.id_number}
+                              maxLength={40}
+                              onChange={(event) =>
+                                setDiscountRecipients((current) =>
+                                  current.map((entry, entryIndex) =>
+                                    entryIndex === index
+                                      ? { ...entry, id_number: event.target.value }
+                                      : entry
+                                  )
+                                )
+                              }
+                              placeholder="Enter ID number"
+                            />
+                          </label>
+                          <label className="field">
+                            <span className="label">Name on ID</span>
+                            <input
+                              className="input"
+                              value={recipient.name}
+                              maxLength={80}
+                              onChange={(event) =>
+                                setDiscountRecipients((current) =>
+                                  current.map((entry, entryIndex) =>
+                                    entryIndex === index
+                                      ? { ...entry, name: event.target.value }
+                                      : entry
+                                  )
+                                )
+                              }
+                              placeholder="Enter name"
+                            />
+                          </label>
+                        </>
+                      )}
                       <button
                         type="button"
                         className="btn btn-ghost btn-sm"
@@ -1167,11 +1255,13 @@ export function StaffPaymentsClient() {
                         {(preview.items || []).length > 1 && (
                           <button
                             type="button"
-                            className="btn btn-ghost btn-sm"
+                            className="btn btn-danger btn-sm"
+                            aria-label={`Remove ${item.name} from order`}
+                            title={`Remove ${item.name}`}
                             disabled={busyId === preview.id}
                             onClick={() => setPendingRemoval(item)}
                           >
-                            <Icon name="trash" className="icon-sm" /> Remove
+                            <Icon name="trash" className="icon-sm" />
                           </button>
                         )}
                       </div>
