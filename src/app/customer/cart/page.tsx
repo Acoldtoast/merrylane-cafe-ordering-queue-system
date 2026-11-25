@@ -1,5 +1,5 @@
 import { SettingsModel } from "@/lib/models";
-import type { OrderingWindow } from "@/lib/models";
+import { parseServiceChargePct } from "@/lib/serviceCharge";
 import { ClosedShop } from "@/components/ClosedShop";
 import { CartClient } from "./CartClient";
 
@@ -14,16 +14,16 @@ export default async function CartPage({
   const params = await searchParams;
   const table = Math.max(1, Number(params.table) || 7);
 
-  let ordering: OrderingWindow | null = null;
-  try {
-    ordering = await SettingsModel.orderingWindow();
-  } catch {
-    // Keep the cart usable when the database is still initializing.
+  const [ordering, serviceCharge] = await Promise.allSettled([
+    SettingsModel.orderingWindow(),
+    SettingsModel.get("service_charge_pct"),
+  ]);
+  if (ordering.status === "fulfilled" && !ordering.value.open) {
+    return <ClosedShop ordering={ordering.value} table={table} />;
   }
 
-  if (ordering && !ordering.open) {
-    return <ClosedShop ordering={ordering} table={table} />;
-  }
-
-  return <CartClient initialTable={table} />;
+  const serviceChargePct = serviceCharge.status === "fulfilled"
+    ? parseServiceChargePct(serviceCharge.value)
+    : null;
+  return <CartClient initialTable={table} serviceChargePct={serviceChargePct} />;
 }

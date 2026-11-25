@@ -6,14 +6,8 @@ import { Icon } from "./Icons";
 import { LoadingDots } from "./LoadingDots";
 import { useFeedback } from "./Feedback";
 import { peso } from "@/lib/format";
+import { canCustomerCancelOrder } from "@/lib/orderLifecycle";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
-
-export function canCustomerCancelOrder(order: Order) {
-  return (
-    ["pending", "payment_pending"].includes(order.status) &&
-    order.payment_status !== "verified"
-  );
-}
 
 export function CustomerCancelOrderButton({
   order,

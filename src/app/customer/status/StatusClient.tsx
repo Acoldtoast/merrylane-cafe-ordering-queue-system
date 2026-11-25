@@ -361,10 +361,11 @@ export function StatusClient({
         <div className="order-closed-banner" role="status" style={{ marginBottom: 16 }}>
           <Icon name="alert" />
           <div>
-            <strong>Cash payment was not recorded.</strong>
+            <strong>{order.payment_method === "gcash" ? "GCash checkout expired." : "Cash payment was not recorded."}</strong>
             <span>
-              This order was automatically cancelled after 90 minutes and removed
-              from the queue. If you already paid, please speak with a staff member.
+              {order.payment_method === "gcash"
+                ? "The order was cancelled and its portions were released. If you already paid, ask staff to check before paying again."
+                : "This order was automatically cancelled after 90 minutes and removed from the queue. If you already paid, please speak with a staff member."}
             </span>
           </div>
         </div>
@@ -374,15 +375,9 @@ export function StatusClient({
         <div className="order-closed-banner" style={{ borderColor: "#e9c6bd", background: "#fdf0ec", color: "#a74e3d" }}>
           <Icon name="alert" />
           <div>
-            <strong>We couldn&apos;t verify the payment screenshot.</strong>
+            <strong>{order.payment_method === "gcash" ? "GCash payment not confirmed." : "Payment not confirmed."}</strong>
             <span>
-              Please upload a clearer GCash receipt.{" "}
-              <Link
-                href={`/customer/payment?id=${order.id}&table=${initialTable}`}
-                style={{ textDecoration: "underline" }}
-              >
-                Upload again
-              </Link>
+              If you already paid, don&apos;t pay again. Ask a staff member to check the payment for this order.
             </span>
           </div>
         </div>
@@ -397,7 +392,7 @@ export function StatusClient({
               Staff added items to your order. You can pay this balance at the counter
               or send a separate GCash payment.
               {order.balance_payments?.some((payment) => payment.status === "pending") ? (
-                <> Your GCash receipt is waiting for staff review.</>
+                <> An earlier balance payment is under review. Please don&apos;t pay it again.</>
               ) : (
                 <>
                   {" "}
@@ -640,7 +635,7 @@ export function StatusClient({
                     : order.payment_status === "verified"
                       ? "Verified"
                       : order.payment_status === "rejected"
-                        ? "Rejected"
+                         ? "Not confirmed"
                         : "Pending"}
                 </strong>
               </div>
@@ -679,10 +674,25 @@ export function StatusClient({
                   <span>−{peso(order.discount_amount || 0)}</span>
                 </div>
               )}
+              {Number(order.rounding_adjustment || 0) !== 0 && (
+                <div className="totals-row">
+                  <span>Rounding</span>
+                  <span>
+                    {Number(order.rounding_adjustment) > 0 ? "+" : "−"}
+                    {peso(Math.abs(Number(order.rounding_adjustment)))}
+                  </span>
+                </div>
+              )}
               <div className="totals-row total">
                 <span>Total</span>
                 <span>{peso(order.total)}</span>
               </div>
+              {Number(order.vat_amount || 0) > 0 && (
+                <div className="totals-row">
+                  <span>VAT included ({Number(order.vat_rate_pct || 0)}%)</span>
+                  <span>{peso(order.vat_amount || 0)}</span>
+                </div>
+              )}
               {(order.balance_payments || []).map((payment) => (
                 <div className="totals-row" key={payment.id}>
                   <span>

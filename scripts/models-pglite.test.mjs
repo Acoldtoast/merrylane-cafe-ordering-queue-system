@@ -242,6 +242,14 @@ test("models preserve review aggregates and expose prior-day active staff orders
     UserModel,
     WaiterRequestModel,
   } = await import("../src/lib/models.ts");
+  assert.equal(await SettingsModel.menuVatPercentage(), 0);
+  await SettingsModel.setMenuVat("add", 12.5);
+  assert.equal(await SettingsModel.menuVatPercentage(), 12.5);
+  assert.equal((await SettingsModel.orderingWindow()).menu_vat_pct, 12.5);
+  await SettingsModel.setMenuVat("none", 12.5);
+  assert.equal(await SettingsModel.menuVatPercentage(), 0);
+  assert.equal(await SettingsModel.get("vat_rate_pct"), "12.5");
+
   const id = await ReviewModel.create({
     order_id: 14,
     table_number: 4,
@@ -628,8 +636,8 @@ test("models preserve review aggregates and expose prior-day active staff orders
       `INSERT INTO orders
         (id, table_number, status, payment_method, payment_status, subtotal,
          service_charge, total, created_at, updated_at, payment_proof_url,
-         payment_reference, payment_amount)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          payment_reference, payment_amount, guest_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       95,
@@ -644,7 +652,8 @@ test("models preserve review aggregates and expose prior-day active staff orders
       "2025-03-14 12:00:00",
       firstRejectedProof,
       "GCASH-OLD",
-      100
+      100,
+      "rejected-payment-guest"
     );
   await OrderModel.rejectPayment(
     95,
@@ -652,6 +661,7 @@ test("models preserve review aggregates and expose prior-day active staff orders
     "2025-03-14 12:05:00",
     "Updated Staff"
   );
+  assert.equal(await OrderModel.cancelUnpaidForGuest(95, "rejected-payment-guest"), false);
   const firstRejection = (await OrderModel.rejectedPaymentsForDate("2025-03-14"))
     .find((record) => record.order_id === 95);
   assert.ok(firstRejection);
@@ -715,6 +725,31 @@ test("models preserve review aggregates and expose prior-day active staff orders
   assert.equal(submittedOrder?.payment_status, "pending");
   assert.equal(submittedOrder?.payment_proof_url, submittedProof);
   assert.equal(submittedOrder?.payment_reference, "GCASH-SUBMITTED");
+
+  const { ensureXenditPaymentTable } = await import("../src/lib/xenditPayments.ts");
+  await ensureXenditPaymentTable();
+  for (const [ref, status, minutes, expected] of [
+    ["expired-abandoned", "expired", 6, "cancelled"],
+    ["expired-recently", "expired", 1, "payment_pending"],
+    ["pending-provider", "pending", 1500, "payment_pending"],
+  ]) {
+    const id = await OrderModel.create({
+      table_number: 7, order_type: "dine_in", payment_method: "gcash",
+      subtotal: 100, total: 100, status: "payment_pending", payment_reference: ref,
+    });
+    await database.prepare(
+      `UPDATE orders
+       SET created_at = (timezone('Asia/Manila', CURRENT_TIMESTAMP) - $1::int * INTERVAL '1 minute')::text
+       WHERE id = $2`
+    ).run(minutes, id);
+    await database.prepare(
+      `INSERT INTO xendit_payment_requests
+       (reference_id, payment_request_id, order_id, payment_kind, amount, status, updated_at)
+       VALUES ($1, $2, $3, 'order', 100, $4, CURRENT_TIMESTAMP - $5::int * INTERVAL '1 minute')`
+    ).run(ref, `pr-${ref}`, id, status, minutes);
+    await OrderModel.autoCancelUnpaidOrders();
+    assert.equal((await OrderModel.byId(id))?.status, expected, ref);
+  }
 
   const waiterRequestId = await WaiterRequestModel.create({
     table_number: 4,

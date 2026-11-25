@@ -6,6 +6,15 @@ export const STAFF_BOARD_ACTIVE_STATUSES = [
   "ready",
 ] as const satisfies readonly OrderStatus[];
 
+export function isCustomerHistoryOrder(order: Pick<Order, "status" | "payment_status">): boolean {
+  return order.status === "completed" || order.payment_status === "rejected";
+}
+
+export function canCustomerCancelOrder(order: Pick<Order, "status" | "payment_status">): boolean {
+  return order.payment_status === "pending" &&
+    (order.status === "pending" || order.status === "payment_pending");
+}
+
 export function needsPaymentReview(
   order: Pick<Order, "payment_status" | "status" | "payment_method" | "payment_proof_url">
 ): boolean {

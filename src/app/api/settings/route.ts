@@ -7,6 +7,7 @@ import { validLastOrder, weeklyScheduleError } from "@/lib/orderingHours";
 import { readOrderingWindow } from "@/lib/portalReadData";
 import { errorMessage } from "@/lib/errorMessage";
 import { parseServiceChargePct } from "@/lib/serviceCharge";
+import { parseVatRate, vatConfig, type VatMode } from "@/lib/vat";
 
 const MAX_GCASH_QR_BYTES = 1024 * 1024;
 const GCASH_QR_DATA_URL =
@@ -56,7 +57,8 @@ async function buildSettingsPayload() {
       last_order_time: todaySchedule?.last_order ?? "21:00",
       closing_time: todaySchedule?.end || values.closing_time || "22:00",
       service_charge_pct: parseServiceChargePct(values.service_charge_pct),
-      vat_inclusive: values.vat_inclusive !== "false",
+      vat_mode: vatConfig(values).mode,
+      vat_rate_pct: parseVatRate(values.vat_rate_pct),
       days_operating:
         values.days_operating ||
         "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday",
@@ -84,6 +86,7 @@ export async function GET(request: Request) {
         {
           ordering_open: ordering.open,
           last_order_warning: ordering.last_order_warning,
+          menu_vat_pct: ordering.menu_vat_pct,
           success: true,
         },
         {
@@ -155,13 +158,29 @@ export async function PATCH(request: Request) {
       body.service_charge_pct = pct;
     }
     if (
+      Object.prototype.hasOwnProperty.call(body, "vat_mode") &&
+      !["none", "add", "included"].includes(String(body.vat_mode))
+    ) {
+      return Response.json(
+        { error: "Choose how VAT applies to menu prices.", success: false },
+        { status: 400 }
+      );
+    }
+    if (
       Object.prototype.hasOwnProperty.call(body, "vat_inclusive") &&
       typeof body.vat_inclusive !== "boolean"
     ) {
       return Response.json(
-        { error: "Choose whether prices include VAT.", success: false },
+        { error: "Choose whether to add VAT to menu prices.", success: false },
         { status: 400 }
       );
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "vat_rate_pct")) {
+      const rate = parseVatRate(body.vat_rate_pct, Number.NaN);
+      if (!Number.isFinite(rate)) {
+        return Response.json({ error: "Enter a VAT percentage from 0 to 100, with up to two decimal places.", success: false }, { status: 400 });
+      }
+      body.vat_rate_pct = rate;
     }
     const allowed = new Set([
       "cafe_name",
@@ -175,7 +194,6 @@ export async function PATCH(request: Request) {
       "opening_time",
       "closing_time",
       "service_charge_pct",
-      "vat_inclusive",
       "days_operating",
       "facebook_url",
       "twitter_url",
@@ -188,6 +206,20 @@ export async function PATCH(request: Request) {
       SettingsModel.orderingWindow(),
       SettingsModel.get("weekly_schedule"),
     ]);
+    const updatingVat =
+      "vat_mode" in body || "vat_inclusive" in body || "vat_rate_pct" in body;
+    const vatMode: VatMode =
+      "vat_mode" in body
+        ? (body.vat_mode as VatMode)
+        : "vat_inclusive" in body
+          ? body.vat_inclusive
+            ? "add"
+            : "none"
+          : vatConfig(previousValues).mode;
+    const vatRate = body.vat_rate_pct ?? parseVatRate(previousValues.vat_rate_pct);
+    if (updatingVat && vatMode !== "none" && vatRate === 0) {
+      return Response.json({ error: "Enter a VAT rate above 0%, or turn VAT off.", success: false }, { status: 400 });
+    }
     if (body.weekly_schedule === undefined && body.last_order_time !== undefined) {
       const today = previousWindow.schedule.find((day) => day.day === previousWindow.today);
       if (!validLastOrder(body.last_order_time, body.opening_time ?? today?.start, body.closing_time ?? today?.end)) {
@@ -223,6 +255,10 @@ export async function PATCH(request: Request) {
         key,
         typeof value === "boolean" ? String(value) : String(value ?? "")
       );
+    }
+    if (updatingVat) {
+      await SettingsModel.setMenuVat(vatMode, vatRate);
+      invalidateCache("menu");
     }
 
     if (Array.isArray(body.weekly_schedule)) {

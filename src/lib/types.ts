@@ -120,7 +120,13 @@ export interface SalesTransaction {
   customer_name: string;
   payment_method: "gcash" | "counter";
   amount: number;
+  subtotal?: number;
+  service_charge?: number;
   discount_amount: number;
+  vat_mode?: "none" | "add" | "included";
+  vat_rate_pct?: number;
+  vat_amount?: number;
+  rounding_adjustment?: number;
   paid_at: string;
   payment_reference: string | null;
   transaction_type: "order" | "additional";
@@ -152,6 +158,10 @@ export interface Order {
   subtotal: number;
   service_charge: number;
   total: number;
+  vat_mode?: "none" | "add" | "included" | null;
+  vat_rate_pct?: number;
+  vat_amount?: number;
+  rounding_adjustment?: number;
   discount_amount?: number;
   discounts?: OrderDiscount[];
   remarks?: string | null;
@@ -215,7 +225,8 @@ export interface CafeSettings {
   opening_time: string;
   closing_time: string;
   service_charge_pct: number;
-  vat_inclusive: boolean;
+  vat_mode: "none" | "add" | "included";
+  vat_rate_pct: number;
   days_operating: string;
 }
 

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  canCustomerCancelOrder,
+  isCustomerHistoryOrder,
   needsPaymentReview,
   preparationEtaHasPassed,
   preparationMinutesElapsed,
@@ -9,6 +11,18 @@ import {
   readyReminderLevel,
   staffCanCompleteServedOrder,
 } from "../src/lib/orderLifecycle.ts";
+
+test("customers can cancel active unpaid orders but not orders in history", () => {
+  for (const order of [
+    { status: "payment_pending", payment_status: "rejected" },
+    { status: "completed", payment_status: "verified" },
+  ]) {
+    assert.equal(isCustomerHistoryOrder(order), true);
+    assert.equal(canCustomerCancelOrder(order), false);
+  }
+  assert.equal(canCustomerCancelOrder({ status: "payment_pending", payment_status: "pending" }), true);
+  assert.equal(canCustomerCancelOrder({ status: "cancelled", payment_status: "pending" }), false);
+});
 
 test("only submitted GCash receipts and counter orders need payment review", () => {
   const gcash = {

@@ -18,6 +18,7 @@ import {
   stockWarningDetails,
 } from "@/lib/cartStock";
 import { useQuantityLimitWarning } from "@/lib/useQuantityLimitWarning";
+import { priceWithVat } from "@/lib/vat";
 
 type AddButtonFeedback = {
   itemId: number;
@@ -40,7 +41,7 @@ export function MenuClient({
   initialOrdering?: OrderingWindow | null;
 }) {
   const router = useRouter();
-  const { setTable, addItem, setStockLimits, setQuantity, removeItem, items: cartItems, ready } =
+  const { setTable, addItem, setStockLimits, setQuantity, removeItem, items: cartItems, ready, vatRatePct } =
     useCustomer();
   const feedback = useFeedback();
   const { warningKey, warn } = useQuantityLimitWarning<number>();
@@ -209,7 +210,7 @@ export function MenuClient({
       duration: 1400,
       details: [
         { label: "Item", value: item.name },
-        { label: "Price", value: peso(Number(item.price)) },
+        { label: "Price", value: peso(priceWithVat(Number(item.price), vatRatePct)) },
         { label: "Quantity", value: "1" },
       ],
     });
@@ -381,7 +382,10 @@ export function MenuClient({
                           <div className="menu-bottom">
                             <div className="menu-price">
                               <sup>₱</sup>
-                              {Number(item.price).toLocaleString("en-PH")}
+                              {priceWithVat(Number(item.price), vatRatePct).toLocaleString("en-PH", {
+                                minimumFractionDigits: 0,
+                                maximumFractionDigits: 0,
+                              })}
                             </div>
                             <button
                               type="button"

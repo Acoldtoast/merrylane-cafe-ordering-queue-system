@@ -9,16 +9,16 @@ export default async function CustomerLayout({
 }: {
   children: React.ReactNode;
 }) {
-  let initialOrderingOpen: boolean | null = null;
+  let ordering: Awaited<ReturnType<typeof readOrderingWindow>> | null = null;
   try {
-    initialOrderingOpen = (await readOrderingWindow()).open;
+    ordering = await readOrderingWindow();
   } catch (error) {
     console.error("Could not load the initial ordering status.", error);
   }
 
   return (
-    <CustomerProvider>
-      <CustomerShell initialOrderingOpen={initialOrderingOpen}>
+    <CustomerProvider vatRatePct={ordering?.menu_vat_pct}>
+      <CustomerShell initialOrderingOpen={ordering?.open ?? null}>
         {children}
       </CustomerShell>
     </CustomerProvider>

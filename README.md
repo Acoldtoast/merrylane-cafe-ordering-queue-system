@@ -59,10 +59,11 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 | `SMTP_PASSWORD_ENCRYPTION_KEY` | no | Encrypts stored SMTP passwords. Falls back to `JWT_SECRET` when unset. |
 | `DATABASE_URL` | for hosted PostgreSQL | Server-only PostgreSQL connection string. When set, the app uses this database instead of local PGlite. Required on Vercel. |
 | `MERRYLANE_DB_DIR` | no | Absolute path of the PGlite directory. Defaults to `data/merrylane-pglite`. |
-| `XENDIT_TEST_SECRET_KEY` | for test payments | Server-side Xendit test key; always used outside production, even if a live key is also configured. |
-| `XENDIT_SECRET_KEY` | for live payments | Server-side Xendit live key. Production never falls back to a test key. |
+| `XENDIT_TEST_SECRET_KEY` | for test payments | Server-side Xendit test key; used outside production or when `XENDIT_TEST_MODE=true`. |
+| `XENDIT_SECRET_KEY` | for live payments | Server-side Xendit live key; used in production unless test mode is explicitly enabled. |
+| `XENDIT_TEST_MODE` | local production-start testing | Set to `true` to opt a production build/start into Xendit sandbox credentials and local HTTP origins. Do not enable for live deployments. |
 | `XENDIT_WEBHOOK_TOKEN` | for GCash | The callback verification token configured for the Xendit webhook. |
-| `APP_URL` | for GCash | Public HTTPS origin in production; localhost or a private IPv4 address over HTTP is allowed for test demos. Do not include a path. |
+| `APP_URL` | for GCash | Public HTTPS origin for live payments; localhost or a private IPv4 address over HTTP is allowed in test mode. Do not include a path. |
 | `STAFF_IDENTITY_ENCRYPTION_KEY` | for the staff face check | At least 32 characters. Encrypts the stored staff face photos. Without it, face enrollment and the face check return 503. |
 | `FACEPP_API_KEY` | for the staff face check | Face++ API key. Without both Face++ values the face check is disabled and staff cannot check in. |
 | `FACEPP_API_SECRET` | for the staff face check | Face++ API secret. Keep it server-side. |
@@ -71,13 +72,16 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 #### Xendit GCash setup
 
 1. For a local demo, add `XENDIT_TEST_SECRET_KEY`, a private `XENDIT_WEBHOOK_TOKEN`, and
-   `APP_URL=http://localhost:3112` to `.env.local`. For phone testing on the same Wi-Fi, open the app
-   using the computer's current private IPv4 address and port; the test checkout uses that same address
-   for its return. Non-production environments always use the test
-   key; they never fall back to the live key. Keep the payment page open while testing: local Xendit
+   `APP_URL=http://localhost:3112` to `.env.local`. When using `npm run build` followed by
+   `npm run start`, also set `XENDIT_TEST_MODE=true` to explicitly opt into the test key and local
+   HTTP URL; `npm run dev` uses the test key automatically. For phone testing on the same Wi-Fi, open
+   the app using the computer's current private IPv4 address and port; the test checkout uses that
+   same address for its return. Live credentials are never replaced with test credentials implicitly.
+   Keep the payment page open while testing: local Xendit
    status polling checks Xendit because it cannot send webhooks to a private address. Some provider or
    mobile-browser flows may require a public HTTPS address even in test mode.
-2. For production, configure `XENDIT_SECRET_KEY`, the callback token, and a public HTTPS `APP_URL`.
+2. For live production, configure `XENDIT_SECRET_KEY`, the callback token, and a public HTTPS `APP_URL`.
+   Leave `XENDIT_TEST_MODE` unset.
    In the Xendit dashboard, configure the Payment Requests v3 payment status webhook to
    `https://<your-public-domain>/api/webhooks/xendit`, using the same callback token.
 3. Restart the app after changing environment variables. Keep secret keys server-side; never put
@@ -226,11 +230,20 @@ pending ──▶ payment_pending ──▶ confirmed ──▶ preparing ──
 ```
 
 - **Counter** orders start as `pending` and are confirmed by staff at the counter.
+- **VAT pricing** is off until an admin saves a positive percentage with **Add VAT to menu prices**
+  in Café Setup. With it on, enter menu prices before VAT; the customer menu and checkout display
+  and charge the VAT-inclusive price. Leave it off if entered prices already include VAT. This
+  setting does not recalculate past orders or configure tax exemptions.
 - **GCash** orders start as `payment_pending`; the customer pays through Xendit's hosted checkout.
   Production's authenticated webhook (or local development's authenticated Xendit status lookup)
   verifies the successful PHP GCash payment and amount before setting `payment_status = verified`,
   starting preparation, and assigning the next queue number. Legacy manually submitted receipts, if
   present, remain available for staff review in `/staff/payments`.
+- After five minutes, the open GCash checkout hides its QR and asks Xendit to close the payment
+  request. Only after Xendit confirms it closed unpaid can the customer retry GCash or switch the
+  same order to cash at the counter. The unpaid-order sweep releases stock after a five-minute
+  grace period if neither option is used. If the checkout page is closed, expiry depends on
+  Xendit's expiry notification.
 - Staff mark an order served when it is handed over. An expired preparation ETA raises increasingly
   urgent staff reminders and offers an ETA update; it does not mark the order served automatically.
   Served orders remain open until the customer confirms receipt, with staff follow-up reminders

@@ -8,7 +8,7 @@ export async function GET() {
     return Response.json({
       orders,
       success: true,
-    });
+    }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error: unknown) {
     return Response.json(
       {

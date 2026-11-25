@@ -6,9 +6,9 @@ const sourceRoot = path.resolve(process.cwd(), "src");
 
 export async function resolve(specifier, context, nextResolve) {
   let candidate = specifier;
-  if (candidate === "next/server") {
+  if (candidate === "next/server" || candidate === "next/headers") {
     candidate = pathToFileURL(
-      path.join(process.cwd(), "node_modules", "next", "server.js")
+      path.join(process.cwd(), "node_modules", `${candidate}.js`)
     ).href;
   }
   if (candidate.startsWith("@/")) {

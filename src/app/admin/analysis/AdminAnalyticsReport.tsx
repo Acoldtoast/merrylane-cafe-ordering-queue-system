@@ -31,6 +31,9 @@ interface AnalyticsReport {
     order_count: number;
     revenue: number;
     average_order_value: number;
+    vat_amount: number;
+    net_sales: number;
+    rounding_adjustment: number;
     revenue_change_pct: number | null;
     order_change_pct: number | null;
     cancelled_orders: number;
@@ -691,6 +694,8 @@ function buildReportHtml(report: AnalyticsReport): string {
       <article><span>Served revenue</span><strong>${escapeHtml(peso(report.summary.revenue))}</strong><small>${escapeHtml(changeText(report.summary.revenue_change_pct))}</small></article>
       <article><span>Served orders</span><strong>${escapeHtml(report.summary.order_count.toLocaleString("en-PH"))}</strong><small>${escapeHtml(changeText(report.summary.order_change_pct))}</small></article>
       <article><span>Average order value</span><strong>${escapeHtml(peso(report.summary.average_order_value))}</strong><small>Average of served orders</small></article>
+      <article><span>VAT included</span><strong>${escapeHtml(peso(report.summary.vat_amount))}</strong><small>Recorded on each order when paid</small></article>
+      <article><span>Net of VAT</span><strong>${escapeHtml(peso(report.summary.net_sales))}</strong><small>Served revenue minus VAT</small></article>
       <article><span>Average wait</span><strong>${escapeHtml(waitSummary)}</strong><small>Confirmed to served</small></article>
       <article><span>Discounted tickets</span><strong>${escapeHtml(report.summary.discounted_orders.toLocaleString("en-PH"))}</strong><small>Served orders with a discount</small></article>
       <article><span>Average rating</span><strong>${escapeHtml(ratingSummary)}</strong><small>${escapeHtml(report.summary.review_count.toLocaleString("en-PH"))} reviews</small></article>
@@ -1071,6 +1076,24 @@ export function AdminAnalyticsReport({
                 label="Average order value"
               />
               <small>Average of served orders</small>
+            </article>
+            <article>
+              <span>VAT included</span>
+              <AnimatedKpi
+                value={report.summary.vat_amount}
+                format="currency"
+                label="VAT included in served revenue"
+              />
+              <small>Portion of served revenue recorded as VAT</small>
+            </article>
+            <article>
+              <span>Net of VAT</span>
+              <AnimatedKpi
+                value={report.summary.net_sales}
+                format="currency"
+                label="Served revenue net of VAT"
+              />
+              <small>VAT amount from each order at the time it was paid</small>
             </article>
             <article>
               <span>Cancelled orders</span>

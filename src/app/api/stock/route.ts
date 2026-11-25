@@ -2,6 +2,7 @@ import { MenuItemModel, StockModel } from "@/lib/models";
 import { requireStaff } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
 import { errorMessage } from "@/lib/errorMessage";
+import { isStockAmount, MAX_LOW_STOCK_THRESHOLD, MAX_STOCK_COUNT } from "@/lib/stockLimits";
 
 export async function GET(request: Request) {
   try {
@@ -72,16 +73,17 @@ export async function PATCH(request: Request) {
         { status: 400 }
       );
     }
-    const stockCount = trackingEnabled ? Number(rawStockCount) : null;
     if (
       trackingEnabled &&
-      (!Number.isSafeInteger(stockCount) || Number(stockCount) < 0)
+      body.stock_count !== undefined &&
+      !isStockAmount(rawStockCount, MAX_STOCK_COUNT)
     ) {
       return Response.json(
-        { error: "On-hand stock must be a whole number of zero or more.", success: false },
+        { error: `On-hand stock must be a whole number from 0 to ${MAX_STOCK_COUNT}.`, success: false },
         { status: 400 }
       );
     }
+    const stockCount = trackingEnabled ? Number(rawStockCount) : null;
     if (trackingEnabled && stockCount === 0 && requestedStatus !== "out") {
       return Response.json(
         { error: "An item with zero stock must be marked sold out.", success: false },
@@ -104,19 +106,19 @@ export async function PATCH(request: Request) {
         { status: 400 }
       );
     }
+    if (
+      body.low_stock_threshold !== undefined &&
+      !isStockAmount(body.low_stock_threshold, MAX_LOW_STOCK_THRESHOLD)
+    ) {
+      return Response.json(
+        { error: `The low-portion threshold must be a whole number from 0 to ${MAX_LOW_STOCK_THRESHOLD}.`, success: false },
+        { status: 400 }
+      );
+    }
     const lowStockThreshold =
       body.low_stock_threshold === undefined
         ? existing.low_stock_threshold
         : Number(body.low_stock_threshold);
-    if (
-      !Number.isSafeInteger(lowStockThreshold) ||
-      lowStockThreshold < 0
-    ) {
-      return Response.json(
-        { error: "The low-portion threshold must be a whole number of zero or more.", success: false },
-        { status: 400 }
-      );
-    }
 
     await StockModel.update(
       id,

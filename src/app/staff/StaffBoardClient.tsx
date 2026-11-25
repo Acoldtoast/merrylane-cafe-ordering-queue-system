@@ -24,6 +24,7 @@ import {
   relativeTime,
   smartDateTime,
 } from "@/lib/format";
+import { parseVatRate, priceWithVat } from "@/lib/vat";
 import { orderItemMeta } from "@/lib/orderItems";
 import {
   preparationEtaHasPassed,
@@ -182,6 +183,7 @@ export function StaffBoardClient() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [addons, setAddons] = useState<Addon[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [menuVatPct, setMenuVatPct] = useState(0);
   const [waiterRequests, setWaiterRequests] = useState<WaiterRequest[]>([]);
   const [stats, setStats] = useState({
     orders: 0,
@@ -284,7 +286,10 @@ export function StaffBoardClient() {
       const addonData = await addonsRes.json();
       const menuData = await menuRes.json();
       if (addonsRes.ok && addonData.success) setAddons(addonData.addons || []);
-      if (menuRes.ok && menuData.success) setMenuItems(menuData.items || []);
+      if (menuRes.ok && menuData.success) {
+        setMenuItems(menuData.items || []);
+        setMenuVatPct(parseVatRate(menuData.menu_vat_pct));
+      }
     } catch (err: unknown) {
       console.warn("Unable to refresh the menu catalog.", err);
     }
@@ -292,7 +297,7 @@ export function StaffBoardClient() {
 
   usePolling(load, 10000, { resources: ["orders", "payments"] });
   usePolling(loadRequests, 10000, { enabled: !loading, resources: ["requests", "waiter"] });
-  usePolling(loadCatalog, 60000, { enabled: !loading, resources: ["menu"] });
+  usePolling(loadCatalog, 60000, { enabled: !loading, resources: ["menu", "settings"] });
 
   /*
    * The draft belongs to one order, so it is derived from that order instead of
@@ -1637,10 +1642,25 @@ export function StaffBoardClient() {
                   discounts={detail.discounts}
                   discountAmount={detail.discount_amount}
                 />
+                {Number(detail.rounding_adjustment || 0) !== 0 && (
+                  <div className="totals-row">
+                    <span>Rounding</span>
+                    <span>
+                      {Number(detail.rounding_adjustment) > 0 ? "+" : "−"}
+                      {peso(Math.abs(Number(detail.rounding_adjustment)))}
+                    </span>
+                  </div>
+                )}
                 <div className="totals-row total">
                   <span>Total</span>
                   <span>{peso(detail.total)}</span>
                 </div>
+                {Number(detail.vat_amount || 0) > 0 && (
+                  <div className="totals-row">
+                    <span>VAT included ({Number(detail.vat_rate_pct || 0)}%)</span>
+                    <span>{peso(detail.vat_amount || 0)}</span>
+                  </div>
+                )}
                 {(detail.balance_payments || []).map((payment) => (
                   <div className="totals-row" key={payment.id}>
                     <span>
@@ -2087,7 +2107,7 @@ export function StaffBoardClient() {
                       value={item.id}
                       disabled={!item.is_active || item.stock_status === "out"}
                     >
-                      {item.name} · {peso(item.price)}
+                      {item.name} · {peso(priceWithVat(Number(item.price), menuVatPct))}
                       {!item.is_active || item.stock_status === "out"
                         ? " · unavailable"
                         : ""}
@@ -2116,7 +2136,7 @@ export function StaffBoardClient() {
                               <span>
                                 {variant.name}
                                 {Number(variant.price_modifier) !== 0
-                                  ? ` · ${Number(variant.price_modifier) > 0 ? "+" : ""}${peso(variant.price_modifier)}`
+                                     ? ` · ${Number(variant.price_modifier) > 0 ? "+" : ""}${peso(priceWithVat(Number(variant.price_modifier), menuVatPct))}`
                                   : ""}
                               </span>
                             </label>
@@ -2142,7 +2162,7 @@ export function StaffBoardClient() {
                               }
                             />
                             <span>{extra.name}</span>
-                            <b>+{peso(extra.price_modifier)}</b>
+                             <b>+{peso(priceWithVat(Number(extra.price_modifier), menuVatPct))}</b>
                           </label>
                         ))}
                       </div>
@@ -2290,7 +2310,7 @@ export function StaffBoardClient() {
                     >
                       {addons.map((addon) => (
                         <option key={addon.id} value={addon.id}>
-                          {addon.name} · +{peso(addon.price_modifier)}
+                           {addon.name} · +{peso(priceWithVat(Number(addon.price_modifier), menuVatPct))}
                         </option>
                       ))}
                     </select>

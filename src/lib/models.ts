@@ -14,7 +14,16 @@ import {
 import { STAFF_BOARD_ACTIVE_STATUSES } from "./orderLifecycle";
 import { defaultLastOrder, minutesOf, validLastOrder, WEEK_DAYS } from "./orderingHours";
 import { usernameForAccount } from "./usernames";
-import { parseServiceChargePct } from "./serviceCharge";
+import { calculateServiceCharge, parseServiceChargePct } from "./serviceCharge";
+import { ensureXenditPaymentTable } from "./xenditPayments";
+import {
+  finalizeTotals,
+  menuVatRate,
+  orderVatConfig,
+  priceWithVat,
+  vatConfig,
+  type VatMode,
+} from "./vat";
 import type { RejectedPayment, SalesTransaction } from "./types";
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
@@ -888,6 +897,10 @@ export interface Order {
   subtotal: number;
   service_charge: number;
   total: number;
+  vat_mode?: VatMode | null;
+  vat_rate_pct?: number;
+  vat_amount?: number;
+  rounding_adjustment?: number;
   discount_amount?: number;
   discounts?: OrderDiscount[];
   discounts_json?: string | null;
@@ -996,7 +1009,8 @@ async function gcashReferenceIsInUse(
 
 const ORDER_COLUMNS = `
   id, table_number, order_type, status, payment_method, payment_status,
-  customer_name, subtotal, service_charge, total, remarks, queue_number,
+  customer_name, subtotal, service_charge, total,
+  vat_mode, vat_rate_pct, vat_amount, rounding_adjustment, remarks, queue_number,
   (SELECT COUNT(*) + 1
    FROM orders earlier
    WHERE earlier.created_at >= date(orders.created_at)
@@ -1014,7 +1028,7 @@ const ORDER_COLUMNS = `
 const orderColumnsReady = new WeakMap<object, Promise<void>>();
 const orderPaymentRejectionsReady = new WeakMap<object, Promise<void>>();
 
-async function ensureOrderColumns(): Promise<void> {
+export async function ensureOrderColumns(): Promise<void> {
   const db = getDb();
   const existing = orderColumnsReady.get(db);
   if (existing) return existing;
@@ -1039,6 +1053,19 @@ async function ensureOrderColumns(): Promise<void> {
       "ALTER TABLE orders ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0"
     );
     await add("discounts_json", "ALTER TABLE orders ADD COLUMN discounts_json TEXT");
+    await add("vat_mode", "ALTER TABLE orders ADD COLUMN vat_mode TEXT");
+    await add(
+      "vat_rate_pct",
+      "ALTER TABLE orders ADD COLUMN vat_rate_pct REAL NOT NULL DEFAULT 0"
+    );
+    await add(
+      "vat_amount",
+      "ALTER TABLE orders ADD COLUMN vat_amount REAL NOT NULL DEFAULT 0"
+    );
+    await add(
+      "rounding_adjustment",
+      "ALTER TABLE orders ADD COLUMN rounding_adjustment REAL NOT NULL DEFAULT 0"
+    );
     await db.exec(
       "CREATE INDEX IF NOT EXISTS idx_orders_preparing_at ON orders(preparing_at)"
     );
@@ -1624,6 +1651,23 @@ async function restoreOrderStock(orderId: number): Promise<void> {
   }
 }
 
+// Keep stock briefly after the previous checkout closes so either payment choice can use the same order.
+const GCASH_RESERVATION_EXPIRED = `(
+  EXISTS (
+    SELECT 1 FROM xendit_payment_requests p
+    WHERE p.order_id = orders.id AND p.reference_id = orders.payment_reference
+      AND p.payment_kind = 'order' AND p.status = 'expired'
+      AND p.updated_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+  ) OR (
+    orders.created_at::timestamp <= timezone('Asia/Manila', CURRENT_TIMESTAMP) - INTERVAL '24 hours'
+    AND NOT EXISTS (
+      SELECT 1 FROM xendit_payment_requests p
+      WHERE p.order_id = orders.id AND p.reference_id = orders.payment_reference
+        AND p.payment_kind = 'order' AND p.status NOT IN ('expired', 'failed')
+    )
+  )
+)`;
+
 async function cancelUnpaidGcashOrder(id: number): Promise<boolean> {
   await ensureOrderColumns();
   await ensureOrderStockDeductionsTable();
@@ -1641,7 +1685,7 @@ async function cancelUnpaidGcashOrder(id: number): Promise<boolean> {
            AND payment_method = 'gcash'
            AND payment_status = 'pending'
            AND payment_proof_url IS NULL
-           AND created_at <= datetime('now', 'localtime', '-1 day')`
+            AND ${GCASH_RESERVATION_EXPIRED}`
       )
       .run(id);
     if (Number(result.changes) !== 1) {
@@ -1678,7 +1722,7 @@ async function cancelUnpaidOrder(
                   AND created_at <= datetime('now', 'localtime', '-90 minutes')`
                : ""
            }
-           ${guestId === undefined ? "" : "AND guest_id = ?"}`
+            ${guestId === undefined ? "" : "AND guest_id = ? AND payment_status = 'pending'"}`
       )
       .run(
         cancellationReason ?? null,
@@ -1708,13 +1752,12 @@ export const OrderModel = {
     return Number(result.changes) === 1;
   },
   /**
-   * Cancels counter/cash orders unpaid for over 90 minutes and GCash orders
-   * awaiting payment for over 24 hours. Reserves stock only until payment is
-   * actually verified, so abandoned GCash checkouts cannot tie up stock
-   * indefinitely.
+   * Cancels unpaid counter orders after 90 minutes. For GCash, allow five minutes
+   * to retry or switch after checkout expiry; retain the 24-hour legacy fallback.
    */
   async autoCancelUnpaidOrders(): Promise<{ counter: number; gcash: number }> {
     await ensureOrderColumns();
+    await ensureXenditPaymentTable();
     const db = getDb();
     const counterOrders = (await db
       .prepare(
@@ -1733,7 +1776,7 @@ export const OrderModel = {
             AND payment_method = 'gcash'
             AND payment_status = 'pending'
             AND payment_proof_url IS NULL
-            AND created_at <= datetime('now', 'localtime', '-1 day')
+             AND ${GCASH_RESERVATION_EXPIRED}
          ORDER BY id`
       )
       .all()) as { id: number }[];
@@ -1802,7 +1845,13 @@ export const OrderModel = {
              COALESCE(customer_name, 'Guest') AS customer_name,
              CASE WHEN payment_method = 'gcash' THEN 'gcash' ELSE 'counter' END AS payment_method,
              COALESCE(payment_amount, total) AS amount,
+             subtotal,
+             service_charge,
              COALESCE(discount_amount, 0) AS discount_amount,
+             COALESCE(vat_mode, 'none') AS vat_mode,
+             COALESCE(vat_rate_pct, 0) AS vat_rate_pct,
+             COALESCE(vat_amount, 0) AS vat_amount,
+             COALESCE(rounding_adjustment, 0) AS rounding_adjustment,
              confirmed_at AS paid_at,
              payment_reference,
              (SELECT NULLIF(log.actor_name, 'Merrylane staff')
@@ -1838,7 +1887,13 @@ export const OrderModel = {
              COALESCE(orders.customer_name, 'Guest') AS customer_name,
              payments.payment_method,
              payments.amount,
+             orders.subtotal,
+             orders.service_charge,
              0 AS discount_amount,
+             COALESCE(orders.vat_mode, 'none') AS vat_mode,
+             COALESCE(orders.vat_rate_pct, 0) AS vat_rate_pct,
+             0 AS vat_amount,
+             0 AS rounding_adjustment,
              payments.verified_at AS paid_at,
              payments.payment_reference,
              (SELECT users.name
@@ -2051,6 +2106,10 @@ export const OrderModel = {
     subtotal: number;
     service_charge?: number;
     total: number;
+    vat_mode?: VatMode;
+    vat_rate_pct?: number;
+    vat_amount?: number;
+    rounding_adjustment?: number;
     remarks?: string;
     status?: OrderStatus;
     guest_id: string;
@@ -2058,13 +2117,15 @@ export const OrderModel = {
     payment_reference?: string | null;
     payment_amount?: number | null;
   }): Promise<number> {
+    await ensureOrderColumns();
     const result = await getDb()
       .prepare(
         `INSERT INTO orders
            (table_number, order_type, status, payment_method, payment_status,
-            customer_name, subtotal, service_charge, total, remarks, guest_id,
-            payment_proof_url, payment_reference, payment_amount)
-         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            customer_name, subtotal, service_charge, total,
+            vat_mode, vat_rate_pct, vat_amount, rounding_adjustment,
+            remarks, guest_id, payment_proof_url, payment_reference, payment_amount)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         data.table_number,
@@ -2075,6 +2136,10 @@ export const OrderModel = {
         data.subtotal,
         data.service_charge || 0,
         data.total,
+        data.vat_mode || "none",
+        data.vat_rate_pct || 0,
+        data.vat_amount || 0,
+        data.rounding_adjustment || 0,
         data.remarks || null,
         data.guest_id,
         data.payment_proof_url ?? null,
@@ -2093,6 +2158,10 @@ export const OrderModel = {
       subtotal: number;
       service_charge?: number;
       total: number;
+      vat_mode?: VatMode;
+      vat_rate_pct?: number;
+      vat_amount?: number;
+      rounding_adjustment?: number;
       remarks?: string;
       status?: OrderStatus;
       guest_id: string;
@@ -2113,6 +2182,7 @@ export const OrderModel = {
   }): Promise<
     { ok: true; orderId: number } | { ok: false; error: string; status: number }
   > {
+    await ensureOrderColumns();
     await ensureOrderStockDeductionsTable();
     await ensureMenuStockColumns();
     const db = getDb();
@@ -2346,6 +2416,10 @@ export const OrderModel = {
       "remarks",
       "total",
       "subtotal",
+      "vat_mode",
+      "vat_rate_pct",
+      "vat_amount",
+      "rounding_adjustment",
       "discount_amount",
       "discounts_json",
     ]);
@@ -2448,8 +2522,16 @@ export const OrderModel = {
     const db = getDb();
     const round = (value: number) => Math.round(value * 100) / 100;
     const discountRow = (await db
-      .prepare("SELECT discounts_json FROM orders WHERE id = ?")
-      .get(orderId)) as { discounts_json?: string | null } | undefined;
+      .prepare(
+        "SELECT discounts_json, vat_mode, vat_rate_pct FROM orders WHERE id = ?"
+      )
+      .get(orderId)) as
+      | {
+          discounts_json?: string | null;
+          vat_mode?: string | null;
+          vat_rate_pct?: number | null;
+        }
+      | undefined;
     const recipients = discountRecipientsFromJson(discountRow?.discounts_json);
     const discounts = recipients.length
       ? await calculateDiscountsForOrder(orderId, recipients)
@@ -2471,29 +2553,43 @@ export const OrderModel = {
     const pctRow = (await db
       .prepare("SELECT value FROM settings WHERE key = 'service_charge_pct'")
       .get()) as { value?: string } | undefined;
-    const serviceCharge = round(subtotal * (parseServiceChargePct(pctRow?.value) / 100));
-    const total = round(subtotal + serviceCharge - discountAmount);
+    const serviceCharge = calculateServiceCharge(subtotal, parseServiceChargePct(pctRow?.value));
+    const config =
+      orderVatConfig(discountRow || {}) || (await SettingsModel.menuVatConfig());
+    const exactTotal = round(subtotal + serviceCharge - discountAmount);
+    const totals = finalizeTotals(exactTotal, config);
     await db
       .prepare(
         `UPDATE orders
          SET payment_amount = CASE
                WHEN payment_amount IS NULL AND payment_status = 'verified'
-                 AND payment_method = 'counter' THEN total
+                 AND payment_method = 'counter' THEN ?
                ELSE payment_amount
              END,
              subtotal = ?, service_charge = ?, total = ?, discount_amount = ?,
-             discounts_json = ?, updated_at = datetime('now', 'localtime')
+             vat_mode = ?, vat_rate_pct = ?, vat_amount = ?,
+             rounding_adjustment = ?, discounts_json = ?,
+             updated_at = datetime('now', 'localtime')
          WHERE id = ?`
       )
       .run(
+        totals.total,
         subtotal,
         serviceCharge,
-        total,
+        totals.total,
         discountAmount,
+        totals.vat_mode,
+        totals.vat_rate_pct,
+        totals.vat_amount,
+        totals.rounding_adjustment,
         discounts.length ? JSON.stringify(discounts) : null,
         orderId
       );
-    return { subtotal, service_charge: serviceCharge, total };
+    return {
+      subtotal,
+      service_charge: serviceCharge,
+      total: totals.total,
+    };
   },
 
   async calculateDiscounts(
@@ -2607,7 +2703,7 @@ export const OrderModel = {
         name: extra.name,
         price_modifier: extra.price_modifier,
       }));
-    const unitPrice =
+    const unitPrice = priceWithVat(
       Number(menuItem.price) +
       selectedVariants.reduce(
         (sum, variant) => sum + Number(variant?.price_modifier || 0),
@@ -2616,7 +2712,9 @@ export const OrderModel = {
       selectedExtras.reduce(
         (sum, extra) => sum + Number(extra?.price_modifier || 0),
         0
-      );
+      ),
+      await SettingsModel.menuVatPercentage()
+    );
 
     await ensureOrderStockDeductionsTable();
     try {
@@ -2757,7 +2855,7 @@ export const OrderModel = {
         name: extra.name,
         price_modifier: extra.price_modifier,
       }));
-    const unitPrice =
+    const unitPrice = priceWithVat(
       Number(menuItem.price) +
       selectedVariants.reduce(
         (sum, variant) => sum + Number(variant?.price_modifier || 0),
@@ -2766,7 +2864,9 @@ export const OrderModel = {
       selectedExtras.reduce(
         (sum, extra) => sum + Number(extra?.price_modifier || 0),
         0
-      );
+      ),
+      await SettingsModel.menuVatPercentage()
+    );
 
     try {
       await db.transaction(async () => {
@@ -3153,7 +3253,7 @@ export const OrderModel = {
             item.id,
             addon.id,
             addon.name,
-            Number(addon.price_modifier) || 0,
+            priceWithVat(Number(addon.price_modifier) || 0, await SettingsModel.menuVatPercentage()),
             quantity,
             data.userId || null
           );
@@ -4532,6 +4632,8 @@ export type OrderingReason =
 
 export interface OrderingWindow {
   open: boolean;
+  menu_vat_pct: number;
+  menu_vat_mode: VatMode;
   reason: OrderingReason;
   today: string;
   /** The day the cafe next accepts orders. */
@@ -4791,6 +4893,29 @@ export const SettingsModel = {
     return row?.value;
   },
 
+  async menuVatConfig(): Promise<{ mode: VatMode; rate: number }> {
+    await ensureSettingsTable();
+    const rows = await getDb().prepare(
+      "SELECT key, value FROM settings WHERE key IN ('vat_mode', 'vat_inclusive', 'vat_rate_pct')"
+    ).all<{ key: string; value: string }>();
+    return vatConfig(Object.fromEntries(rows.map(({ key, value }) => [key, value])));
+  },
+
+  /** The rate to add to menu prices, or 0 when prices already include VAT. */
+  async menuVatPercentage(): Promise<number> {
+    const config = await SettingsModel.menuVatConfig();
+    return config.mode === "add" ? config.rate : 0;
+  },
+
+  async setMenuVat(mode: VatMode, rate: number): Promise<void> {
+    await ensureSettingsTable();
+    await getDb().prepare(
+      `INSERT INTO settings (key, value)
+       VALUES ('vat_mode', $1), ('vat_inclusive', $2), ('vat_rate_pct', $3)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`
+    ).run(mode, String(mode === "add"), String(rate));
+  },
+
   async set(key: string, value: string): Promise<void> {
     await ensureSettingsTable();
     await getDb()
@@ -4925,7 +5050,7 @@ export const SettingsModel = {
   async orderingWindow(at: Date = new Date()): Promise<OrderingWindow> {
     await ensureSettingsTable();
     const rows = await getDb().prepare(
-      "SELECT key, value FROM settings WHERE key IN ('weekly_schedule', 'last_order_time', 'ordering_closed')"
+      "SELECT key, value FROM settings WHERE key IN ('weekly_schedule', 'last_order_time', 'ordering_closed', 'vat_mode', 'vat_inclusive', 'vat_rate_pct')"
     ).all<{ key: string; value: string }>();
     const values = Object.fromEntries(rows.map(({ key, value }) => [key, value]));
     const schedule = parseSchedule(values.weekly_schedule, values.last_order_time);
@@ -4933,6 +5058,8 @@ export const SettingsModel = {
     const entry = schedule.find((day) => day.day === today);
     const upcoming = nextOpening(schedule, today, current);
     const base = {
+      menu_vat_pct: menuVatRate(values),
+      menu_vat_mode: vatConfig(values).mode,
       today,
       schedule,
       last_order_at: entry?.open ? entry.last_order : null,

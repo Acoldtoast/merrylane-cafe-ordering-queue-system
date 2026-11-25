@@ -171,6 +171,14 @@ export function StaffSalesClient({
   const gcash = transactions.filter((entry) => entry.payment_method === "gcash");
   const cashTotal = cash.reduce((total, entry) => total + Number(entry.amount), 0);
   const gcashTotal = gcash.reduce((total, entry) => total + Number(entry.amount), 0);
+  const vatTotal = transactions.reduce(
+    (sum, entry) => sum + Number(entry.vat_amount || 0),
+    0
+  );
+  const roundingTotal = transactions.reduce(
+    (sum, entry) => sum + Number(entry.rounding_adjustment || 0),
+    0
+  );
 
   const renderTransactions = (
     title: string,
@@ -303,6 +311,21 @@ export function StaffSalesClient({
               <span>Discounted tickets</span>
               <strong>{transactions.filter((entry) => Number(entry.discount_amount || 0) > 0).length}</strong>
             </div>
+            {vatTotal > 0 && (
+              <div className="daily-sales-total">
+                <span>VAT included</span>
+                <strong>{peso(vatTotal)}</strong>
+              </div>
+            )}
+            {roundingTotal !== 0 && (
+              <div className="daily-sales-total">
+                <span>Rounding</span>
+                <strong>
+                  {roundingTotal > 0 ? "+" : "−"}
+                  {peso(Math.abs(roundingTotal))}
+                </strong>
+              </div>
+            )}
           </div>
           <div className="daily-sales-lists">
             {renderTransactions("Cash / counter", "cash", cash)}
@@ -440,6 +463,21 @@ export function StaffSalesClient({
                 <div className="payment-history-total">
                   <span>Order total</span><strong>{peso(order.total)}</strong>
                 </div>
+                {Number(order.rounding_adjustment || 0) !== 0 && (
+                  <div className="payment-history-total">
+                    <span>Rounding</span>
+                    <strong>
+                      {Number(order.rounding_adjustment) > 0 ? "+" : "−"}
+                      {peso(Math.abs(Number(order.rounding_adjustment)))}
+                    </strong>
+                  </div>
+                )}
+                {Number(order.vat_amount || 0) > 0 && (
+                  <div className="payment-history-total">
+                    <span>VAT included ({Number(order.vat_rate_pct || 0)}%)</span>
+                    <strong>{peso(order.vat_amount || 0)}</strong>
+                  </div>
+                )}
               </div>
             ) : null}
           </section>

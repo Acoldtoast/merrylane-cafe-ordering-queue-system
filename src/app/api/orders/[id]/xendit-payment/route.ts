@@ -6,25 +6,31 @@ import {
   failXenditPaymentRequest,
   getXenditPaymentRequest,
   getXenditConfig,
+  isXenditTestMode,
   prepareXenditPayment,
   saveXenditPaymentRequest,
+  switchExpiredXenditOrderToCounter,
   syncXenditPaymentStatus,
   XenditPaymentError,
   type XenditPaymentKind,
 } from "@/lib/xenditPayments";
 
-type PaymentRequest = NonNullable<
-  Awaited<ReturnType<typeof getXenditPaymentRequest>>
->;
+type PaymentRequest = Pick<
+  NonNullable<Awaited<ReturnType<typeof getXenditPaymentRequest>>>,
+  "status" | "payment_kind" | "checkout_url" | "checkout_mobile_url" | "checkout_qr_string"
+> & { expires_at_ms?: string | number };
 
 async function presentPayment(
   payment: PaymentRequest,
   includeQr: boolean,
   testMode: boolean
 ) {
-  const qrContent = payment.checkout_qr_string || payment.checkout_url;
+  const expiresAt = payment.payment_kind === "order" ? Number(payment.expires_at_ms) : NaN;
+  const canShowCheckout = payment.status === "pending" &&
+    (!Number.isFinite(expiresAt) || Date.now() < expiresAt);
+  const qrContent = canShowCheckout && (payment.checkout_qr_string || payment.checkout_url);
   const qrCodeDataUrl =
-    includeQr && payment.status === "pending" && qrContent
+    includeQr && qrContent
       ? await QRCode.toDataURL(qrContent, {
           width: 224,
           margin: 1,
@@ -33,10 +39,11 @@ async function presentPayment(
       : null;
   return {
     status: payment.status,
-    checkoutUrl: payment.checkout_url,
-    mobileUrl: payment.checkout_mobile_url,
+    checkoutUrl: canShowCheckout ? payment.checkout_url : null,
+    mobileUrl: canShowCheckout ? payment.checkout_mobile_url : null,
     qrCodeDataUrl,
     qrIsPaymentQr: Boolean(payment.checkout_qr_string),
+    expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
     testMode,
   };
 }
@@ -86,11 +93,11 @@ export async function GET(
       kind as XenditPaymentKind
     );
     return Response.json({
-      payment: payment
+      payment: payment && payment.order_payment_status !== "rejected"
         ? await presentPayment(
             payment,
             url.searchParams.get("include_qr") === "1",
-            process.env.NODE_ENV !== "production"
+            isXenditTestMode()
           )
         : null,
       success: true,
@@ -141,6 +148,7 @@ export async function POST(
 
   try {
     const body: unknown = await request.json();
+    const action = body && typeof body === "object" && "action" in body ? body.action : undefined;
     const kind =
       body && typeof body === "object" && "payment_kind" in body
         ? (body.payment_kind === "balance" ? "balance" : body.payment_kind)
@@ -162,6 +170,24 @@ export async function POST(
       } catch {
         return Response.json({ error: "Invalid request origin.", success: false }, { status: 400 });
       }
+    }
+    if (action !== undefined && (kind !== "order" || (action !== "expire" && action !== "counter"))) {
+      return Response.json({ error: "Choose a valid checkout action.", success: false }, { status: 400 });
+    }
+    if (action === "counter") {
+      await switchExpiredXenditOrderToCounter(orderId);
+      return Response.json({ success: true });
+    }
+    if (action === "expire") {
+      const config = getXenditConfig();
+      await syncXenditPaymentStatus(orderId, "order", config.secretKey, true);
+      const payment = await getXenditPaymentRequest(orderId, "order");
+      return Response.json({
+        payment: payment && payment.order_payment_status !== "rejected"
+          ? await presentPayment(payment, true, config.mode === "test")
+          : null,
+        success: true,
+      });
     }
     const config = getXenditConfig(returnOrigin);
     const attempt = await prepareXenditPayment(

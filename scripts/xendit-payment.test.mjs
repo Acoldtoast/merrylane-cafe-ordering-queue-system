@@ -8,11 +8,13 @@ import { PGliteDatabase } from "../src/lib/db/pglite.ts";
 import {
   createXenditGcashRequest,
   getXenditConfig,
+  getXenditPaymentRequest,
   handleXenditWebhook,
   parseXenditWebhook,
   prepareXenditPayment,
   saveXenditPaymentRequest,
   syncXenditPaymentStatus,
+  switchExpiredXenditOrderToCounter,
   verifyXenditCallbackToken,
 } from "../src/lib/xenditPayments.ts";
 
@@ -97,6 +99,24 @@ test("only successful GCash captures in PHP are accepted for settlement", () => 
     () => parseXenditWebhook(captureEvent({ status: "FAILED" })),
     /successful/
   );
+});
+
+test("a rejected receipt cannot start or reuse a GCash checkout", async (t) => {
+  const db = await createDatabase(t);
+  await db.exec(`INSERT INTO orders (id, status, payment_method, payment_status, total)
+    VALUES (40, 'payment_pending', 'gcash', 'pending', 100),
+           (41, 'payment_pending', 'gcash', 'rejected', 100)`);
+  await prepareXenditPayment(40, "order");
+  await db.exec("UPDATE orders SET payment_status = 'rejected' WHERE id = 40");
+
+  for (const id of [40, 41]) {
+    await assert.rejects(prepareXenditPayment(id, "order"), {
+      status: 409,
+      message: /staff review/,
+    });
+  }
+  assert.equal((await getXenditPaymentRequest(40, "order"))?.order_payment_status, "rejected");
+  assert.equal(await getXenditPaymentRequest(41, "order"), undefined);
 });
 
 test("a verified Xendit capture confirms its pending order exactly once", async (t) => {
@@ -331,6 +351,56 @@ test("oversized Xendit QR payment data is rejected", async (t) => {
   );
 });
 
+test("the five-minute checkout allows cash or retry only after Xendit closes it", async (t) => {
+  const db = await createDatabase(t);
+  await db.exec(`INSERT INTO orders (id, status, payment_method, payment_status, total)
+    VALUES (48, 'payment_pending', 'gcash', 'pending', 100)`);
+  const attempt = await prepareXenditPayment(48, "order");
+  await saveXenditPaymentRequest(attempt.reference_id, "pr-expiring", "https://checkout.xendit.co/test", null, null);
+  const calls = [];
+  let cancelConfirmed = false;
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    const cancel = String(url).endsWith("/pr-expiring/cancel");
+    calls.push(options.method || "GET");
+    if (cancel && !cancelConfirmed) return Response.json({}, { status: 409 });
+    return Response.json({
+      payment_request_id: "pr-expiring",
+      reference_id: attempt.reference_id,
+      type: "PAY",
+      country: "PH",
+      currency: "PHP",
+      channel_code: "GCASH",
+      request_amount: 100,
+      status: cancel ? "CANCELED" : "REQUIRES_ACTION",
+    });
+  });
+  await assert.rejects(switchExpiredXenditOrderToCounter(48), { status: 409 });
+  assert.deepEqual(await syncXenditPaymentStatus(48, "order", "test-secret", true), { status: "pending" });
+  assert.deepEqual(calls, ["GET"]);
+  await db.exec("UPDATE xendit_payment_requests SET created_at = CURRENT_TIMESTAMP - INTERVAL '6 minutes'");
+  await assert.rejects(syncXenditPaymentStatus(48, "order", "test-secret", true), { status: 502 });
+  await assert.rejects(switchExpiredXenditOrderToCounter(48), { status: 409 });
+  assert.equal((await prepareXenditPayment(48, "order")).reference_id, attempt.reference_id);
+
+  cancelConfirmed = true;
+  assert.deepEqual(await syncXenditPaymentStatus(48, "order", "test-secret", true), { status: "expired" });
+  const retry = await prepareXenditPayment(48, "order");
+  assert.notEqual(retry.reference_id, attempt.reference_id);
+  await assert.rejects(switchExpiredXenditOrderToCounter(48), { status: 409 });
+  await db.prepare("UPDATE xendit_payment_requests SET status = 'expired', payment_request_id = $1 WHERE reference_id = $2")
+    .run("pr-retry", retry.reference_id);
+  const updateFirst = db.prepare("UPDATE xendit_payment_requests SET status = $1 WHERE reference_id = $2");
+  await updateFirst.run("succeeded_unapplied", attempt.reference_id);
+  await assert.rejects(switchExpiredXenditOrderToCounter(48), { status: 409 });
+  await updateFirst.run("expired", attempt.reference_id);
+  await switchExpiredXenditOrderToCounter(48);
+  await switchExpiredXenditOrderToCounter(48);
+  assert.deepEqual(await db.prepare("SELECT payment_method, payment_status, status, payment_reference FROM orders WHERE id = 48").get(), {
+    payment_method: "counter", payment_status: "pending", status: "pending", payment_reference: null,
+  });
+  await assert.rejects(prepareXenditPayment(48, "order"), { status: 400 });
+});
+
 test("development payment status sync settles only an authenticated matching success", async (t) => {
   const db = await createDatabase(t);
   await db.prepare(
@@ -384,8 +454,9 @@ test("development payment status sync settles only an authenticated matching suc
   assert.equal(order.payment_status, "pending");
 
   status = "SUCCEEDED";
+  await db.exec("UPDATE xendit_payment_requests SET created_at = CURRENT_TIMESTAMP - INTERVAL '6 minutes'");
   assert.deepEqual(
-    await syncXenditPaymentStatus(46, "order", "test-secret"),
+    await syncXenditPaymentStatus(46, "order", "test-secret", true),
     { status: "succeeded" }
   );
   order = await db.prepare(
@@ -442,6 +513,7 @@ test("development payment status sync does not settle a mismatched amount", asyn
 test("Xendit uses test credentials outside production and live credentials in production", (t) => {
   const names = [
     "NODE_ENV",
+    "XENDIT_TEST_MODE",
     "XENDIT_TEST_SECRET_KEY",
     "XENDIT_SECRET_KEY",
     "XENDIT_WEBHOOK_TOKEN",
@@ -458,6 +530,7 @@ test("Xendit uses test credentials outside production and live credentials in pr
   });
 
   process.env.NODE_ENV = "development";
+  delete process.env.XENDIT_TEST_MODE;
   process.env.XENDIT_TEST_SECRET_KEY = "test-key";
   process.env.XENDIT_SECRET_KEY = "live-key";
   process.env.XENDIT_WEBHOOK_TOKEN = "callback-token";
@@ -496,4 +569,17 @@ test("Xendit uses test credentials outside production and live credentials in pr
     mode: "live",
   });
   assert.equal(getXenditConfig("http://localhost:3112").appUrl, "https://cafe.example");
+
+  process.env.XENDIT_TEST_MODE = "true";
+  delete process.env.XENDIT_SECRET_KEY;
+  process.env.APP_URL = "http://localhost:3112";
+  assert.deepEqual(getXenditConfig(), {
+    secretKey: "test-key",
+    callbackToken: "callback-token",
+    appUrl: "http://localhost:3112",
+    mode: "test",
+  });
+
+  process.env.XENDIT_TEST_MODE = "yes";
+  assert.throws(() => getXenditConfig(), /XENDIT_TEST_MODE must be "true" or "false"/);
 });

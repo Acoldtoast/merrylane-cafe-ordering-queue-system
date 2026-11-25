@@ -12,6 +12,7 @@ import type { MenuExtra, MenuItem, MenuVariant } from "@/lib/types";
 import { peso } from "@/lib/format";
 import { CUSTOMER_ITEM_LIMIT_MESSAGE, remainingCustomerQuantity } from "@/lib/customerQuantity";
 import { useQuantityLimitWarning } from "@/lib/useQuantityLimitWarning";
+import { priceWithVat } from "@/lib/vat";
 
 type FormValues = {
   selectedVariants: Record<string, number>;
@@ -25,17 +26,15 @@ export function ItemClient({
   item,
   initialTable,
   editKey = null,
-  vatInclusive = true,
 }: {
   item: MenuItem;
   initialTable: number;
   editKey?: string | null;
-  vatInclusive?: boolean;
 }) {
   const router = useRouter();
   const feedback = useFeedback();
   const { warningKey, warn } = useQuantityLimitWarning<number>();
-  const { setTable, addItem, updateCartItem, items, ready, orderType } = useCustomer();
+  const { setTable, addItem, updateCartItem, items, ready, orderType, vatRatePct } = useCustomer();
 
   useEffect(() => {
     setTable(initialTable);
@@ -148,10 +147,12 @@ export function ItemClient({
       quantity,
     }) !== editBaseline;
 
-  const unitPrice =
+  const unitPrice = priceWithVat(
     Number(item.price) +
     activeVariants.reduce((sum, variant) => sum + Number(variant.price_modifier), 0) +
-    activeExtras.reduce((sum, extra) => sum + Number(extra.price_modifier), 0);
+    activeExtras.reduce((sum, extra) => sum + Number(extra.price_modifier), 0),
+    vatRatePct
+  );
 
   const toggleExtra = (extra: MenuExtra) => {
     updateForm((current) => ({
@@ -328,7 +329,7 @@ export function ItemClient({
           <div className="item-price-line">
             <strong key={unitPrice}>{peso(unitPrice)}</strong>
             <span>
-              {vatInclusive ? "VAT inclusive" : "Prices exclude VAT"} · made to order
+              {vatRatePct > 0 ? `Includes ${vatRatePct}% VAT · made to order` : "Made to order"}
             </span>
           </div>
 
@@ -382,7 +383,7 @@ export function ItemClient({
                     <span>
                       {variant.name}
                       {Number(variant.price_modifier) > 0 && (
-                        <small>+{peso(variant.price_modifier)}</small>
+                        <small>+{peso(priceWithVat(Number(variant.price_modifier), vatRatePct))}</small>
                       )}
                     </span>
                   </label>
@@ -429,7 +430,7 @@ export function ItemClient({
                     />
                     <span>
                       {extra.name}
-                      <em>+{peso(extra.price_modifier)}</em>
+                      <em>+{peso(priceWithVat(Number(extra.price_modifier), vatRatePct))}</em>
                     </span>
                   </label>
                 ))}

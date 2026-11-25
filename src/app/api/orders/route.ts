@@ -18,7 +18,8 @@ import {
   type DiscountRecipient,
 } from "@/lib/orderDiscount";
 import { CUSTOMER_ITEM_LIMIT_MESSAGE, remainingCustomerQuantity } from "@/lib/customerQuantity";
-import { parseServiceChargePct } from "@/lib/serviceCharge";
+import { calculateServiceCharge, parseServiceChargePct } from "@/lib/serviceCharge";
+import { finalizeTotals, orderVatConfig, priceWithVat } from "@/lib/vat";
 
 const SUGAR_LEVELS = new Set(["0%", "25%", "50%", "75%", "100%"]);
 const DATA_IMAGE_PATTERN =
@@ -251,7 +252,8 @@ export async function POST(request: Request) {
       }
     }
 
-    if (!(await SettingsModel.isOrderingOpen())) {
+    const ordering = await SettingsModel.orderingWindow();
+    if (!ordering.open) {
       return Response.json(
         {
           error:
@@ -260,6 +262,15 @@ export async function POST(request: Request) {
         },
         { status: 403 }
       );
+    }
+    const vat = await SettingsModel.menuVatConfig();
+    const vatRate = vat.mode === "add" ? vat.rate : 0;
+    if (body.menu_vat_pct !== undefined && body.menu_vat_pct !== vatRate) {
+      return Response.json({
+        error: "The menu VAT rate changed. Review your updated prices before placing the order.",
+        code: "VAT_RATE_CHANGED",
+        success: false,
+      }, { status: 409 });
     }
 
     const priced: {
@@ -336,13 +347,15 @@ export async function POST(request: Request) {
           : null;
       const note = line.note ? String(line.note).trim().slice(0, 180) : null;
 
-      const unitPrice =
+       const unitPrice = priceWithVat(
         Number(menuItem.price) +
         finalVariants.reduce(
           (sum, variant) => sum + Number(variant?.price_modifier || 0),
           0
         ) +
-        selectedExtras.reduce((sum, extra) => sum + Number(extra.price_modifier), 0);
+         selectedExtras.reduce((sum, extra) => sum + Number(extra.price_modifier), 0),
+         vatRate
+       );
 
       priced.push({
         item: menuItem,
@@ -365,8 +378,8 @@ export async function POST(request: Request) {
     const servicePct = parseServiceChargePct(
       await SettingsModel.get("service_charge_pct")
     );
-    const serviceCharge = Math.round(subtotal * (servicePct / 100) * 100) / 100;
-    const total = Math.round((subtotal + serviceCharge) * 100) / 100;
+    const serviceCharge = calculateServiceCharge(subtotal, servicePct);
+    const totals = finalizeTotals(subtotal + serviceCharge, vat);
     if (preview) {
       for (const [menuItemId, quantity] of requestedByItem) {
         const item = priced.find((line) => line.item.id === menuItemId)?.item;
@@ -386,7 +399,12 @@ export async function POST(request: Request) {
       return Response.json({
         subtotal,
         service_charge: serviceCharge,
-        total,
+        total: totals.total,
+        vat_mode: vat.mode,
+        vat_rate_pct: vat.rate,
+        vat_amount: totals.vat_amount,
+        rounding_adjustment: totals.rounding_adjustment,
+        menu_vat_pct: vatRate,
         success: true,
       });
     }
@@ -400,7 +418,11 @@ export async function POST(request: Request) {
         customer_name: customerName,
         subtotal,
         service_charge: serviceCharge,
-        total,
+        total: totals.total,
+        vat_mode: totals.vat_mode,
+        vat_rate_pct: totals.vat_rate_pct,
+        vat_amount: totals.vat_amount,
+        rounding_adjustment: totals.rounding_adjustment,
         remarks: remarks?.trim() || undefined,
         status: payment_method === "gcash" ? "payment_pending" : "pending",
         payment_proof_url:
@@ -408,7 +430,7 @@ export async function POST(request: Request) {
         payment_reference:
           payment_method === "gcash" && paymentReference ? paymentReference : null,
         payment_amount:
-          payment_method === "gcash" && paymentProof ? total : null,
+          payment_method === "gcash" && paymentProof ? totals.total : null,
         guest_id: guestId,
       },
       items: priced.map((line) => ({
@@ -433,7 +455,7 @@ export async function POST(request: Request) {
       orderId: result.orderId,
       orderNumber:
         (await OrderModel.byId(result.orderId))?.order_number ?? result.orderId,
-      total,
+      total: totals.total,
       status: payment_method === "gcash" ? "payment_pending" : "pending",
       success: true,
       message: "Order placed successfully.",
@@ -596,15 +618,18 @@ export async function PATCH(request: Request) {
           discounts.reduce((sum, discount) => sum + discount.discount_amount, 0) *
             100
         ) / 100;
+      const vat = orderVatConfig(order) || (await SettingsModel.menuVatConfig());
+      const totals = finalizeTotals(
+        Number(order.subtotal) + Number(order.service_charge) - discountAmount,
+        vat
+      );
       updates.discount_amount = discountAmount;
       updates.discounts_json = discounts.length ? JSON.stringify(discounts) : null;
-      updates.total =
-        Math.round(
-          (Number(order.subtotal) +
-            Number(order.service_charge) -
-            discountAmount) *
-            100
-        ) / 100;
+      updates.total = totals.total;
+      updates.vat_mode = totals.vat_mode;
+      updates.vat_rate_pct = totals.vat_rate_pct;
+      updates.vat_amount = totals.vat_amount;
+      updates.rounding_adjustment = totals.rounding_adjustment;
       if (order.payment_method === "gcash" && order.payment_status === "rejected") {
         updates.payment_proof_url = null;
         updates.payment_reference = null;

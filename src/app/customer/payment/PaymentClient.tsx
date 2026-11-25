@@ -25,6 +25,11 @@ interface CheckoutQuote {
   subtotal: number;
   service_charge: number;
   total: number;
+  vat_mode: "none" | "add" | "included";
+  vat_rate_pct: number;
+  vat_amount: number;
+  rounding_adjustment: number;
+  menu_vat_pct: number;
 }
 
 interface XenditPaymentState {
@@ -34,6 +39,7 @@ interface XenditPaymentState {
   qrCodeDataUrl: string | null;
   qrIsPaymentQr: boolean;
   testMode: boolean;
+  expiresAt: number | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -49,11 +55,12 @@ function parseXenditPayment(value: unknown): XenditPaymentState | null {
     throw new Error("Xendit returned an invalid payment response.");
   }
 
-  const { checkoutUrl, mobileUrl, qrCodeDataUrl } = value.payment;
+  const { checkoutUrl, mobileUrl, qrCodeDataUrl, expiresAt } = value.payment;
   if (
     (checkoutUrl !== null && typeof checkoutUrl !== "string") ||
     (mobileUrl !== null && typeof mobileUrl !== "string") ||
     (qrCodeDataUrl !== null && typeof qrCodeDataUrl !== "string") ||
+    (expiresAt !== null && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt))) ||
     typeof value.payment.qrIsPaymentQr !== "boolean" ||
     typeof value.payment.testMode !== "boolean"
   ) {
@@ -81,6 +88,7 @@ function parseXenditPayment(value: unknown): XenditPaymentState | null {
     checkoutUrl,
     mobileUrl,
     qrCodeDataUrl,
+    expiresAt,
     qrIsPaymentQr: value.payment.qrIsPaymentQr,
     testMode: value.payment.testMode,
   };
@@ -116,6 +124,7 @@ export function PaymentClient({
     clearCart,
     setLastOrderId,
     ready,
+    vatRatePct,
   } = useCustomer();
   const [order, setOrder] = useState<Order | null>(null);
   const [checkoutDraft, setCheckoutDraft] = useState<GcashCheckoutDraft | null>(
@@ -126,6 +135,8 @@ export function PaymentClient({
   const [error, setError] = useState("");
   const [paymentRefreshError, setPaymentRefreshError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [switchingToCash, setSwitchingToCash] = useState(false);
+  const [clock, setClock] = useState(() => Date.now());
   const [payment, setPayment] = useState<XenditPaymentState | null>(null);
   const [createdOrderId, setCreatedOrderId] = useState(0);
   const completionHandled = useRef(false);
@@ -193,7 +204,8 @@ export function PaymentClient({
             table_number: initialTable,
             order_type: draft.orderType || orderType,
             payment_method: "gcash",
-            customer_name: draft.customerName,
+             customer_name: draft.customerName,
+             menu_vat_pct: vatRatePct,
             remarks: draft.remarks,
             items: requestItems,
           }),
@@ -211,6 +223,11 @@ export function PaymentClient({
             subtotal: Number(quoteData.subtotal),
             service_charge: Number(quoteData.service_charge),
             total: Number(quoteData.total),
+            vat_mode: quoteData.vat_mode,
+            vat_rate_pct: Number(quoteData.vat_rate_pct),
+            vat_amount: Number(quoteData.vat_amount),
+            rounding_adjustment: Number(quoteData.rounding_adjustment),
+            menu_vat_pct: Number(quoteData.menu_vat_pct),
           });
         })
         .catch((cause: unknown) => {
@@ -241,13 +258,17 @@ export function PaymentClient({
         if (!orderResponse.ok || !orderData.order) {
           throw new Error(orderData.error || "Order not found.");
         }
-        const paymentData = await readXenditPayment(paymentResponse);
         setOrder(orderData.order);
-        if (paymentData) setPayment(paymentData);
-        if (orderData.order.status === "cancelled") {
+        if (orderData.order.status === "cancelled" || orderData.order.payment_status === "rejected") {
           router.replace(`/customer/status?id=${activeOrderId}&table=${initialTable}`);
           return;
         }
+        if (!balancePayment && orderData.order.payment_method !== "gcash") {
+          router.replace(`/customer/confirm?id=${activeOrderId}&table=${initialTable}`);
+          return;
+        }
+        const paymentData = await readXenditPayment(paymentResponse);
+        if (paymentData) setPayment(paymentData);
         if (balancePayment && Number(orderData.order.balance_due || 0) <= 0) {
           router.replace(`/customer/status?id=${activeOrderId}&table=${initialTable}`);
         } else if (!balancePayment && orderData.order.payment_status === "verified") {
@@ -269,6 +290,7 @@ export function PaymentClient({
     ready,
     cartItems,
     orderType,
+    vatRatePct,
   ]);
 
   const startPayment = useCallback(async () => {
@@ -299,6 +321,7 @@ export function PaymentClient({
               order_type: checkoutDraft?.orderType,
               payment_method: "gcash",
               customer_name: checkoutDraft?.customerName,
+              menu_vat_pct: checkoutQuote?.menu_vat_pct,
               remarks: checkoutDraft?.remarks,
               items: cartItems.map((item) => ({
                 menuItemId: item.menuItemId,
@@ -312,6 +335,7 @@ export function PaymentClient({
         });
         const data = await response.json();
         if (!response.ok || !data.success) {
+            if (data.code === "VAT_RATE_CHANGED") setCheckoutQuote(null);
             throw new Error(data.error || "Could not create the order.");
         }
         checkoutOrderId = Number(data.orderId);
@@ -337,7 +361,7 @@ export function PaymentClient({
         }
       );
       const newPayment = await readXenditPayment(response);
-      if (!newPayment?.checkoutUrl) {
+       if (!newPayment || (!newPayment.checkoutUrl && newPayment.expiresAt === null)) {
         throw new Error("Xendit did not return checkout options.");
       }
       setPayment(newPayment);
@@ -386,7 +410,7 @@ export function PaymentClient({
                 order.payment_status === "verified" &&
                 !hasPendingBalancePayment
               : order.payment_method === "gcash" &&
-                order.payment_status !== "verified")
+                 order.payment_status === "pending")
         );
 
   useEffect(() => {
@@ -418,9 +442,16 @@ export function PaymentClient({
     if (!activeOrderId || payment?.status !== "pending") return;
     try {
       const kind = balancePayment ? "balance" : "order";
-      const paymentResponse = await fetchPortalApi(
-        `/api/orders/${activeOrderId}/xendit-payment?payment_kind=${kind}&refresh=1`,
-        { cache: "no-store" }
+      const expired = payment.expiresAt !== null && Date.now() >= payment.expiresAt;
+      const paymentResponse = await (expired ? fetch : fetchPortalApi)(
+        expired
+          ? `/api/orders/${activeOrderId}/xendit-payment`
+          : `/api/orders/${activeOrderId}/xendit-payment?payment_kind=${kind}&refresh=1`,
+        expired ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "expire", payment_kind: kind }),
+        } : { cache: "no-store" }
       );
       const latestPayment = await readXenditPayment(paymentResponse);
       if (!latestPayment) {
@@ -429,7 +460,9 @@ export function PaymentClient({
       setPayment((current) => ({
         ...latestPayment,
         qrCodeDataUrl:
-          latestPayment.qrCodeDataUrl || current?.qrCodeDataUrl || null,
+          latestPayment.qrCodeDataUrl ||
+          (latestPayment.status === "pending" && current?.expiresAt === latestPayment.expiresAt
+            ? current?.qrCodeDataUrl || null : null),
       }));
 
       const orderResponse = await fetchPortalApi(
@@ -442,6 +475,14 @@ export function PaymentClient({
       }
       setOrder(orderData.order);
       setPaymentRefreshError("");
+      if (orderData.order.status === "cancelled" || orderData.order.payment_status === "rejected") {
+        router.replace(`/customer/status?id=${activeOrderId}&table=${initialTable}`);
+        return;
+      }
+      if (!balancePayment && orderData.order.payment_method !== "gcash") {
+        router.replace(`/customer/confirm?id=${activeOrderId}&table=${initialTable}`);
+        return;
+      }
 
       const paymentComplete = balancePayment
         ? Number(orderData.order.balance_due || 0) <= 0
@@ -472,6 +513,7 @@ export function PaymentClient({
     balancePayment,
     clearCart,
     initialTable,
+    payment?.expiresAt,
     payment?.status,
     router,
     setLastOrderId,
@@ -482,6 +524,41 @@ export function PaymentClient({
     immediate: false,
     resources: ["orders", "payments"],
   });
+
+  useEffect(() => {
+    if (payment?.status !== "pending" || payment.expiresAt === null) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [payment?.status, payment?.expiresAt]);
+
+  const remainingSeconds = payment?.expiresAt != null
+    ? Math.max(0, Math.min(300, Math.ceil((payment.expiresAt - clock) / 1_000)))
+    : null;
+  const canSwitchToCash = !balancePayment && Boolean(
+    order?.payment_method === "gcash" && order.payment_status === "pending" &&
+    (order.status === "pending" || order.status === "payment_pending") &&
+    payment?.status === "expired"
+  );
+  const switchToCash = async () => {
+    if (!canSwitchToCash || submitting || switchingToCash) return;
+    setSwitchingToCash(true);
+    setError("");
+    try {
+      const response = await fetchPortalApi(`/api/orders/${activeOrderId}/xendit-payment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "counter" }),
+      });
+      const data: unknown = await response.json();
+      if (!response.ok || !isRecord(data) || data.success !== true) {
+        throw new Error(isRecord(data) && typeof data.error === "string" ? data.error : "Could not switch to cash.");
+      }
+      router.replace(`/customer/confirm?id=${activeOrderId}&table=${initialTable}`);
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : "Could not switch to cash.");
+      setSwitchingToCash(false);
+    }
+  };
 
   const amountDue = order
     ? balancePayment
@@ -541,7 +618,10 @@ export function PaymentClient({
     );
   }
 
-  if (loading) {
+  if (
+    loading || order?.payment_status === "rejected" || order?.status === "cancelled" ||
+    (!balancePayment && order && order.payment_method !== "gcash")
+  ) {
     return <CustomerPageSkeleton />;
   }
 
@@ -609,8 +689,7 @@ export function PaymentClient({
         <div className="payment-note" style={{ marginBottom: 12 }}>
           <Icon name="clock" />
           <span>
-            This payment is already waiting for staff review. You do not need to
-            submit it again.
+            An earlier payment is under review. Please don&apos;t pay it again.
           </span>
         </div>
       )}
@@ -631,8 +710,19 @@ export function PaymentClient({
             />
           </div>
 
-          {payment?.status === "pending" && (
+          {payment?.status === "pending" && remainingSeconds === 0 && (
+            <p className="payment-note" role="status">
+              Time is up. We&apos;re checking with Xendit. Please don&apos;t pay again yet.
+            </p>
+          )}
+          {payment?.status === "pending" && remainingSeconds !== 0 && (
             <>
+              <p className="muted">Xendit confirms your GCash payment automatically. No screenshot is needed.</p>
+              {remainingSeconds !== null && (
+                <p className="muted">
+                  Time left: {Math.floor(remainingSeconds / 60)}:{String(remainingSeconds % 60).padStart(2, "0")}
+                </p>
+              )}
               <div className="qr-shell" style={{ marginTop: 18 }}>
                 {payment.qrCodeDataUrl ? (
                   <div className="qr-frame">
@@ -670,7 +760,12 @@ export function PaymentClient({
               </div>
             </>
           )}
-          {payment && ["failed", "expired"].includes(payment.status) && (
+          {payment?.status === "expired" && !balancePayment ? (
+            <div className="error-strip" role="status" style={{ marginTop: 18 }}>
+              <strong>GCash checkout expired.</strong> Retry GCash or pay cash at the counter.
+              If GCash already deducted the amount, ask staff to check before paying again.
+            </div>
+          ) : payment && ["failed", "expired"].includes(payment.status) && (
             <div className="error-strip" role="alert" style={{ marginTop: 18 }}>
               This Xendit checkout {payment.status}. Start a new checkout to try again.
             </div>
@@ -704,13 +799,20 @@ export function PaymentClient({
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={submitting}
+                  disabled={submitting || switchingToCash}
                   onClick={() => void startPayment()}
                 >
-                  {payment?.status === "failed" || payment?.status === "expired"
+                  {payment?.status === "expired" && !balancePayment
+                    ? "Retry GCash"
+                    : payment?.status === "failed" || payment?.status === "expired"
                     ? "Try GCash again"
                     : "Retry GCash checkout"}{" "}
                   <Icon name="arrow-right" className="icon-sm" />
+                </button>
+              )}
+              {canSwitchToCash && !submitting && (
+                <button type="button" className="btn btn-outline" onClick={() => void switchToCash()} disabled={switchingToCash}>
+                  {switchingToCash ? "Switching to cash…" : "Pay cash at the counter"}
                 </button>
               )}
             </div>
@@ -777,7 +879,12 @@ export function PaymentClient({
             ) : order ? (
               <>
                 <div className="totals-row">
-                  <span>Subtotal</span>
+                  <span>
+                    Subtotal
+                    {Number(order.vat_amount || 0) > 0
+                      ? ` (includes ${Number(order.vat_rate_pct || 0)}% VAT)`
+                      : ""}
+                  </span>
                   <span>{peso(order.subtotal)}</span>
                 </div>
                 <div className="totals-row">
@@ -790,25 +897,60 @@ export function PaymentClient({
                     <span>−{peso(order.discount_amount || 0)}</span>
                   </div>
                 )}
+                {Number(order.rounding_adjustment || 0) !== 0 && (
+                  <div className="totals-row">
+                    <span>Rounding</span>
+                    <span>
+                      {Number(order.rounding_adjustment) > 0 ? "+" : "−"}
+                      {peso(Math.abs(Number(order.rounding_adjustment)))}
+                    </span>
+                  </div>
+                )}
                 <div className="totals-row total">
                   <span>Total</span>
                   <span>{peso(order.total)}</span>
                 </div>
+                {Number(order.vat_amount || 0) > 0 && (
+                  <div className="totals-row">
+                    <span>VAT included</span>
+                    <span>{peso(order.vat_amount || 0)}</span>
+                  </div>
+                )}
               </>
             ) : (
               <>
                 <div className="totals-row">
-                  <span>Subtotal</span>
+                  <span>
+                    Subtotal
+                    {Number(checkoutQuote?.vat_amount || 0) > 0
+                      ? ` (includes ${Number(checkoutQuote?.vat_rate_pct || 0)}% VAT)`
+                      : ""}
+                  </span>
                   <span>{peso(checkoutQuote?.subtotal || 0)}</span>
                 </div>
                 <div className="totals-row">
                   <span>Service charge</span>
                   <span>{peso(checkoutQuote?.service_charge || 0)}</span>
                 </div>
+                {Number(checkoutQuote?.rounding_adjustment || 0) !== 0 && (
+                  <div className="totals-row">
+                    <span>Rounding</span>
+                    <span>
+                      {Number(checkoutQuote?.rounding_adjustment) > 0 ? "+" : "−"}
+                      {peso(Math.abs(Number(checkoutQuote?.rounding_adjustment)))}
+                    </span>
+                  </div>
+                )}
                 <div className="totals-row total">
                   <span>Total</span>
                   <span>{peso(amountDue)}</span>
                 </div>
+                {Number(checkoutQuote?.vat_amount || 0) > 0 && (
+                  <div className="totals-row">
+                    <span>VAT included</span>
+                    <span>{peso(checkoutQuote?.vat_amount || 0)}</span>
+                  </div>
+                )}
               </>
             )}
           </div>

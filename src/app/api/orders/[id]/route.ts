@@ -60,7 +60,7 @@ export async function DELETE(
     }
     return Response.json(
       {
-        error: "This order can no longer be cancelled because payment was confirmed or preparation has started.",
+        error: "Only active orders awaiting payment can be cancelled.",
         success: false,
       },
       { status: 409 }

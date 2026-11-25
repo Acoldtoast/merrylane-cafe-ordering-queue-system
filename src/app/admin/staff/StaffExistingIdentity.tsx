@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { StaffFaceCamera } from "./StaffFaceCamera";
 import { StaffFacePhotoPreview } from "./StaffFacePhotoPreview";
 import Image from "next/image";
@@ -8,10 +8,14 @@ import { checkStaffIdName, checkStaffIdNumber, staffIdentityReviewCheck } from "
 import { staffIdCheckLabel, type StaffIdCheckTone } from "@/lib/staffIdCheckLabels";
 import { useStaffIdDuplicateCheck } from "@/lib/useStaffIdDuplicateCheck";
 import { StaffIdentityUpdate } from "./StaffIdentityUpdate";
+import { StaffIdentityUpdateSuccess } from "./StaffIdentityUpdateSuccess";
 
 const poses = [["face_front", "Straight on"], ["face_left", "Turn left"], ["face_right", "Turn right"]] as const;
 
 export function StaffExistingIdentity({ userId, name }: { userId: number; name: string }) {
+  const idViewerRef = useRef<HTMLDialogElement>(null);
+  const idViewerCloseRef = useRef<HTMLButtonElement>(null);
+  const activeImageTriggerRef = useRef<HTMLButtonElement>(null);
   const [registered, setRegistered] = useState<boolean | null>(null);
   const [identityStatus, setIdentityStatus] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -27,12 +31,22 @@ export function StaffExistingIdentity({ userId, name }: { userId: number; name: 
   const [details, setDetails] = useState({ name: "", number: "", birth_date: "" });
   const [reviewOpen, setReviewOpen] = useState(false);
   const [detailsLocked, setDetailsLocked] = useState(false);
+  const [updateSuccess, setUpdateSuccess] = useState(false);
   const [idUpdateOpen, setIdUpdateOpen] = useState(false);
   const [draftReview, setDraftReview] = useState(false);
   const [identityTab, setIdentityTab] = useState<"face" | "id">("face");
   const duplicate = useStaffIdDuplicateCheck(idType, details.number, draftReview);
   const faceComplete = poses.every(([key]) => Boolean(files[key]));
   const idComplete = Boolean(files.id_front);
+
+  function openIdViewer(trigger: HTMLButtonElement) {
+    activeImageTriggerRef.current = trigger;
+    const viewer = idViewerRef.current;
+    if (!viewer) return;
+    if (!viewer.open) viewer.showModal();
+    idViewerCloseRef.current?.focus();
+  }
+
   useEffect(() => {
     let active = true;
     fetch(`/api/admin/staff/${userId}/identity`, { cache: "no-store" })
@@ -69,6 +83,7 @@ export function StaffExistingIdentity({ userId, name }: { userId: number; name: 
 
   async function loadReview() {
     setReviewOpen(true); setMessage(""); setReview(null);
+    setUpdateSuccess(false);
     try {
       const response = await fetch(`/api/admin/staff/${userId}/identity?review=1`, { cache: "no-store" });
       const data = await response.json();
@@ -117,7 +132,12 @@ export function StaffExistingIdentity({ userId, name }: { userId: number; name: 
     <div className="staff-identity-group">
       <h4>Identity registration</h4>
       <p>{registered === null ? "Checking status…" : registered ? identityStatus === "verified" ? "Identity status · Verified" : "Images on file · awaiting review" : "ID and face photos not registered."}</p>
-      {message && <p role="status">{message}</p>}
+      {message && (updateSuccess
+        ? <StaffIdentityUpdateSuccess
+            title="ID update verified and saved"
+            message="The new ID matched the registered face. The staff member must complete a fresh duty face check when face checking is enabled."
+          />
+        : <p role="status">{message}</p>)}
       {registered === false && <button type="button" className="btn btn-outline btn-sm" onClick={() => { setMessage(""); setIdentityTab("face"); setOpen(true); }}>Register ID and face</button>}
       {registered === true && <button type="button" className="btn btn-outline btn-sm" onClick={() => void loadReview()}>Review ID details</button>}
       {open && draftReview && (
@@ -164,7 +184,7 @@ export function StaffExistingIdentity({ userId, name }: { userId: number; name: 
               {review && <>
                 <p>{review.status === "verified" ? "Verified" : detailsLocked ? "Saved for review" : review.status.replaceAll("_", " ")} · {review.id_type?.replaceAll("_", " ") || "ID type not recorded"}</p>
                 <div className="staff-create-grid">
-                  {([["Front of ID", review.id_front], ["Back of ID", review.id_back]] as const).map(([label, image]) => <div className="staff-identity-id-side" key={label}><strong>{label}</strong>{image ? <Image src={image} alt={label} width={400} height={250} unoptimized style={{ width: "100%", height: "auto", objectFit: "contain" }} /> : <p>Not provided</p>}</div>)}
+                  {([["Front of ID", review.id_front], ["Back of ID", review.id_back]] as const).map(([label, image]) => <div className="staff-identity-id-side" key={label}><strong>{label}</strong>{image ? <button type="button" className="staff-profile-id-view-trigger" aria-label={`View ${label.toLowerCase()}`} onClick={(event) => openIdViewer(event.currentTarget)}><Image src={image} alt={label} width={400} height={250} unoptimized style={{ width: "100%", height: "auto", objectFit: "contain" }} /></button> : <p>Not provided</p>}</div>)}
                 </div>
                 <div className="staff-identity-group">
                   <h4>Review ID details</h4>
@@ -189,13 +209,62 @@ export function StaffExistingIdentity({ userId, name }: { userId: number; name: 
                     ].map(([label, status]) => <div className="staff-id-check" key={label}><strong>{label}</strong><span>{status}</span></div>)}
                   </div>
                   {detailsLocked ? (
-                    <button type="button" className="btn btn-outline btn-sm" onClick={() => { setReviewOpen(false); setIdUpdateOpen(true); }}>
-                      Update ID
-                    </button>
+                    <div className="staff-id-update-actions">
+                      <button type="button" className="btn btn-outline btn-sm" onClick={() => { setReviewOpen(false); setIdUpdateOpen(true); }}>
+                        Update ID
+                      </button>
+                    </div>
                   ) : <p>Save and review the current ID details before updating the ID.</p>}
                 </div>
               </>}
             </div>
+            {review && (
+              <dialog
+                ref={idViewerRef}
+                className="staff-profile-id-viewer"
+                aria-labelledby="admin-staff-id-viewer-title"
+                onClick={(event) => {
+                  if (event.target === event.currentTarget) event.currentTarget.close();
+                }}
+                onClose={() => activeImageTriggerRef.current?.focus()}
+              >
+                <div className="modal-head">
+                  <h2 id="admin-staff-id-viewer-title">
+                    ID — {details.name || name}
+                  </h2>
+                  <button
+                    ref={idViewerCloseRef}
+                    type="button"
+                    aria-label="Close ID viewer"
+                    onClick={() => idViewerRef.current?.close()}
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="staff-profile-id-viewer-body">
+                  <p>
+                    {review.status === "verified" ? "Verified" : detailsLocked ? "Saved for review" : review.status.replaceAll("_", " ")} · {review.id_type?.replaceAll("_", " ") || "ID type not recorded"}
+                  </p>
+                  <div className="staff-profile-id-viewer-images">
+                    <figure>
+                      <figcaption>Front of ID</figcaption>
+                      <Image src={review.id_front} alt="Front of staff ID" width={1280} height={800} unoptimized />
+                    </figure>
+                    <figure>
+                      <figcaption>Back of ID</figcaption>
+                      {review.id_back ? (
+                        <Image src={review.id_back} alt="Back of staff ID" width={1280} height={800} unoptimized />
+                      ) : <p className="staff-profile-id-missing">No back image was provided.</p>}
+                    </figure>
+                  </div>
+                  <div className="account-profile-details staff-profile-details">
+                    <div><span>Name on ID</span><strong>{details.name || "Not provided"}</strong></div>
+                    <div><span>ID number</span><strong>{details.number || "Not provided"}</strong></div>
+                    <div><span>Date of birth</span><strong>{details.birth_date || "Not provided"}</strong></div>
+                  </div>
+                </div>
+              </dialog>
+            )}
           </section>
         </div>
       )}
@@ -205,6 +274,7 @@ export function StaffExistingIdentity({ userId, name }: { userId: number; name: 
         onClose={() => setIdUpdateOpen(false)}
         onUpdated={() => {
           setIdUpdateOpen(false);
+          setUpdateSuccess(true);
           setMessage("ID updated. The staff member must verify their face again.");
         }}
       />}

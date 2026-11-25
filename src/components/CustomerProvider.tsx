@@ -11,6 +11,7 @@ import {
 } from "react";
 import type { CartExtra, CartItem } from "@/lib/types";
 import { limitSavedCart, remainingCustomerQuantity } from "@/lib/customerQuantity";
+import { priceWithVat } from "@/lib/vat";
 
 const CART_KEY = "merrylane.cart.v2";
 const TABLE_KEY = "merrylane.table";
@@ -49,6 +50,7 @@ interface CustomerContextValue {
   setStockLimits: (limits: Record<number, number | null>) => void;
   count: number;
   subtotal: number;
+  vatRatePct: number;
   lastOrderId: number | null;
   legacyOrderId: number | null;
   setLastOrderId: (id: number | null) => void;
@@ -163,7 +165,7 @@ function useHydrated(): boolean {
   );
 }
 
-export function CustomerProvider({ children }: { children: React.ReactNode }) {
+export function CustomerProvider({ children, vatRatePct = 0 }: { children: React.ReactNode; vatRatePct?: number }) {
   /*
    * Storage is only read once the server markup has hydrated. The server
    * snapshot stays false so the first client render still matches it; the saved
@@ -376,9 +378,16 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
     () => items.reduce((sum, item) => sum + item.quantity, 0),
     [items]
   );
+  // Keep saved cart prices before VAT so a settings change cannot stack tax.
+  const pricedItems = useMemo(
+    () => vatRatePct > 0
+      ? items.map((item) => ({ ...item, unitPrice: priceWithVat(item.unitPrice, vatRatePct) }))
+      : items,
+    [items, vatRatePct]
+  );
   const subtotal = useMemo(
-    () => items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0),
-    [items]
+    () => pricedItems.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0),
+    [pricedItems]
   );
 
   const value = useMemo(
@@ -387,7 +396,7 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
       setTable,
       orderType,
       setOrderType,
-      items,
+      items: pricedItems,
       addItem,
       updateCartItem,
       setQuantity,
@@ -396,6 +405,7 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
       setStockLimits,
       count,
       subtotal,
+      vatRatePct,
       lastOrderId,
       legacyOrderId,
       setLastOrderId,
@@ -406,7 +416,7 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
       setTable,
       orderType,
       setOrderType,
-      items,
+      pricedItems,
       addItem,
       updateCartItem,
       setQuantity,
@@ -415,6 +425,7 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
       setStockLimits,
       count,
       subtotal,
+      vatRatePct,
       lastOrderId,
       legacyOrderId,
       setLastOrderId,

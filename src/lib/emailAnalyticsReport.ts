@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/db";
+import { ensureOrderColumns } from "@/lib/models";
 
 const SALES_STATUSES = "'ready','completed'";
 
@@ -11,6 +12,8 @@ interface EmailAnalyticsProduct {
 export interface EmailAnalyticsReport {
   summary: {
     revenue: number;
+    vat_amount: number;
+    net_sales: number;
     order_count: number;
     average_order_value: number;
     average_rating: number;
@@ -46,6 +49,7 @@ export async function buildAnalyticsReportForEmail(
     throw new Error("The requested email report date range is invalid.");
   }
 
+  await ensureOrderColumns();
   const db = getDb();
   const dayCount =
     (Date.parse(`${end}T00:00:00.000Z`) -
@@ -58,6 +62,7 @@ export async function buildAnalyticsReportForEmail(
     .prepare(
       `SELECT COUNT(*) AS order_count,
               COALESCE(SUM(total), 0) AS revenue,
+              COALESCE(SUM(vat_amount), 0) AS vat_amount,
               COALESCE(AVG(total), 0) AS average_order_value
        FROM orders
        WHERE status IN (${SALES_STATUSES}) AND ready_at IS NOT NULL
@@ -67,6 +72,7 @@ export async function buildAnalyticsReportForEmail(
     .get(start, end)) as {
     order_count: number;
     revenue: number;
+    vat_amount: number;
     average_order_value: number;
   };
   const previous = (await db
@@ -142,6 +148,11 @@ export async function buildAnalyticsReportForEmail(
   return {
     summary: {
       revenue: Number(summary.revenue),
+      vat_amount: Number(summary.vat_amount || 0),
+      net_sales:
+        Math.round(
+          (Number(summary.revenue) - Number(summary.vat_amount || 0)) * 100
+        ) / 100,
       order_count: Number(summary.order_count),
       average_order_value: Number(summary.average_order_value),
       average_rating: Number(ratings.average_rating),

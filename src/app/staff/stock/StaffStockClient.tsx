@@ -11,6 +11,7 @@ import { useFeedback } from "@/components/Feedback";
 import type { MenuItem } from "@/lib/types";
 import { peso } from "@/lib/format";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
+import { isStockAmount, MAX_LOW_STOCK_THRESHOLD, MAX_STOCK_COUNT } from "@/lib/stockLimits";
 import { usePolling } from "@/lib/usePolling";
 
 type Filter = "all" | "low" | "out" | "available";
@@ -123,7 +124,6 @@ export function StaffStockClient() {
             stock_scope: item.stock_scope || "today",
             stock_count: stockCount,
             stock_tracking_enabled: trackingEnabled,
-            low_stock_threshold: item.low_stock_threshold,
           }),
         });
         const data = await response.json();
@@ -180,15 +180,16 @@ export function StaffStockClient() {
       return;
     }
     const stockCount = trackStock ? Number(form.stock_count) : null;
-    if (trackStock && (!Number.isSafeInteger(stockCount) || Number(stockCount) < 0)) {
-      setError("The number left must be a whole number of zero or more.");
+    if (trackStock && !isStockAmount(form.stock_count, MAX_STOCK_COUNT)) {
+      setError(`The number left must be a whole number from 0 to ${MAX_STOCK_COUNT}.`);
       return;
     }
-    const lowStockThreshold = Number(form.low_stock_threshold);
-    if (!Number.isSafeInteger(lowStockThreshold) || lowStockThreshold < 0) {
-      setError("The low-portion threshold must be a whole number of zero or more.");
+    const thresholdValue = form.low_stock_threshold || "0";
+    if (!isStockAmount(thresholdValue, MAX_LOW_STOCK_THRESHOLD)) {
+      setError(`The low-portion threshold must be a whole number from 0 to ${MAX_LOW_STOCK_THRESHOLD}.`);
       return;
     }
+    const lowStockThreshold = Number(thresholdValue);
     setBusyId(editing.id);
     setError("");
     const item = editing;
@@ -448,7 +449,7 @@ export function StaffStockClient() {
             </h2>
             <p id="stock-confirm-message" className="feedback-message">
               {confirming.action === "out"
-                ? "This sets the remaining count to zero and hides the item from customer ordering until it is available again."
+                ? "This sets the remaining count to zero. The item stays visible on the customer menu as Sold out and can’t be ordered until it’s available again."
                 : confirming.item.stock_tracking_enabled &&
                     confirming.item.stock_count <= 0
                   ? "Customers can order it again. The zero count will be cleared and tracking turned off until you enter a new count."
@@ -538,22 +539,25 @@ export function StaffStockClient() {
                   <input
                     id="stock-count"
                     className="input"
-                    type="number"
-                    min={0}
-                    step={1}
+                    type="text"
+                    inputMode="numeric"
+                    aria-describedby="stock-count-hint"
                     value={form.stock_count}
-                    onChange={(event) =>
-                      setForm((current) => ({
-                        ...current,
-                        stock_count: event.target.value,
-                      }))
-                    }
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      if (value === "" || isStockAmount(value, MAX_STOCK_COUNT)) {
+                        setForm((current) => ({ ...current, stock_count: value }));
+                      }
+                    }}
                     placeholder={
                       form.track_stock ? "Portions left" : "Not tracked"
                     }
                     disabled={!form.track_stock}
                     required={form.track_stock}
                   />
+                  <small id="stock-count-hint" className="muted">
+                    0–{MAX_STOCK_COUNT} portions.
+                  </small>
                 </div>
               </div>
               <div className="field">
@@ -563,19 +567,19 @@ export function StaffStockClient() {
                 <input
                   id="low-stock-threshold"
                   className="input"
-                  type="number"
-                  min={0}
-                  step={1}
+                  type="text"
+                  inputMode="numeric"
+                  aria-describedby="low-stock-threshold-hint"
                   value={form.low_stock_threshold}
-                  onChange={(event) =>
-                    setForm((current) => ({
-                      ...current,
-                      low_stock_threshold: event.target.value,
-                    }))
-                  }
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "" || isStockAmount(value, MAX_LOW_STOCK_THRESHOLD)) {
+                      setForm((current) => ({ ...current, low_stock_threshold: value }));
+                    }
+                  }}
                 />
-                <small className="muted">
-                  Customers see a low-availability message at this number or below.
+                <small id="low-stock-threshold-hint" className="muted">
+                  0–{MAX_LOW_STOCK_THRESHOLD} portions. Customers see a low-availability message at this number or below.
                 </small>
               </div>
               {form.stock_status === "out" && (

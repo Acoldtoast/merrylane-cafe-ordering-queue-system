@@ -6,6 +6,7 @@ import { Icon } from "@/components/Icons";
 import { CustomerPageSkeleton } from "@/components/CustomerPageSkeleton";
 import { useCustomer } from "@/components/CustomerProvider";
 import { dateTimeLabel, orderTypeLabel, peso, statusLabel } from "@/lib/format";
+import { isCustomerHistoryOrder } from "@/lib/orderLifecycle";
 import { fetchPortalApi, prefetchPortalRouteData } from "@/lib/portalPrefetch";
 import { useRealtimeRefresh } from "@/lib/usePolling";
 import type { Order } from "@/lib/types";
@@ -18,7 +19,8 @@ const ordersTabs: { key: OrdersView; label: string }[] = [
 ];
 
 export function OrderHistoryClient() {
-  const { legacyOrderId, ready, table } = useCustomer();
+  const { count, legacyOrderId, ready, table } = useCustomer();
+  const cartHref = `/customer/cart?table=${table}`;
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -38,9 +40,10 @@ export function OrderHistoryClient() {
       setLoading(true);
       setError("");
       try {
-        const response = await fetchPortalApi("/api/orders/history", {
-          cache: "no-store",
-        });
+        const response = await fetchPortalApi(
+          "/api/orders/history",
+          refreshRevision > 0 ? { cache: "no-store" } : undefined
+        );
         const data = await response.json();
         if (!response.ok || !data.success) {
           throw new Error(data.error || "Could not load your order history.");
@@ -87,22 +90,19 @@ export function OrderHistoryClient() {
     };
   }, [legacyOrderId, ready, refreshRevision]);
 
-  const isHistoryOrder = (order: Order) =>
-    order.payment_status === "rejected" ||
-    order.status === "completed";
   const visibleOrders = orders.filter(
     (order) =>
       order.status !== "cancelled" &&
       (view === "history"
-        ? isHistoryOrder(order)
-        : !isHistoryOrder(order))
+         ? isCustomerHistoryOrder(order)
+         : !isCustomerHistoryOrder(order))
   );
   const tabCounts = {
     orders: orders.filter(
-      (order) => order.status !== "cancelled" && !isHistoryOrder(order)
+      (order) => order.status !== "cancelled" && !isCustomerHistoryOrder(order)
     ).length,
     history: orders.filter(
-      (order) => order.status !== "cancelled" && isHistoryOrder(order)
+      (order) => order.status !== "cancelled" && isCustomerHistoryOrder(order)
     ).length,
   };
 
@@ -114,6 +114,17 @@ export function OrderHistoryClient() {
     <div className="order-history-page">
       <div className="order-history-head">
         <h1>Your orders</h1>
+        {count > 0 && (
+          <Link
+            href={cartHref}
+            className="btn btn-primary"
+            onMouseEnter={() => prefetchPortalRouteData("customer", cartHref)}
+            onFocus={() => prefetchPortalRouteData("customer", cartHref)}
+            onTouchStart={() => prefetchPortalRouteData("customer", cartHref)}
+          >
+            View cart · {count} {count === 1 ? "item" : "items"}
+          </Link>
+        )}
       </div>
 
       {error && <div className="error-strip">{error}</div>}
@@ -175,7 +186,7 @@ export function OrderHistoryClient() {
               <div className="order-history-side">
                 <span className="badge badge-cream">
                   {order.payment_status === "rejected"
-                    ? "Payment rejected"
+                     ? "Payment not confirmed"
                     : order.status === "ready"
                       ? "Serving · awaiting customer"
                       : statusLabel(order.status)}

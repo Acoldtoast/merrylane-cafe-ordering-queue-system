@@ -1,6 +1,7 @@
 import { getDb } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
 import { peso } from "@/lib/format";
+import { ensureOrderColumns } from "@/lib/models";
 
 export type ReportPeriod = "today" | "week" | "month" | "year" | "last7" | "last30" | "custom";
 export type ReportFilters = {
@@ -129,12 +130,15 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     range.previous_end,
     ...orderFilters.params,
   ];
+  await ensureOrderColumns();
   const db = getDb();
   const summary = await db
     .prepare(
       `SELECT COUNT(*) AS order_count,
               COALESCE(SUM(total), 0) AS revenue,
               COALESCE(AVG(total), 0) AS average_order_value,
+              COALESCE(SUM(vat_amount), 0) AS vat_amount,
+              COALESCE(SUM(rounding_adjustment), 0) AS rounding_adjustment,
               COUNT(*) FILTER (WHERE discount_amount > 0) AS discounted_orders
        FROM orders o
        WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
@@ -145,6 +149,8 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     order_count: number;
     revenue: number;
     average_order_value: number;
+    vat_amount: number;
+    rounding_adjustment: number;
     discounted_orders: number;
   };
   const previous = await db
@@ -686,13 +692,23 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     generated_at: new Date().toISOString(),
     summary: {
       order_count: Number(summary.order_count),
-      revenue: Number(summary.revenue),
-      average_order_value: Number(summary.average_order_value),
+      revenue: Math.round(Number(summary.revenue) * 100) / 100,
+      average_order_value:
+        Math.round(Number(summary.average_order_value) * 100) / 100,
+      vat_amount:
+        Math.round(Number(summary.vat_amount || 0) * 100) / 100,
+      net_sales:
+        Math.round(
+          (Number(summary.revenue) - Number(summary.vat_amount || 0)) * 100
+        ) / 100,
+      rounding_adjustment:
+        Math.round(Number(summary.rounding_adjustment || 0) * 100) / 100,
       revenue_change_pct: revenueChange,
       order_change_pct: orderChange,
       cancelled_orders: orders.filter((order) => order.status === "cancelled")
         .length,
-      average_wait_minutes: Number(waitStats.average_wait_minutes),
+      average_wait_minutes:
+        Math.round(Number(waitStats.average_wait_minutes || 0) * 100) / 100,
       discounted_orders: Number(summary.discounted_orders || 0),
       average_rating: Number(averageRating.average_rating),
       review_count: Number(averageRating.review_count),
@@ -702,28 +718,28 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
       start: range.previous_start,
       end: range.previous_end,
       order_count: Number(previous.order_count),
-      revenue: Number(previous.revenue),
+      revenue: Math.round(Number(previous.revenue) * 100) / 100,
     },
     daily_sales: dailySales.map((row) => ({
       ...row,
       order_count: Number(row.order_count),
-      revenue: Number(row.revenue),
+      revenue: Math.round(Number(row.revenue) * 100) / 100,
     })),
     products: products.map((row) => ({
       ...row,
       quantity_sold: Number(row.quantity_sold),
-      revenue: Number(row.revenue),
+      revenue: Math.round(Number(row.revenue) * 100) / 100,
     })),
     peak_hours: peakHours.map((row) => ({
       ...row,
       hour: Number(row.hour),
       order_count: Number(row.order_count),
-      revenue: Number(row.revenue),
+      revenue: Math.round(Number(row.revenue) * 100) / 100,
     })),
     payment_methods: paymentMethods.map((row) => ({
       ...row,
       order_count: Number(row.order_count),
-      revenue: Number(row.revenue),
+      revenue: Math.round(Number(row.revenue) * 100) / 100,
     })),
     orders,
     order_items: orderItems,
@@ -731,14 +747,14 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
       hourly_sales: hourlySales.map((row) => ({
         ...row,
         order_count: Number(row.order_count),
-        revenue: Number(row.revenue),
+        revenue: Math.round(Number(row.revenue) * 100) / 100,
       })),
       heatmap: heatmap.map((row) => ({
         ...row,
         weekday: Number(row.weekday),
         hour: Number(row.hour),
         order_count: Number(row.order_count),
-        revenue: Number(row.revenue),
+        revenue: Math.round(Number(row.revenue) * 100) / 100,
       })),
       timing: {
         confirmation_minutes: Number(timingStats.confirmation_minutes),
@@ -788,7 +804,7 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
       order_type_mix: orderTypeMix.map((row) => ({
         ...row,
         order_count: Number(row.order_count),
-        revenue: Number(row.revenue),
+        revenue: Math.round(Number(row.revenue) * 100) / 100,
         average_order_value: Number(row.order_count) > 0
           ? Number(row.revenue) / Number(row.order_count)
           : 0,

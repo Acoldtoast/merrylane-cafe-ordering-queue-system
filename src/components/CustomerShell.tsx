@@ -42,20 +42,18 @@ export function CustomerShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { table, count, lastOrderId } = useCustomer();
-  const bagHref =
-    count === 0 && lastOrderId
-      ? `/customer/orders?table=${table}`
-      : `/customer/cart?table=${table}`;
-  const bagLabel =
-    count === 0 && lastOrderId ? "View your orders" : `View cart, ${count} items`;
-  const bagMenuLabel =
-    count === 0 && lastOrderId
-      ? "Your orders"
-      : `Your cart${count ? ` · ${count} items` : ""}`;
+  const { table, count, vatRatePct } = useCustomer();
+  const ordersLabel = count > 0
+    ? `Your orders, ${count} ${count === 1 ? "item" : "items"} in cart`
+    : undefined;
+  const orderCount = count > 0 && (
+    <span className="customer-order-count" aria-hidden="true">{count}</span>
+  );
+  const waiterHref = `/customer/waiter?table=${table}`;
   const feedback = useFeedback();
   const warnedTodayRef = useRef<string | null>(null);
   const orderingOpenRef = useRef(initialOrderingOpen);
+  const vatRateRef = useRef(vatRatePct);
   const [menuOpen, setMenuOpen] = useState(false);
   const [pendingRoute, setPendingRoute] = useState<{
     from: string;
@@ -144,10 +142,13 @@ export function CustomerShell({
         }
         if (!active) return;
         const orderingOpen = Boolean(data.ordering_open);
-        if (orderingOpenRef.current !== orderingOpen) {
+        const latestVatRate = data.menu_vat_pct;
+        if (orderingOpenRef.current !== orderingOpen ||
+            (typeof latestVatRate === "number" && vatRateRef.current !== latestVatRate)) {
           router.refresh();
         }
         orderingOpenRef.current = orderingOpen;
+        if (typeof latestVatRate === "number") vatRateRef.current = latestVatRate;
         if (!data.last_order_warning) return;
 
         const today = manilaDateKey(new Date());
@@ -252,18 +253,13 @@ export function CustomerShell({
             <Link
               href={statusHref}
               className={isOrder ? "active" : ""}
+              aria-label={ordersLabel}
               onMouseEnter={() => warmCustomerRoute(statusHref)}
               onFocus={() => warmCustomerRoute(statusHref)}
+              onTouchStart={() => warmCustomerRoute(statusHref)}
             >
               Your orders
-            </Link>
-            <Link
-              href={`/customer/waiter?table=${table}`}
-              className={isWaiter ? "active" : ""}
-              onMouseEnter={() => warmCustomerRoute(`/customer/waiter?table=${table}`)}
-              onFocus={() => warmCustomerRoute(`/customer/waiter?table=${table}`)}
-            >
-              Call waiter
+              {orderCount}
             </Link>
             <Link
               href="/customer/hours"
@@ -289,14 +285,16 @@ export function CustomerShell({
               <Icon name="table" /> Table {String(table).padStart(2, "0")}
             </span>
             <Link
-              href={bagHref}
-              className="cart-icon-button"
-              aria-label={bagLabel}
-              onMouseEnter={() => warmCustomerRoute(bagHref)}
-              onFocus={() => warmCustomerRoute(bagHref)}
+              href={waiterHref}
+              className={`cart-icon-button${isWaiter ? " active" : ""}`}
+              aria-label="Call a waiter"
+              aria-current={isWaiter ? "page" : undefined}
+              title="Call a waiter"
+              onMouseEnter={() => warmCustomerRoute(waiterHref)}
+              onFocus={() => warmCustomerRoute(waiterHref)}
+              onTouchStart={() => warmCustomerRoute(waiterHref)}
             >
-              <Icon name="bag" />
-              {count > 0 && <span className="cart-icon-count">{count}</span>}
+              <Icon name="waiter-tray" />
             </Link>
             <button
               type="button"
@@ -355,23 +353,14 @@ export function CustomerShell({
               <Link
                 href={statusHref}
                 className={isOrder ? "active" : ""}
+                aria-label={ordersLabel}
                 onMouseEnter={() => warmCustomerRoute(statusHref)}
                 onFocus={() => warmCustomerRoute(statusHref)}
+                onTouchStart={() => warmCustomerRoute(statusHref)}
                 onClick={() => setMenuOpen(false)}
               >
                 <Icon name="receipt" />
-                <span>Your orders</span>
-                <Icon name="chevron-right" className="customer-menu-arrow" />
-              </Link>
-              <Link
-                href={`/customer/waiter?table=${table}`}
-                className={isWaiter ? "active" : ""}
-                onMouseEnter={() => warmCustomerRoute(`/customer/waiter?table=${table}`)}
-                onFocus={() => warmCustomerRoute(`/customer/waiter?table=${table}`)}
-                onClick={() => setMenuOpen(false)}
-              >
-                <Icon name="waiter" />
-                <span>Call waiter</span>
+                <span>Your orders{orderCount}</span>
                 <Icon name="chevron-right" className="customer-menu-arrow" />
               </Link>
               <Link
@@ -394,16 +383,6 @@ export function CustomerShell({
               >
                 <Icon name="star" />
                 <span>Leave a review</span>
-                <Icon name="chevron-right" className="customer-menu-arrow" />
-              </Link>
-              <Link
-                href={bagHref}
-                onMouseEnter={() => warmCustomerRoute(bagHref)}
-                onFocus={() => warmCustomerRoute(bagHref)}
-                onClick={() => setMenuOpen(false)}
-              >
-                <Icon name="bag" />
-                <span>{bagMenuLabel}</span>
                 <Icon name="chevron-right" className="customer-menu-arrow" />
               </Link>
             </nav>

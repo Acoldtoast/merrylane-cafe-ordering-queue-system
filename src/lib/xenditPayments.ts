@@ -42,6 +42,7 @@ export class XenditPaymentError extends Error {
 }
 
 const tableReady = new WeakMap<object, Promise<void>>();
+const CHECKOUT_WINDOW = "INTERVAL '5 minutes'";
 
 export async function ensureXenditPaymentTable() {
   const db = getDb();
@@ -205,19 +206,35 @@ export function parseXenditWebhook(value: unknown): ParsedWebhook {
   };
 }
 
-export function getXenditConfig(requestUrl?: string) {
+export function isXenditTestMode() {
   const isProduction = process.env.NODE_ENV === "production";
-  const secretKey = isProduction
-    ? process.env.XENDIT_SECRET_KEY
-    : process.env.XENDIT_TEST_SECRET_KEY;
+  const testModeOverride = process.env.XENDIT_TEST_MODE;
+  if (
+    testModeOverride !== undefined &&
+    testModeOverride !== "true" &&
+    testModeOverride !== "false"
+  ) {
+    throw new XenditPaymentError(
+      'XENDIT_TEST_MODE must be "true" or "false".',
+      503
+    );
+  }
+  return !isProduction || testModeOverride === "true";
+}
+
+export function getXenditConfig(requestUrl?: string) {
+  const isTestMode = isXenditTestMode();
+  const secretKey = isTestMode
+    ? process.env.XENDIT_TEST_SECRET_KEY
+    : process.env.XENDIT_SECRET_KEY;
   const callbackToken = process.env.XENDIT_WEBHOOK_TOKEN;
   const configuredAppUrl = process.env.APP_URL;
 
   if (!secretKey) {
     throw new XenditPaymentError(
-      isProduction
-        ? "XENDIT_SECRET_KEY is not configured."
-        : "XENDIT_TEST_SECRET_KEY is not configured for this environment.",
+      isTestMode
+        ? "XENDIT_TEST_SECRET_KEY is not configured for this environment."
+        : "XENDIT_SECRET_KEY is not configured.",
       503
     );
   }
@@ -250,7 +267,7 @@ export function getXenditConfig(requestUrl?: string) {
       (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
       (parts[0] === 192 && parts[1] === 168));
   const allowInsecureLocal =
-    !isProduction && (appUrl.hostname === "localhost" || privateIpv4);
+    isTestMode && (appUrl.hostname === "localhost" || privateIpv4);
   if (
     (allowInsecureLocal
       ? appUrl.protocol !== "http:" && appUrl.protocol !== "https:"
@@ -296,7 +313,7 @@ export function getXenditConfig(requestUrl?: string) {
     secretKey,
     callbackToken,
     appUrl: appUrl.origin,
-    mode: isProduction ? "live" as const : "test" as const,
+    mode: isTestMode ? "test" as const : "live" as const,
   };
 }
 
@@ -313,6 +330,7 @@ export async function prepareXenditPayment(
   checkout_qr_string: string | null;
   payment_request_id: string | null;
   status: string;
+  expires_at_ms?: string | number;
 }> {
   await ensureXenditPaymentTable();
   const db = getDb();
@@ -346,8 +364,14 @@ export async function prepareXenditPayment(
 
     let amount = 0;
     if (kind === "order") {
+      if (order.payment_status === "rejected") {
+        throw new XenditPaymentError(
+          "This payment needs staff review. If you already paid, show staff your original GCash receipt.",
+          409
+        );
+      }
       if (
-        order.payment_status === "verified" ||
+        order.payment_status !== "pending" ||
         !["pending", "payment_pending"].includes(order.status)
       ) {
         throw new XenditPaymentError(
@@ -355,7 +379,7 @@ export async function prepareXenditPayment(
           409
         );
       }
-      if (order.payment_status === "pending" && order.payment_proof_url) {
+      if (order.payment_proof_url) {
         throw new XenditPaymentError(
           "A receipt for this order is already waiting for staff review.",
           409
@@ -418,10 +442,11 @@ export async function prepareXenditPayment(
     const active = await db
       .prepare(
         `SELECT reference_id, amount, payment_kind, order_id, checkout_url,
-                checkout_mobile_url, checkout_qr_string, payment_request_id, status
+                checkout_mobile_url, checkout_qr_string, payment_request_id, status,
+                EXTRACT(EPOCH FROM (created_at + ${CHECKOUT_WINDOW})) * 1000 AS expires_at_ms
          FROM xendit_payment_requests
          WHERE order_id = $1 AND payment_kind = $2
-           AND status IN ('creating', 'pending')
+           AND status IN ('creating', 'pending', 'mismatched', 'succeeded', 'succeeded_unapplied')
          ORDER BY created_at DESC
          LIMIT 1
          FOR UPDATE`
@@ -437,10 +462,14 @@ export async function prepareXenditPayment(
           checkout_qr_string: string | null;
           payment_request_id: string | null;
           status: string;
+          expires_at_ms: string | number;
         }
       | undefined;
     if (active) {
       if (active.status === "pending" && active.checkout_url) return active;
+      if (active.status !== "creating" && active.status !== "pending") {
+        throw new XenditPaymentError("Ask staff to check this payment before paying again.", 409);
+      }
       throw new XenditPaymentError(
         "Your GCash checkout is already being prepared. Please wait a moment and retry.",
         409
@@ -482,6 +511,49 @@ export async function prepareXenditPayment(
   });
 }
 
+export async function switchExpiredXenditOrderToCounter(orderId: number) {
+  await ensureXenditPaymentTable();
+  const db = getDb();
+  await db.transaction(async () => {
+    const order = (await db.prepare(
+      `SELECT status, payment_method, payment_status, payment_reference, payment_proof_url
+       FROM orders WHERE id = $1 FOR UPDATE`
+    ).get(orderId)) as {
+      status: string;
+      payment_method: string;
+      payment_status: string;
+      payment_reference: string | null;
+      payment_proof_url: string | null;
+    } | undefined;
+    if (order?.payment_method === "counter" && order.status === "pending" && order.payment_status === "pending") return;
+    if (
+      order?.payment_method !== "gcash" ||
+      order.payment_status !== "pending" ||
+      !["pending", "payment_pending"].includes(order.status) ||
+      order.payment_proof_url ||
+      !(await db.prepare(
+        `SELECT 1 FROM xendit_payment_requests
+         WHERE order_id = $1 AND reference_id = $2 AND payment_kind = 'order'
+           AND status = 'expired' AND payment_request_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM xendit_payment_requests other
+             WHERE other.order_id = $1 AND other.payment_kind = 'order'
+               AND other.status NOT IN ('failed', 'expired')
+           )`
+      ).get(orderId, order.payment_reference))
+    ) {
+      throw new XenditPaymentError("Cash is available only after Xendit confirms the checkout expired unpaid.", 409);
+    }
+
+    await db.prepare(
+      `UPDATE orders SET payment_method = 'counter', status = 'pending',
+         payment_reference = NULL, payment_amount = NULL,
+         updated_at = to_char(timezone('Asia/Manila', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS')
+       WHERE id = $1`
+    ).run(orderId);
+  });
+}
+
 export async function saveXenditPaymentRequest(
   referenceId: string,
   paymentRequestId: string,
@@ -514,11 +586,14 @@ export async function getXenditPaymentRequest(
   await ensureXenditPaymentTable();
   return getDb()
     .prepare(
-      `SELECT reference_id, payment_request_id, order_id, payment_kind, amount,
-              checkout_url, checkout_mobile_url, checkout_qr_string, status
-       FROM xendit_payment_requests
-       WHERE order_id = $1 AND payment_kind = $2
-       ORDER BY created_at DESC
+      `SELECT p.reference_id, p.payment_request_id, p.order_id, p.payment_kind, p.amount,
+              p.checkout_url, p.checkout_mobile_url, p.checkout_qr_string, p.status,
+              o.payment_status AS order_payment_status,
+              EXTRACT(EPOCH FROM (p.created_at + ${CHECKOUT_WINDOW})) * 1000 AS expires_at_ms
+       FROM xendit_payment_requests p
+       LEFT JOIN orders o ON o.id = p.order_id
+       WHERE p.order_id = $1 AND p.payment_kind = $2
+       ORDER BY p.created_at DESC
        LIMIT 1`
     )
     .get(orderId, kind) as Promise<
@@ -532,6 +607,8 @@ export async function getXenditPaymentRequest(
         checkout_mobile_url: string | null;
         checkout_qr_string: string | null;
         status: string;
+        order_payment_status: string | null;
+        expires_at_ms: string | number;
       }
     | undefined
   >;
@@ -550,7 +627,7 @@ async function updateXenditPaymentStatus(
       )
       .get(referenceId) as { status: string } | undefined;
     if (!attempt) return "missing";
-    if (["succeeded", "succeeded_unapplied"].includes(attempt.status)) {
+    if (attempt.status !== "pending" && attempt.status !== "creating") {
       return attempt.status;
     }
     await db
@@ -567,7 +644,8 @@ async function updateXenditPaymentStatus(
 export async function syncXenditPaymentStatus(
   orderId: number,
   kind: XenditPaymentKind,
-  secretKey: string
+  secretKey: string,
+  expireAtDeadline = false
 ) {
   const attempt = await getXenditPaymentRequest(orderId, kind);
   if (!attempt) return { status: "not_found" as const };
@@ -575,41 +653,46 @@ export async function syncXenditPaymentStatus(
     return { status: attempt.status };
   }
 
-  const response = await fetch(
-    `https://api.xendit.co/v3/payment_requests/${encodeURIComponent(attempt.payment_request_id)}`,
-    {
+  const paymentUrl = `https://api.xendit.co/v3/payment_requests/${encodeURIComponent(attempt.payment_request_id)}`;
+  const readProviderStatus = async (cancel: boolean) => {
+    const response = await fetch(cancel ? `${paymentUrl}/cancel` : paymentUrl, {
+      method: cancel ? "POST" : "GET",
       headers: {
         Authorization: `Basic ${Buffer.from(`${secretKey}:`).toString("base64")}`,
         "api-version": "2024-11-11",
       },
       signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) {
+      throw new XenditPaymentError(
+        "Xendit has not confirmed the payment status. Please keep this page open.",
+        502
+      );
     }
-  );
-  if (!response.ok) {
-    console.error("Xendit payment status lookup failed with status", response.status);
-    throw new XenditPaymentError(
-      "Xendit could not refresh this payment status. Please keep this page open and try again.",
-      502
-    );
-  }
-
-  const payload: unknown = await response.json();
+    const payload: unknown = await response.json();
+    if (
+      !isRecord(payload) ||
+      payload.payment_request_id !== attempt.payment_request_id ||
+      payload.reference_id !== attempt.reference_id ||
+      payload.type !== "PAY" ||
+      payload.country !== "PH" ||
+      payload.currency !== "PHP" ||
+      payload.channel_code !== "GCASH"
+    ) {
+      throw new XenditPaymentError("Xendit returned payment details that do not match this checkout.", 502);
+    }
+    return payload;
+  };
+  let payload = await readProviderStatus(false);
+  let amount = Number(payload.request_amount);
   if (
-    !isRecord(payload) ||
-    payload.payment_request_id !== attempt.payment_request_id ||
-    payload.reference_id !== attempt.reference_id ||
-    payload.type !== "PAY" ||
-    payload.country !== "PH" ||
-    payload.currency !== "PHP" ||
-    payload.channel_code !== "GCASH"
+    expireAtDeadline && kind === "order" && payload.status === "REQUIRES_ACTION" &&
+    Date.now() >= Number(attempt.expires_at_ms) &&
+    Number.isFinite(amount) && Math.abs(amount - Number(attempt.amount)) <= 0.01
   ) {
-    throw new XenditPaymentError(
-      "Xendit returned payment details that do not match this checkout.",
-      502
-    );
+    payload = await readProviderStatus(true);
+    amount = Number(payload.request_amount);
   }
-
-  const amount = Number(payload.request_amount);
   if (!Number.isFinite(amount) || Math.abs(amount - Number(attempt.amount)) > 0.01) {
     return {
       status: await updateXenditPaymentStatus(attempt.reference_id, "mismatched"),
@@ -1062,7 +1145,7 @@ export async function handleXenditWebhook(value: unknown) {
       ) {
         return { action: "unmatched" as const };
       }
-      if (["succeeded", "succeeded_unapplied"].includes(attempt.status)) {
+      if (["succeeded", "succeeded_unapplied", "expired", "mismatched"].includes(attempt.status)) {
         return { action: "duplicate" as const };
       }
       await db

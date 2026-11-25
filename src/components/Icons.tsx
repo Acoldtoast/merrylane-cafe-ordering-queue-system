@@ -44,6 +44,7 @@ export type IconName =
   | "settings"
   | "home"
   | "waiter"
+  | "waiter-tray"
   | "reviews"
   | "alert"
   | "info"
@@ -334,6 +335,13 @@ function content(name: IconName) {
         <>
           <circle cx="12" cy="6" r="2.5" />
           <path d="M7 21v-3.5A5 5 0 0 1 12 12.5a5 5 0 0 1 5 5V21M3 14h18" />
+        </>
+      );
+    case "waiter-tray":
+      return (
+        <>
+          <path d="M8 12a10 10 0 0 1-2-6V3.5h12V6a10 10 0 0 1-2 6m2-7h1.5a1.75 1.75 0 0 1 0 3.5h-1.8M3 12h18" />
+          <path d="m4.5 12 1.7 4.8-.7 2.7 4.2 2 1.3-2.8 3-2.2 4.4-4.5m-9.6 3 3.5-3" />
         </>
       );
     case "reviews":

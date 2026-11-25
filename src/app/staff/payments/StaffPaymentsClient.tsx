@@ -17,6 +17,7 @@ import {
   type DiscountType,
 } from "@/lib/orderDiscount";
 import { orderTypeLabel, peso, relativeTime, smartDateTime } from "@/lib/format";
+import { parseVatRate, priceWithVat } from "@/lib/vat";
 import { orderItemMeta } from "@/lib/orderItems";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { usePolling } from "@/lib/usePolling";
@@ -46,6 +47,7 @@ export function StaffPaymentsClient() {
   const { confirm, dialog: confirmDialog } = useConfirmDialog();
   const [pendingOrders, setPendingOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [menuVatPct, setMenuVatPct] = useState(0);
   const [balancePayments, setBalancePayments] = useState<
     (OrderBalancePayment & { order: Order })[]
   >([]);
@@ -94,6 +96,7 @@ export function StaffPaymentsClient() {
         throw new Error(menuData.error || "Unable to load menu items.");
       }
       setMenuItems(menuData.items || []);
+      setMenuVatPct(parseVatRate(menuData.menu_vat_pct));
       const freshPending: Order[] = pending.orders || [];
       setPendingOrders(freshPending);
       setPreview((current) => {
@@ -124,7 +127,7 @@ export function StaffPaymentsClient() {
     }
   };
 
-  usePolling(load, 12000, { resources: ["orders", "payments", "sales"] });
+  usePolling(load, 12000, { resources: ["orders", "payments", "sales", "settings"] });
 
   // The staff list only feeds the discount picker and changes rarely, so it is
   // loaded once per visit (reusing the route prefetch) instead of every poll.
@@ -430,7 +433,7 @@ export function StaffPaymentsClient() {
       .toLowerCase()
       .includes(itemEditor?.menuSearch.trim().toLowerCase() || "")
   );
-  const editorUnitPrice =
+  const editorUnitPrice = priceWithVat(
     Number(selectedMenuItem?.price || 0) +
     (selectedMenuItem?.variants
       .filter((variant) => itemEditor?.variantIds.includes(variant.id))
@@ -438,7 +441,9 @@ export function StaffPaymentsClient() {
       0) +
     (selectedMenuItem?.extras
       .filter((extra) => itemEditor?.extraIds.includes(extra.id))
-      .reduce((sum, extra) => sum + Number(extra.price_modifier || 0), 0) || 0);
+      .reduce((sum, extra) => sum + Number(extra.price_modifier || 0), 0) || 0),
+    menuVatPct
+  );
   const itemEditorHasChanges =
     itemEditor?.item !== null &&
     itemEditor?.item !== undefined &&
@@ -1274,6 +1279,21 @@ export function StaffPaymentsClient() {
                 <strong>Amount due</strong>
                 <b>{peso(preview.total)}</b>
               </div>
+              {Number(preview.rounding_adjustment || 0) !== 0 && (
+                <div className="payment-total-row">
+                  <strong>Rounding</strong>
+                  <span>
+                    {Number(preview.rounding_adjustment) > 0 ? "+" : "−"}
+                    {peso(Math.abs(Number(preview.rounding_adjustment)))}
+                  </span>
+                </div>
+              )}
+              {Number(preview.vat_amount || 0) > 0 && (
+                <div className="payment-total-row">
+                  <strong>VAT included ({Number(preview.vat_rate_pct || 0)}%)</strong>
+                  <span>{peso(preview.vat_amount || 0)}</span>
+                </div>
+              )}
               {Number(preview.discount_amount || 0) > 0 && (
                 <div className="payment-discount-summary">
                   <strong>
@@ -1503,10 +1523,10 @@ export function StaffPaymentsClient() {
                       <strong>{selectedMenuItem?.name || itemEditor.item?.name || "Menu item"}</strong>
                       <small>{selectedMenuItem?.description}</small>
                       <span>
-                        Base price · {peso(
-                          selectedMenuItem?.price ||
-                            itemEditor.item?.price_at_time ||
-                            0
+                        Menu price · {peso(
+                          selectedMenuItem
+                            ? priceWithVat(Number(selectedMenuItem.price), menuVatPct)
+                            : itemEditor.item?.price_at_time
                         )}
                       </span>
                       {!itemEditor.item && (
@@ -1603,7 +1623,7 @@ export function StaffPaymentsClient() {
                                         : "Available · quantity not tracked"}
                                   </small>
                                 </span>
-                                <b>{peso(menuItem.price)}</b>
+                                <b>{peso(priceWithVat(Number(menuItem.price), menuVatPct))}</b>
                               </button>
                             );
                           })
@@ -1659,7 +1679,7 @@ export function StaffPaymentsClient() {
                                 <span>
                                   {variant.name}
                                   {Number(variant.price_modifier) !== 0
-                                    ? ` · ${Number(variant.price_modifier) > 0 ? "+" : ""}${peso(variant.price_modifier)}`
+                                     ? ` · ${Number(variant.price_modifier) > 0 ? "+" : ""}${peso(priceWithVat(Number(variant.price_modifier), menuVatPct))}`
                                     : ""}
                                 </span>
                               </label>
@@ -1692,7 +1712,7 @@ export function StaffPaymentsClient() {
                               }
                             />
                             <span>{extra.name}</span>
-                            <b>+{peso(extra.price_modifier)}</b>
+                             <b>+{peso(priceWithVat(Number(extra.price_modifier), menuVatPct))}</b>
                           </label>
                         ))}
                       </div>

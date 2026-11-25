@@ -144,3 +144,17 @@ export async function retryFailedEmail(id: number): Promise<boolean> {
     .run(id);
   return Number(result.changes) === 1;
 }
+
+export async function correctRecipientEmail(
+  oldEmail: string,
+  newEmail: string
+): Promise<number> {
+  const result = await getDb()
+    .prepare(
+      `UPDATE email_notification_outbox
+       SET recipient_email = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE recipient_email = ?`
+    )
+    .run(newEmail, oldEmail);
+  return Number(result.changes);
+}

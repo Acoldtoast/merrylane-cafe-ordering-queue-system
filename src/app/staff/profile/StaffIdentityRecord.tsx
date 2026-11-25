@@ -1,4 +1,7 @@
+"use client";
+
 import Image from "next/image";
+import { useRef } from "react";
 import { staffIdExpirationWarning } from "@/lib/staffIdChecks";
 
 export type StaffIdentity = {
@@ -23,6 +26,9 @@ function formatIdType(value: string | null) {
 }
 
 export function StaffIdentityRecord({ identity }: { identity: StaffIdentity | null }) {
+  const idViewerRef = useRef<HTMLDialogElement>(null);
+  const idViewerCloseRef = useRef<HTMLButtonElement>(null);
+  const activeImageTriggerRef = useRef<HTMLButtonElement>(null);
   const expirationWarning = identity
     ? staffIdExpirationWarning(
         identity.details?.expiration_date ?? "",
@@ -69,18 +75,86 @@ export function StaffIdentityRecord({ identity }: { identity: StaffIdentity | nu
           <div className="staff-profile-id-images">
             <figure>
               <figcaption>Front of ID</figcaption>
-              <Image className="staff-profile-id-image" src={identity.id_front} alt="Front of your registered ID" width={640} height={400} unoptimized />
+              <button
+                className="staff-profile-id-view-trigger"
+                type="button"
+                aria-label="View the front of your registered ID"
+                onClick={(event) => {
+                  activeImageTriggerRef.current = event.currentTarget;
+                  idViewerRef.current?.showModal();
+                  idViewerCloseRef.current?.focus();
+                }}
+              >
+                <Image className="staff-profile-id-image" src={identity.id_front} alt="Front of your registered ID" width={640} height={400} unoptimized />
+              </button>
             </figure>
             <figure>
               <figcaption>Back of ID</figcaption>
               {identity.id_back ? (
-                <Image className="staff-profile-id-image" src={identity.id_back} alt="Back of your registered ID" width={640} height={400} unoptimized />
+                <button
+                  className="staff-profile-id-view-trigger"
+                  type="button"
+                  aria-label="View the back of your registered ID"
+                  onClick={(event) => {
+                    activeImageTriggerRef.current = event.currentTarget;
+                    idViewerRef.current?.showModal();
+                    idViewerCloseRef.current?.focus();
+                  }}
+                >
+                  <Image className="staff-profile-id-image" src={identity.id_back} alt="Back of your registered ID" width={640} height={400} unoptimized />
+                </button>
               ) : <p className="staff-profile-id-missing">No back image was provided.</p>}
             </figure>
           </div>
           <p className="staff-profile-identity-note">
             Your ID record is visible to you and authorized administrators. Automated checks do not confirm document authenticity.
           </p>
+          <dialog
+            ref={idViewerRef}
+            className="staff-profile-id-viewer"
+            aria-labelledby="staff-profile-id-viewer-title"
+            onClick={(event) => {
+              if (event.target === event.currentTarget) event.currentTarget.close();
+            }}
+            onClose={() => activeImageTriggerRef.current?.focus()}
+          >
+            <div className="modal-head">
+              <h2 id="staff-profile-id-viewer-title">
+                ID — {identity.details?.name || "Your registered ID"}
+              </h2>
+              <button
+                ref={idViewerCloseRef}
+                type="button"
+                aria-label="Close ID viewer"
+                onClick={() => idViewerRef.current?.close()}
+              >
+                ×
+              </button>
+            </div>
+            <div className="staff-profile-id-viewer-body">
+              <p>
+                {identityStatus} · {formatIdType(identity.id_type)}
+              </p>
+              <div className="staff-profile-id-viewer-images">
+                <figure>
+                  <figcaption>Front of ID</figcaption>
+                  <Image src={identity.id_front} alt="Front of your registered ID" width={1280} height={800} unoptimized />
+                </figure>
+                <figure>
+                  <figcaption>Back of ID</figcaption>
+                  {identity.id_back ? (
+                    <Image src={identity.id_back} alt="Back of your registered ID" width={1280} height={800} unoptimized />
+                  ) : <p className="staff-profile-id-missing">No back image was provided.</p>}
+                </figure>
+              </div>
+              <div className="account-profile-details staff-profile-details">
+                <div><span>Name on ID</span><strong>{identity.details?.name || "Not provided"}</strong></div>
+                <div><span>ID number</span><strong>{identity.details?.number || "Not provided"}</strong></div>
+                <div><span>Date of birth</span><strong>{identity.details?.birth_date || "Not provided"}</strong></div>
+                <div><span>Expiration date</span><strong>{identity.details?.expiration_date || "Not recorded"}</strong></div>
+              </div>
+            </div>
+          </dialog>
         </>
       ) : (
         <p className="staff-profile-id-missing">No ID has been registered to this account.</p>

@@ -100,6 +100,8 @@ async function reportMessage(
   const common = [
     `Reporting period: ${start} to ${end}`,
     `Confirmed sales: ${peso(summary.revenue)}`,
+    `VAT included: ${peso(summary.vat_amount)}`,
+    `Net of VAT: ${peso(summary.net_sales)}`,
     `Confirmed orders: ${summary.order_count}`,
     `Average order value: ${peso(summary.average_order_value)}`,
     "",
@@ -138,6 +140,8 @@ async function reportMessage(
       <h1>${title}</h1>
       <p>Reporting period: ${start} to ${end}</p>
       <p><strong>Confirmed sales:</strong> ${peso(summary.revenue)}<br>
+      <strong>VAT included:</strong> ${peso(summary.vat_amount)}<br>
+      <strong>Net of VAT:</strong> ${peso(summary.net_sales)}<br>
       <strong>Confirmed orders:</strong> ${summary.order_count}<br>
       <strong>Average order value:</strong> ${peso(summary.average_order_value)}</p>
       ${detailMarkup}

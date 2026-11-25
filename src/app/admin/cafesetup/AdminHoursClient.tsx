@@ -8,10 +8,11 @@ import { LoadingDots } from "@/components/LoadingDots";
 import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
-import { timeLabel } from "@/lib/format";
+import { peso, timeLabel } from "@/lib/format";
 import { usePolling } from "@/lib/usePolling";
 import { defaultLastOrder, validLastOrder, weeklyScheduleError } from "@/lib/orderingHours";
 import { parseServiceChargePct } from "@/lib/serviceCharge";
+import { parseVatRate, priceWithVat, vatFromInclusive } from "@/lib/vat";
 
 interface ScheduleDay {
   day: string;
@@ -37,7 +38,8 @@ interface Settings {
   instagram_url: string;
   social_media_enabled: boolean;
   service_charge_pct: number;
-  vat_inclusive: boolean;
+  vat_mode: "none" | "add" | "included";
+  vat_rate_pct: number;
 }
 
 const TABLE_COUNT = 12;
@@ -57,6 +59,11 @@ export function AdminHoursClient() {
   // Kept as text so a half-typed value ("0.", "-") never rewrites the saved
   // number, and never reaches the API as NaN.
   const [serviceChargeInput, setServiceChargeInput] = useState("0");
+  const [vatRateInput, setVatRateInput] = useState("0");
+  const vatRate = parseVatRate(vatRateInput, Number.NaN);
+  const vatRateInvalid =
+    !Number.isFinite(vatRate) ||
+    Boolean(settings && settings.vat_mode !== "none" && vatRate === 0);
   const scheduleError = weeklyScheduleError(schedule);
   // Blank means "no charge" (0); any other value must parse as a finite 0–100.
   const trimmedServiceCharge = serviceChargeInput.trim();
@@ -76,11 +83,13 @@ export function AdminHoursClient() {
       const nextSchedule = data.settings.weekly_schedule || [];
       const nextSettings = {
         ...data.settings,
-        service_charge_pct: parseServiceChargePct(data.settings.service_charge_pct),
+          service_charge_pct: parseServiceChargePct(data.settings.service_charge_pct),
+          vat_rate_pct: parseVatRate(data.settings.vat_rate_pct),
       };
       setSettings(nextSettings);
       setSavedSettings(nextSettings);
       setServiceChargeInput(String(nextSettings.service_charge_pct));
+      setVatRateInput(String(nextSettings.vat_rate_pct));
       setSchedule(nextSchedule);
       setSavedSchedule(nextSchedule);
       setOrderingOpen(Boolean(data.ordering_open));
@@ -151,6 +160,10 @@ export function AdminHoursClient() {
       setError("Enter a service charge from 0 to 100.");
       return;
     }
+    if (mode === "setup" && vatRateInvalid) {
+      setError("Enter a valid VAT percentage. Use a rate above 0% when VAT is enabled.");
+      return;
+    }
     setSaving(true);
     setError("");
     const todayName = new Date().toLocaleDateString("en-PH", {
@@ -171,7 +184,10 @@ export function AdminHoursClient() {
       service_charge_pct: serviceChargeInvalid
         ? settings.service_charge_pct
         : serviceChargeParsed,
-      vat_inclusive: settings.vat_inclusive,
+      ...(mode === "setup" && (
+        settings.vat_mode !== savedSettings?.vat_mode ||
+        vatRate !== savedSettings?.vat_rate_pct
+      ) ? { vat_mode: settings.vat_mode, vat_rate_pct: vatRate } : {}),
       ...extra,
       weekly_schedule: schedule,
       last_order_time: todaySchedule?.last_order ?? settings.last_order_time,
@@ -519,9 +535,12 @@ export function AdminHoursClient() {
                     />
                   </label>
                 </div>
-                <div className="modal-form-row mt-2">
-                  <div className="field">
-                    <label className="label" htmlFor="service-charge-pct">Service charge (%)</label>
+                <section className="cafe-pricing" aria-labelledby="cafe-pricing-heading">
+                  <h3 id="cafe-pricing-heading">Pricing</h3>
+                  <div className="field cafe-pricing-field">
+                    <div className="cafe-pricing-field-head">
+                      <label className="label" htmlFor="service-charge-pct">Service charge (%)</label>
+                    </div>
                     <input
                       id="service-charge-pct"
                       className="input"
@@ -551,41 +570,61 @@ export function AdminHoursClient() {
                         }
                       }}
                       aria-invalid={!serviceChargeIsValid}
+                      aria-describedby="service-charge-hint"
                       placeholder="0"
                     />
-                    <span className="tiny muted">
+                    <small id="service-charge-hint" className="tiny muted">
                       {serviceChargeIsValid
-                        ? "Added to every order total. Leave 0 if none."
+                        ? "Added to the order total. Use 0% for no service charge."
                         : "Enter a number from 0 to 100."}
-                    </span>
+                    </small>
                   </div>
-                  <div className="field">
-                    <label className="label" htmlFor="vat-inclusive">VAT / tax</label>
-                    <label className="toggle-switch">
-                      <input
-                        id="vat-inclusive"
-                        type="checkbox"
-                        checked={settings.vat_inclusive}
-                        onChange={(event) =>
-                          setSettings({
-                            ...settings,
-                            vat_inclusive: event.target.checked,
-                          })
-                        }
-                      />
-                      <span className="toggle-track" />
-                    </label>
-                    <span className="tiny muted">
-                      Prices are VAT-inclusive when on. Turn off if prices exclude VAT.
-                    </span>
+                  <div className="field cafe-pricing-field">
+                    <label className="label" htmlFor="vat-mode">VAT pricing</label>
+                    <select
+                      id="vat-mode"
+                      className="input"
+                      value={settings.vat_mode}
+                      onChange={(event) =>
+                        setSettings({
+                          ...settings,
+                          vat_mode: event.target.value as Settings["vat_mode"],
+                        })
+                      }
+                    >
+                      <option value="none">VAT off</option>
+                      <option value="add">Add VAT to menu prices</option>
+                      <option value="included">Menu prices already include VAT</option>
+                    </select>
+                    <label className="label" htmlFor="vat-rate">VAT rate (%)</label>
+                    <input
+                      id="vat-rate"
+                      className="input"
+                      type="text"
+                      inputMode="decimal"
+                      value={vatRateInput}
+                      aria-describedby="vat-rate-hint"
+                      aria-invalid={vatRateInvalid}
+                      onChange={(event) => setVatRateInput(event.target.value)}
+                    />
+                    <small id="vat-rate-hint" className="tiny muted">
+                      {vatRateInvalid
+                        ? "Enter a rate from 0 to 100 with up to two decimal places. When VAT is on, use a rate above 0."
+                        : settings.vat_mode === "add"
+                          ? `Adds VAT to menu items and add-ons. ${peso(135)} becomes ${peso(priceWithVat(135, vatRate))}.`
+                          : settings.vat_mode === "included"
+                            ? `Menu prices stay as entered. A ${peso(135)} item records ${peso(vatFromInclusive(135, vatRate))} as VAT.`
+                            : "No VAT is added to prices or recorded on sales."}
+                    </small>
                   </div>
-                </div>
+                </section>
                 <button
                   type="button"
                   className="btn btn-outline btn-block mt-2"
                   disabled={
                     saving ||
-                    JSON.stringify(settings) === JSON.stringify(savedSettings)
+                    vatRateInvalid ||
+                    (JSON.stringify(settings) === JSON.stringify(savedSettings) && vatRate === savedSettings?.vat_rate_pct)
                   }
                   onClick={() => save(undefined, "setup")}
                 >

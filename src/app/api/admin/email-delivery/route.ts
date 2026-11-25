@@ -1,5 +1,7 @@
 import { requireAdmin } from "@/lib/auth";
+import { normalizeSmtpPassword } from "@/lib/emailPasswordCrypto";
 import {
+  correctRecipientEmail,
   ensureEmailOutbox,
   listEmailDeliveries,
   retryFailedEmail,
@@ -63,36 +65,73 @@ export async function POST(request: Request) {
     );
   }
 
-  if (
-    !isRecord(body) ||
-    Object.keys(body).some((key) => key !== "action" && key !== "id") ||
-    body.action !== "retry" ||
-    typeof body.id !== "number" ||
-    !Number.isSafeInteger(body.id) ||
-    body.id < 1
-  ) {
+  if (!isRecord(body) || typeof body.action !== "string") {
     return Response.json(
-      { error: "Choose a failed email to retry.", success: false },
+      { error: "The email delivery action is invalid.", success: false },
       { status: 400 }
     );
   }
 
-  try {
-    await ensureEmailOutbox();
-    const queued = await retryFailedEmail(body.id);
-    if (!queued) {
+  if (body.action === "retry") {
+    if (
+      Object.keys(body).some((key) => key !== "action" && key !== "id") ||
+      typeof body.id !== "number" ||
+      !Number.isSafeInteger(body.id) ||
+      body.id < 1
+    ) {
       return Response.json(
-        { error: "This email is no longer marked as failed.", success: false },
-        { status: 409 }
+        { error: "Choose a failed email to retry.", success: false },
+        { status: 400 }
       );
     }
-
-    return Response.json({ success: true });
-  } catch (error: unknown) {
-    console.error("Could not queue a failed email for retry.", error);
-    return Response.json(
-      { error: "Could not queue the email for retry.", success: false },
-      { status: 500 }
-    );
+    try {
+      await ensureEmailOutbox();
+      const queued = await retryFailedEmail(body.id);
+      if (!queued) {
+        return Response.json(
+          { error: "This email is no longer marked as failed.", success: false },
+          { status: 409 }
+        );
+      }
+      return Response.json({ success: true });
+    } catch (error: unknown) {
+      console.error("Could not queue a failed email for retry.", error);
+      return Response.json(
+        { error: "Could not queue the email for retry.", success: false },
+        { status: 500 }
+      );
+    }
   }
+
+  if (body.action === "correct-recipient") {
+    if (
+      Object.keys(body).some(
+        (key) => key !== "action" && key !== "old_email" && key !== "new_email"
+      ) ||
+      typeof body.old_email !== "string" ||
+      typeof body.new_email !== "string" ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.new_email)
+    ) {
+      return Response.json(
+        { error: "Enter a valid old and new email address.", success: false },
+        { status: 400 }
+      );
+    }
+    try {
+      await ensureEmailOutbox();
+      const changed = await correctRecipientEmail(body.old_email, body.new_email);
+      return Response.json({ success: true, changed });
+    } catch (error: unknown) {
+      console.error("Could not correct the recipient email.", error);
+      return Response.json(
+        { error: "Could not correct the recipient email.", success: false },
+        { status: 500 }
+      );
+    }
+  }
+
+  return Response.json(
+    { error: "The email delivery action is invalid.", success: false },
+    { status: 400 }
+  );
 }

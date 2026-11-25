@@ -1,8 +1,8 @@
 export function peso(value: number | string | null | undefined) {
   const amount = Number(value || 0);
-  return `₱${amount.toLocaleString("en-PH", {
-    minimumFractionDigits: amount % 1 === 0 ? 0 : 2,
-    maximumFractionDigits: 2,
+  return `₱${Math.round(amount).toLocaleString("en-PH", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
   })}`;
 }
 

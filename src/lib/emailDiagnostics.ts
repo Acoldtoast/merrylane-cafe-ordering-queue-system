@@ -163,7 +163,7 @@ export function diagnoseEmailDeliveryFailure(
     diagnosis = {
       title: "The SMTP host could not be found.",
       fix: "Check the spelling and enter only the server name, such as smtp.gmail.com, without https:// or a path.",
-      transient: false,
+      transient: true,
     };
   } else if (/ECONNREFUSED/i.test(combined)) {
     diagnosis = {

@@ -9,11 +9,18 @@ import { useCustomer } from "@/components/CustomerProvider";
 import { CustomerPageSkeleton } from "@/components/CustomerPageSkeleton";
 import { peso } from "@/lib/format";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
+import { calculateServiceCharge } from "@/lib/serviceCharge";
 import type { CartItem, MenuItem } from "@/lib/types";
 
 const GCASH_CHECKOUT_DRAFT_KEY = "merrylane.gcash-checkout.v1";
 
-export function CartClient({ initialTable }: { initialTable: number }) {
+export function CartClient({
+  initialTable,
+  serviceChargePct,
+}: {
+  initialTable: number;
+  serviceChargePct: number | null;
+}) {
   const router = useRouter();
   const feedback = useFeedback();
   const {
@@ -22,6 +29,7 @@ export function CartClient({ initialTable }: { initialTable: number }) {
     items,
     count,
     subtotal,
+    vatRatePct,
     orderType,
     setOrderType,
     clearCart,
@@ -31,6 +39,14 @@ export function CartClient({ initialTable }: { initialTable: number }) {
     setStockLimits,
     ready,
   } = useCustomer();
+
+  const serviceCharge = serviceChargePct === null
+    ? null
+    : calculateServiceCharge(subtotal, serviceChargePct);
+  const exactTotal = serviceCharge === null ? null : subtotal + serviceCharge;
+  const total = exactTotal === null ? null : Math.round(exactTotal);
+  const rounding =
+    exactTotal === null ? 0 : Math.round((Math.round(exactTotal) - exactTotal) * 100) / 100;
 
   const [paymentMethod, setPaymentMethod] = useState<"gcash" | "counter">("counter");
   const [customerName, setCustomerName] = useState("");
@@ -84,8 +100,8 @@ export function CartClient({ initialTable }: { initialTable: number }) {
   }, [items]);
   const stockChecked = useRef(false);
 
-  const readCurrentMenu = useCallback(async () => {
-    const response = await fetchPortalApi("/api/menu", { cache: "no-store" });
+  const readCurrentMenu = useCallback(async (usePrefetch = false) => {
+    const response = await fetchPortalApi("/api/menu", usePrefetch ? undefined : { cache: "no-store" });
     const data = await response.json();
     if (!response.ok || !data.success || !Array.isArray(data.items)) {
       throw new Error(data.error || "Could not check the latest stock.");
@@ -135,7 +151,7 @@ export function CartClient({ initialTable }: { initialTable: number }) {
     let alive = true;
     (async () => {
       try {
-        const menuItems = await readCurrentMenu();
+        const menuItems = await readCurrentMenu(true);
         if (!alive) return;
         const adjusted = reconcileStock(menuItems, itemsRef.current);
         if (adjusted.length > 0) {
@@ -229,7 +245,6 @@ export function CartClient({ initialTable }: { initialTable: number }) {
 
     setSubmitPhase("sending");
     const itemCount = count;
-    const total = subtotal;
     const methodLabel = "Pay at counter";
     let stockConflict = false;
     const result = await feedback.run(
@@ -242,6 +257,7 @@ export function CartClient({ initialTable }: { initialTable: number }) {
             order_type: orderType,
             payment_method: paymentMethod,
             customer_name: customerName,
+            menu_vat_pct: vatRatePct,
             remarks,
             items: items.map((item) => ({
               menuItemId: item.menuItemId,
@@ -255,7 +271,9 @@ export function CartClient({ initialTable }: { initialTable: number }) {
         });
         const data = await response.json();
         if (!response.ok || !data.success) {
-          if (response.status === 409) {
+          if (data.code === "VAT_RATE_CHANGED") {
+            router.refresh();
+          } else if (response.status === 409) {
             stockConflict = true;
             try {
               const menuItems = await readCurrentMenu();
@@ -285,7 +303,7 @@ export function CartClient({ initialTable }: { initialTable: number }) {
             },
             { label: "Table", value: String(table).padStart(2, "0") },
             { label: "Items", value: String(itemCount) },
-            { label: "Total", value: peso(total) },
+            { label: "Total", value: peso(data.total) },
             { label: "Payment", value: methodLabel },
           ],
         }),
@@ -579,16 +597,22 @@ export function CartClient({ initialTable }: { initialTable: number }) {
             </div>
             <div className="summary-totals">
               <div className="totals-row">
-                <span>Subtotal</span>
+                <span>Subtotal{vatRatePct > 0 ? ` (includes ${vatRatePct}% VAT)` : ""}</span>
                 <span>{peso(subtotal)}</span>
               </div>
               <div className="totals-row">
-                <span>Service charge</span>
-                <span>Included</span>
+                <span>Service charge{serviceChargePct === null ? "" : ` (${serviceChargePct}%)`}</span>
+                <span>{serviceCharge === null ? "Calculated at checkout" : peso(serviceCharge)}</span>
               </div>
+              {rounding !== 0 && (
+                <div className="totals-row">
+                  <span>Rounding</span>
+                  <span>{rounding > 0 ? "+" : "−"}{peso(Math.abs(rounding))}</span>
+                </div>
+              )}
               <div className="totals-row total">
                 <span>Total</span>
-                <span>{peso(subtotal)}</span>
+                <span>{total === null ? "Calculated at checkout" : peso(total)}</span>
               </div>
             </div>
             <div className="summary-note">

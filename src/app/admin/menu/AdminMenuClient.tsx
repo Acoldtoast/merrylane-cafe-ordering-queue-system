@@ -1202,6 +1202,7 @@ export function AdminMenuClient() {
               <div className="modal-form-row">
                 <div className="field">
                   <label className="label" htmlFor="item-price">Price (₱) (required)</label>
+                  <small className="muted">Enter the price before VAT if “Add VAT to menu prices” is on in Café Setup.</small>
                   <input
                     id="item-price"
                     className="input"

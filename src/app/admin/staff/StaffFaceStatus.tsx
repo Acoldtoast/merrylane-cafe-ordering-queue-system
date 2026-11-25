@@ -5,6 +5,7 @@ import Image from "next/image";
 import { Icon } from "@/components/Icons";
 import { StaffFaceCamera } from "./StaffFaceCamera";
 import { StaffFacePhotoPreview } from "./StaffFacePhotoPreview";
+import { StaffIdentityUpdateSuccess } from "./StaffIdentityUpdateSuccess";
 
 type Status = {
   enabled: boolean;
@@ -115,6 +116,7 @@ export function StaffFaceStatus({ userId, name }: { userId: number; name: string
   const [retakingAll, setRetakingAll] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [savingFacePhotos, setSavingFacePhotos] = useState(false);
+  const [updateSuccess, setUpdateSuccess] = useState(false);
   const reviewDialog = useRef<HTMLDialogElement>(null);
   const reviewRequest = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -164,6 +166,7 @@ export function StaffFaceStatus({ userId, name }: { userId: number; name: string
     const controller = new AbortController();
     reviewRequest.current = controller;
     setReviewOpen(true);
+    setUpdateSuccess(false);
     setReviewBusy(true);
     setReviewError("");
     setFacePhotos(null);
@@ -184,12 +187,14 @@ export function StaffFaceStatus({ userId, name }: { userId: number; name: string
   }
 
   function startRetake(pose: number) {
+    setUpdateSuccess(false);
     setRetakingAll(false);
     setRetakePose(pose);
     setCameraOpen(true);
   }
 
   function startRetakeAll() {
+    setUpdateSuccess(false);
     setRetakeFiles({});
     setRetakingAll(true);
     setRetakePose(null);
@@ -199,6 +204,7 @@ export function StaffFaceStatus({ userId, name }: { userId: number; name: string
   async function saveFacePhotos() {
     if (!facePhotos || !facePhotoPoses.some(({ key }) => retakeFiles[key])) return;
     setSavingFacePhotos(true);
+    setUpdateSuccess(false);
     setReviewError("");
     setNotice("");
     try {
@@ -268,6 +274,7 @@ export function StaffFaceStatus({ userId, name }: { userId: number; name: string
       setRetakingAll(false);
       await load();
       setNotice("Face photos updated. The staff member must verify their face again.");
+      setUpdateSuccess(true);
     } catch (err) {
       setReviewError(err instanceof Error ? err.message : "Could not update the registered face photos.");
     } finally {
@@ -287,6 +294,7 @@ export function StaffFaceStatus({ userId, name }: { userId: number; name: string
     setRetakingAll(false);
     setRetakePose(null);
     setCameraOpen(false);
+    setUpdateSuccess(false);
   }
 
   const retakeCount = facePhotoPoses.filter(({ key }) => retakeFiles[key]).length;
@@ -326,28 +334,42 @@ export function StaffFaceStatus({ userId, name }: { userId: number; name: string
         <button type="button" className="btn btn-ghost btn-sm" aria-label="Close face photo review" disabled={savingFacePhotos} onClick={() => reviewDialog.current?.close()}>×</button>
       </div>
       <p className="staff-face-review-description">These are the reference photos used for the staff face check. Retaking and saving photos rechecks the ID and front face with third-party services, replaces the registered face, and requires the staff member to verify again. Obtain their permission first.</p>
-      {reviewBusy && <p className="staff-face-review-state" role="status">Loading registered face photos…</p>}
-      {reviewError && <p className="staff-face-review-state" role="alert">{reviewError}</p>}
-      {facePhotos && <div className="staff-face-review-grid">
-        {facePhotoPoses.map(({ key, label: title }, index) => <figure className="staff-face-review-card" key={key}>
-          <figcaption>{title}</figcaption>
-          {retakeFiles[key]
-            ? <StaffFacePhotoPreview file={retakeFiles[key]} label={title} />
-            : <Image className="staff-face-review-image" src={facePhotos[key]} alt={`Registered face photo, ${title.toLowerCase()}`} width={400} height={300} unoptimized />}
-          <button type="button" className="btn btn-outline btn-sm" aria-label={`Retake ${title.toLowerCase()} photo`} disabled={savingFacePhotos || cameraOpen} onClick={() => startRetake(index)}>
-            {retakeFiles[key] ? "Retake again" : "Retake"}
-          </button>
-        </figure>)}
-      </div>}
-      {retakingAll && retakeCount < facePhotoPoses.length && <p className="staff-face-review-state" role="status">Capture all three photos before saving the full retake.</p>}
-      <div className="staff-face-review-actions">
-        {reviewError && !facePhotos && <button type="button" className="btn btn-outline" disabled={reviewBusy} onClick={() => void loadFacePhotos()}>Try again</button>}
-        <button type="button" className="btn btn-outline" disabled={!facePhotos || savingFacePhotos || cameraOpen || reviewBusy} onClick={startRetakeAll}>Retake all photos</button>
-        <button type="button" className="btn btn-primary" disabled={!facePhotos || savingFacePhotos || cameraOpen || retakeCount === 0 || (retakingAll && retakeCount < facePhotoPoses.length)} onClick={() => void saveFacePhotos()}>
-          {savingFacePhotos ? "Verifying and saving…" : "Verify and save"}
-        </button>
-        <button type="button" className="btn btn-ghost" disabled={savingFacePhotos} onClick={() => reviewDialog.current?.close()}>Close</button>
-      </div>
+      {updateSuccess ? (
+        <>
+          <StaffIdentityUpdateSuccess
+            title="Face photos verified and saved"
+            message="The updated photos matched the registered ID. The staff member must complete a fresh duty face check when face checking is enabled."
+          />
+          <div className="staff-face-review-actions">
+            <button type="button" className="btn btn-primary" onClick={() => reviewDialog.current?.close()}>Done</button>
+          </div>
+        </>
+      ) : (
+        <>
+          {reviewBusy && <p className="staff-face-review-state" role="status">Loading registered face photos…</p>}
+          {reviewError && <p className="staff-face-review-state" role="alert">{reviewError}</p>}
+          {facePhotos && <div className="staff-face-review-grid">
+            {facePhotoPoses.map(({ key, label: title }, index) => <figure className="staff-face-review-card" key={key}>
+              <figcaption>{title}</figcaption>
+              {retakeFiles[key]
+                ? <StaffFacePhotoPreview file={retakeFiles[key]} label={title} />
+                : <Image className="staff-face-review-image" src={facePhotos[key]} alt={`Registered face photo, ${title.toLowerCase()}`} width={400} height={300} unoptimized />}
+              <button type="button" className="btn btn-outline btn-sm" aria-label={`Retake ${title.toLowerCase()} photo`} disabled={savingFacePhotos || cameraOpen} onClick={() => startRetake(index)}>
+                {retakeFiles[key] ? "Retake again" : "Retake"}
+              </button>
+            </figure>)}
+          </div>}
+          {retakingAll && retakeCount < facePhotoPoses.length && <p className="staff-face-review-state" role="status">Capture all three photos before saving the full retake.</p>}
+          <div className="staff-face-review-actions">
+            {reviewError && !facePhotos && <button type="button" className="btn btn-outline" disabled={reviewBusy} onClick={() => void loadFacePhotos()}>Try again</button>}
+            <button type="button" className="btn btn-outline" disabled={!facePhotos || savingFacePhotos || cameraOpen || reviewBusy} onClick={startRetakeAll}>Retake all photos</button>
+            <button type="button" className="btn btn-primary" disabled={!facePhotos || savingFacePhotos || cameraOpen || retakeCount === 0 || (retakingAll && retakeCount < facePhotoPoses.length)} onClick={() => void saveFacePhotos()}>
+              {savingFacePhotos ? "Verifying and saving…" : "Verify and save"}
+            </button>
+            <button type="button" className="btn btn-ghost" disabled={savingFacePhotos} onClick={() => reviewDialog.current?.close()}>Close</button>
+          </div>
+        </>
+      )}
       {cameraOpen && <div className="modal-backdrop staff-face-popup-backdrop" style={{ zIndex: 1102 }}>
         <section className="modal staff-face-popup" role="dialog" aria-modal="true" aria-label={retakePose === null ? "Retake all face photos" : `Retake ${facePhotoPoses[retakePose].label.toLowerCase()} face photo`}>
           <StaffFaceCamera

@@ -26,7 +26,9 @@ const DEFAULT_VALUES: Record<string, string> = {
   opening_time: "09:00",
   closing_time: "22:00",
   service_charge_pct: "0",
-  vat_inclusive: "true",
+  vat_mode: "none",
+  vat_inclusive: "false",
+  vat_rate_pct: "0",
   days_operating: "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday",
   staff_idle_warning_minutes: "10",
   staff_idle_countdown_seconds: "60",
@@ -49,7 +51,9 @@ const FIELD_LABELS: Record<string, string> = {
   opening_time: "Opening time",
   closing_time: "Closing time",
   service_charge_pct: "Service charge",
+  vat_mode: "VAT pricing",
   vat_inclusive: "VAT setting",
+  vat_rate_pct: "VAT rate",
   days_operating: "Operating days",
   staff_idle_warning_minutes: "Staff idle warning minutes",
   staff_idle_countdown_seconds: "Staff idle countdown seconds",
@@ -109,16 +113,23 @@ export function settingsAuditChanges({
       continue;
     }
 
-    if (key === "vat_inclusive") {
+    if (key === "vat_mode") {
       changes.push(
-        `VAT setting changed from ${booleanLabel(previousValue, "Included", "Not included")} to ${booleanLabel(nextValue, "Included", "Not included")}.`
+        `VAT pricing changed from ${vatModeLabel(previousValue)} to ${vatModeLabel(nextValue)}.`
       );
       continue;
     }
 
-    if (key === "service_charge_pct") {
+    if (key === "vat_inclusive") {
       changes.push(
-        `Service charge changed from ${formatPercent(previousValue)} to ${formatPercent(nextValue)}.`
+        `Add VAT to menu prices changed from ${booleanLabel(previousValue, "On", "Off")} to ${booleanLabel(nextValue, "On", "Off")}.`
+      );
+      continue;
+    }
+
+    if (key === "service_charge_pct" || key === "vat_rate_pct") {
+      changes.push(
+        `${FIELD_LABELS[key]} changed from ${formatPercent(previousValue)} to ${formatPercent(nextValue)}.`
       );
       continue;
     }
@@ -177,7 +188,7 @@ function sameSettingValue(key: string, previous: unknown, next: unknown) {
   if (key === "ordering_closed" || key === "vat_inclusive") {
     return asBoolean(previous) === asBoolean(next);
   }
-  if (key === "service_charge_pct") {
+  if (key === "service_charge_pct" || key === "vat_rate_pct") {
     const previousAmount = Number(previous || 0);
     const nextAmount = Number(next || 0);
     return Number.isFinite(previousAmount) && Number.isFinite(nextAmount)
@@ -199,6 +210,14 @@ function asBoolean(value: unknown) {
 
 function booleanLabel(value: unknown, trueLabel: string, falseLabel: string) {
   return asBoolean(value) ? trueLabel : falseLabel;
+}
+
+function vatModeLabel(value: unknown) {
+  return value === "add"
+    ? "added to menu prices"
+    : value === "included"
+      ? "already included in menu prices"
+      : "off";
 }
 
 function formatPercent(value: unknown) {
