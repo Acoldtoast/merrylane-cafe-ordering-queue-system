@@ -11,11 +11,13 @@ import type { Category, MenuItem } from "@/lib/types";
 import type { OrderingWindow } from "@/lib/models";
 import { peso, timeLabel, timeOfDay } from "@/lib/format";
 import { preloadPortalRouteCode } from "@/lib/preloadPortalRouteCode";
-
-interface MenuResponse {
-  categories: Category[];
-  items: MenuItem[];
-}
+import { CUSTOMER_ITEM_LIMIT, CUSTOMER_ITEM_LIMIT_MESSAGE, remainingCustomerQuantity } from "@/lib/customerQuantity";
+import {
+  reconcileCartStock,
+  stockWarningCopy,
+  stockWarningDetails,
+} from "@/lib/cartStock";
+import { useQuantityLimitWarning } from "@/lib/useQuantityLimitWarning";
 
 type AddButtonFeedback = {
   itemId: number;
@@ -38,9 +40,10 @@ export function MenuClient({
   initialOrdering?: OrderingWindow | null;
 }) {
   const router = useRouter();
-  const { setTable, addItem, setStockLimits, setQuantity, items: cartItems, ready } =
+  const { setTable, addItem, setStockLimits, setQuantity, removeItem, items: cartItems, ready } =
     useCustomer();
   const feedback = useFeedback();
+  const { warningKey, warn } = useQuantityLimitWarning<number>();
   const categories = initialCategories;
   const items = initialItems;
   const [search, setSearch] = useState("");
@@ -90,37 +93,21 @@ export function MenuClient({
 
   useEffect(() => {
     if (!ready) return;
-    const limits: Record<number, number | null> = {};
-    for (const item of initialItems) {
-      limits[item.id] = item.stock_tracking_enabled
-        ? Math.max(0, item.stock_count)
-        : null;
-    }
-    setStockLimits(limits);
-    const adjusted: { name: string; from: number; to: number }[] = [];
-    for (const line of cartItemsRef.current) {
-      const limit = limits[line.menuItemId];
-      if (limit === null || limit === undefined) continue;
-      if (line.quantity > limit) {
-        adjusted.push({ name: line.name, from: line.quantity, to: limit });
-        setQuantity(line.key, limit);
-      }
-    }
+    const adjusted = reconcileCartStock(initialItems, cartItemsRef.current, {
+      setQuantity,
+      removeItem,
+      setStockLimits,
+    });
     if (adjusted.length > 0) {
-      feedback.warning("Your cart was adjusted", {
+      const copy = stockWarningCopy(adjusted, "browse");
+      feedback.warning(copy.title, {
         eyebrow: "Stock changed",
-        message:
-          "Some portions sold while you were deciding, so we trimmed your cart to what is still available.",
-        details: adjusted.map((entry) => ({
-          label: entry.name,
-          value:
-            entry.to > 0
-              ? `${entry.from} → ${entry.to} left`
-              : "Removed · sold out",
-        })),
+        duration: 0,
+        message: copy.message,
+        details: stockWarningDetails(adjusted),
       });
     }
-  }, [initialItems, ready, feedback, setQuantity, setStockLimits]);
+  }, [initialItems, ready, feedback, setQuantity, removeItem, setStockLimits]);
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -172,12 +159,6 @@ export function MenuClient({
       .filter((entry) => entry.menuItemId === menuItemId)
       .reduce((sum, entry) => sum + entry.quantity, 0);
 
-  const remainingFor = (item: MenuItem) => {
-    const limit = stockLimitFor(item);
-    if (limit === null) return Infinity;
-    return Math.max(0, limit - inCartQuantity(item.id));
-  };
-
   const quickAdd = (item: MenuItem) => {
     if (!ready) return;
     if (item.stock_status === "out") {
@@ -188,11 +169,16 @@ export function MenuClient({
       });
       return;
     }
+    const inCart = inCartQuantity(item.id);
+    if (inCart >= CUSTOMER_ITEM_LIMIT) {
+      warn(item.id);
+      return;
+    }
     if (item.variants.length || item.extras.length) {
       openItem(item);
       return;
     }
-    if (remainingFor(item) <= 0) {
+    if (remainingCustomerQuantity(stockLimitFor(item), inCart) <= 0) {
       const limit = stockLimitFor(item) ?? 0;
       feedback.warning(
         limit > 0 ? `Only ${limit} ${item.name} today` : `${item.name} is sold out`,
@@ -235,12 +221,21 @@ export function MenuClient({
         <div className="order-closed-banner">
           <Icon name="clock" />
           <div>
-            <strong>Ordering is closed for today.</strong>
-            <span>
-              You can still browse the menu. Ordering reopens{" "}
-              {reopenLabel ?? "soon"}
-              {closingTime ? ` · today until ${timeLabel(closingTime)}` : ""}.
-            </span>
+            {!initialOrdering ? (
+              <>
+                <strong>The menu is temporarily unavailable.</strong>
+                <span>Please <button type="button" className="text-link" onClick={() => router.refresh()}>try again</button> in a moment.</span>
+              </>
+            ) : (
+              <>
+                <strong>Ordering is closed for today.</strong>
+                <span>
+                  You can still browse the menu. Ordering reopens{" "}
+                  {reopenLabel ?? "soon"}
+                  {closingTime ? ` · today until ${timeLabel(closingTime)}` : ""}.
+                </span>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -249,9 +244,6 @@ export function MenuClient({
         <div>
           <h1>{timeOfDay()} · Table {String(initialTable).padStart(2, "0")}</h1>
         </div>
-        <span className="badge badge-sage" style={{ marginBottom: 4 }}>
-          <span className="dot" /> Freshly brewing
-        </span>
       </div>
 
       <div className="menu-layout">
@@ -317,6 +309,9 @@ export function MenuClient({
                     const isAdding =
                       !ready || addState === "adding" || addState === "opening";
                     const isAdded = addState === "added";
+                    const inCart = inCartQuantity(item.id);
+                    const atOrderLimit = inCart >= CUSTOMER_ITEM_LIMIT;
+                    const remaining = remainingCustomerQuantity(stockLimitFor(item), inCart);
                     const addButtonLabel = !ready
                       ? `Loading cart for ${item.name}`
                       : addState === "opening"
@@ -327,7 +322,7 @@ export function MenuClient({
                             ? `${item.name} added`
                             : out
                               ? "Sold out"
-                              : remainingFor(item) <= 0
+                              : !atOrderLimit && remaining <= 0
                                 ? `No more ${item.name} left`
                                 : `Add ${item.name}`;
                     return (
@@ -340,7 +335,9 @@ export function MenuClient({
                         onFocus={() => warmItemRoute(item)}
                         onClick={() => openItem(item)}
                         onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") openItem(item);
+                          if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+                            openItem(item);
+                          }
                         }}
                       >
                         <div className={`menu-art tone-${(index % 4) + 1}`}>
@@ -370,6 +367,9 @@ export function MenuClient({
                         <div className="menu-info">
                           <div className="menu-name">{item.name}</div>
                           <div className="menu-desc">{item.description}</div>
+                          <div className="quantity-limit-warning" role="status">
+                            {warningKey === item.id ? CUSTOMER_ITEM_LIMIT_MESSAGE : ""}
+                          </div>
                           {item.stock_status === "low" && (
                             <span className="stock-note">
                               <Icon name="clock" size={9} />{" "}
@@ -390,7 +390,7 @@ export function MenuClient({
                                 out ||
                                 !open ||
                                 isAdding ||
-                                remainingFor(item) <= 0
+                                 (!atOrderLimit && remaining <= 0)
                               }
                               aria-busy={isAdding}
                               aria-label={addButtonLabel}
@@ -422,13 +422,6 @@ export function MenuClient({
             ))
           )}
 
-          <div className="menu-featured-note">
-            <Icon name="leaf" />
-            <span>
-              Prices are VAT inclusive. Ask our team about oat milk, allergens, and
-              today&apos;s decaf option.
-            </span>
-          </div>
         </section>
 
         <div className="desktop-only">
@@ -439,11 +432,4 @@ export function MenuClient({
       <MobileCartBar />
     </div>
   );
-}
-
-function formatTime(value: string) {
-  const [hour, minute] = value.split(":").map(Number);
-  const d = new Date();
-  d.setHours(hour || 0, minute || 0, 0, 0);
-  return d.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit" });
 }

@@ -39,6 +39,9 @@
     ".next-production/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "original_backup.tsx",
+    "original_staffidentity.tsx",
+    "git_restored.tsx"
   ]
 }

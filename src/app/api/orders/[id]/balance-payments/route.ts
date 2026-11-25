@@ -1,5 +1,6 @@
 import { OrderModel } from "@/lib/models";
 import { requireStaff } from "@/lib/auth";
+import { getGuestId } from "@/lib/guest";
 
 export async function POST(
   request: Request,
@@ -51,6 +52,10 @@ export async function POST(
       );
     }
 
+    const guestId = await getGuestId();
+    if (!guestId || (await OrderModel.guestOwner(orderId)) !== guestId) {
+      return Response.json({ error: "Order not found.", success: false }, { status: 404 });
+    }
     const order = await OrderModel.byId(orderId);
     if (!order) {
       return Response.json({ error: "Order not found.", success: false }, { status: 404 });

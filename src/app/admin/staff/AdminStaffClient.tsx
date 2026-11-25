@@ -2,6 +2,22 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
+import { StaffFaceCamera } from "./StaffFaceCamera";
+import { StaffFacePhotoPreview } from "./StaffFacePhotoPreview";
+import { StaffExistingIdentity } from "./StaffExistingIdentity";
+import { StaffFaceStatus } from "./StaffFaceStatus";
+import { DutyTimePicker } from "./DutyTimePicker";
+import {
+  checkStaffIdBirthDate,
+  checkStaffIdExpiration,
+  checkStaffIdName,
+  checkStaffIdNumber,
+  isStaffIdentityScanVerified,
+  staffIdRequiresExpirationDate,
+} from "@/lib/staffIdChecks";
+import { staffIdCheckLabel } from "@/lib/staffIdCheckLabels";
+import { staffRegistrationDetailsReady } from "@/lib/staffRegistrationDetails";
+import { useStaffIdDuplicateCheck } from "@/lib/useStaffIdDuplicateCheck";
 import { Icon } from "@/components/Icons";
 import { LoadingDots } from "@/components/LoadingDots";
 import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
@@ -11,7 +27,6 @@ import { usePolling } from "@/lib/usePolling";
 import { clockTime, peso } from "@/lib/format";
 import type { User } from "@/lib/types";
 import {
-  usernameForAccount,
   type AccountRole,
 } from "@/lib/usernames";
 
@@ -155,6 +170,59 @@ export function AdminStaffClient() {
     end: "",
   });
   const [accountAttempted, setAccountAttempted] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const createTriggerRef = useRef<HTMLButtonElement>(null);
+  const createCloseRef = useRef<HTMLButtonElement>(null);
+  const [identityFiles, setIdentityFiles] = useState<Record<string, File | null>>({});
+  const [identityFormKey, setIdentityFormKey] = useState(0);
+  const [identityType, setIdentityType] = useState("philsys");
+  const [idScan, setIdScan] = useState<{ outcome?: string; detected_type?: string | null; name_evidence?: string; face_match?: string; verification_token?: string; error?: string } | null>(null);
+  const [idScanning, setIdScanning] = useState(false);
+  const [idPopupOpen, setIdPopupOpen] = useState(false);
+  const [newIdReviewOpen, setNewIdReviewOpen] = useState(false);
+  const [newIdDetails, setNewIdDetails] = useState({
+    name: "",
+    number: "",
+    birth_date: "",
+    expiration_date: "",
+  });
+  const [newIdDetailsReady, setNewIdDetailsReady] = useState(false);
+  const newIdDuplicate = useStaffIdDuplicateCheck(
+    identityType,
+    newIdDetails.number,
+    newIdReviewOpen || newIdDetailsReady
+  );
+  const identityTypeCheck =
+    idScan?.outcome === "match" ||
+    (identityType === "other" &&
+      idScan?.outcome === "uncertain" &&
+      newIdDetailsReady);
+  const manualTypeReviewAvailable =
+    identityType === "other" &&
+    idScan?.outcome === "uncertain" &&
+    idScan?.face_match === "matched" &&
+    Boolean(idScan?.verification_token);
+  const identityScanVerified =
+    identityTypeCheck &&
+    idScan?.face_match === "matched" &&
+    Boolean(idScan?.verification_token);
+  const idDetailsValid =
+    checkStaffIdName(newIdDetails.name, accountForm.name) === "pass" &&
+    checkStaffIdNumber(newIdDetails.number, identityType) === "pass" &&
+    checkStaffIdBirthDate(newIdDetails.birth_date) === "pass" &&
+    checkStaffIdExpiration(newIdDetails.expiration_date, identityType) === "pass";
+  const canCreateStaffAccount =
+    identityScanVerified &&
+    newIdDetailsReady &&
+    idDetailsValid &&
+    newIdDuplicate === "unique";
+  const accountDetailsReady = staffRegistrationDetailsReady(accountForm.name, accountForm.email, accountForm.contact_number, accountDutyHours.start, accountDutyHours.end);
+  const [faceCameraOpen, setFaceCameraOpen] = useState(false);
+  const [retakePose, setRetakePose] = useState<number | null>(null);
+  const [guidedPoses, setGuidedPoses] = useState<Record<string, boolean>>({});
+  const [createdCredentials, setCreatedCredentials] = useState<{ name: string; username: string; password: string } | null>(null);
+  const [showCreatedPassword, setShowCreatedPassword] = useState(false);
+  const [showAccountPassword, setShowAccountPassword] = useState(false);
   const [creatingAccount, setCreatingAccount] = useState(false);
   const [accountReason, setAccountReason] = useState("");
   const [accountConfirmationPassword, setAccountConfirmationPassword] = useState("");
@@ -201,6 +269,48 @@ export function AdminStaffClient() {
   const [attendanceCorrectionTime, setAttendanceCorrectionTime] = useState("");
   const [attendanceCorrectionReason, setAttendanceCorrectionReason] = useState("");
 
+  const clearRegistration = useCallback(() => {
+    setAccountForm({ name: "", email: "", contact_number: "", address: "", role: "staff", password: "" });
+    setAccountDutyHours({ start: "", end: "" });
+    setAccountReason("");
+    setAccountConfirmationPassword("");
+    setAccountAttempted(false);
+    setShowAccountPassword(false);
+    setIdentityFiles({});
+    setGuidedPoses({});
+    setRetakePose(null);
+    setFaceCameraOpen(false);
+    setIdentityType("philsys");
+    setIdScan(null);
+    setNewIdDetailsReady(false);
+    setNewIdDetails({ name: "", number: "", birth_date: "", expiration_date: "" });
+    setNewIdReviewOpen(false);
+    setIdPopupOpen(false);
+    setIdentityFormKey((key) => key + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!createOpen) return;
+    const trigger = createTriggerRef.current;
+    createCloseRef.current?.focus();
+    return () => { trigger?.focus(); };
+  }, [createOpen]);
+
+  useEffect(() => {
+    if (!createOpen) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (creatingAccount || idScanning) return;
+        if (faceCameraOpen) setFaceCameraOpen(false);
+        else if (newIdReviewOpen) setNewIdReviewOpen(false);
+        else if (idPopupOpen) setIdPopupOpen(false);
+        else { clearRegistration(); setCreateOpen(false); }
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [createOpen, creatingAccount, idScanning, faceCameraOpen, newIdReviewOpen, idPopupOpen, clearRegistration]);
+
   useEffect(() => {
     if (!editConfirmationOpen) return;
     const returnFocus =
@@ -237,11 +347,7 @@ export function AdminStaffClient() {
     }
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
   usePolling(load, 15_000, {
-    immediate: false,
     enabled: pathname === "/admin/staff",
     resources: ["accounts"],
   });
@@ -339,16 +445,24 @@ export function AdminStaffClient() {
 
   const createAccount = async () => {
     setAccountAttempted(true);
-    if (!accountForm.name.trim() || !accountForm.password.trim()) {
+    if (!accountForm.name.trim() || (accountForm.role === "admin" && !accountForm.password.trim())) {
       feedback.warning("Some account details are missing", {
-        message: "Add a name and temporary password to create the account.",
+        message: "Add a name and, for administrators, a temporary password.",
       });
       return;
     }
-    if (accountForm.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(accountForm.email.trim())) {
+    if ((accountForm.role === "staff" && !accountForm.email.trim()) || (accountForm.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(accountForm.email.trim()))) {
       feedback.warning("Check the personal email", {
-        message: "Enter a valid email address, or leave the field blank.",
+        message: "Enter a valid recovery email for staff accounts.",
       });
+      return;
+    }
+    if (accountForm.role === "staff" && !accountForm.contact_number.trim()) {
+      feedback.warning("Contact number required", { message: "Enter the staff member’s contact number." });
+      return;
+    }
+    if (accountForm.role === "staff" && (!accountDutyHours.start || !accountDutyHours.end)) {
+      feedback.warning("Duty hours required", { message: "Choose both a start time and an end time." });
       return;
     }
     if (Boolean(accountDutyHours.start) !== Boolean(accountDutyHours.end)) {
@@ -356,6 +470,23 @@ export function AdminStaffClient() {
         message: "Select both a start time and an end time, or leave both blank.",
       });
       return;
+    }
+    if (accountDutyHours.start && accountDutyHours.end && accountDutyHours.end <= accountDutyHours.start) {
+      feedback.warning("Check the duty hours", { message: "The end time must be later than the start time on the same day." });
+      return;
+    }
+    if (accountForm.role === "staff") {
+      const files = ["id_front", "face_front", "face_left", "face_right", ...(identityFiles.id_back ? ["id_back"] : [])].map((key) => identityFiles[key]);
+      if (files.some((file) => !file || file.size > 2 * 1024 * 1024 || !["image/jpeg", "image/png"].includes(file.type))) {
+        feedback.warning("Identity images required", { message: "Choose an ID image and front, left and right face images. Each must be a JPEG or PNG under 2 MB." });
+        return;
+      }
+      if (!canCreateStaffAccount) {
+        feedback.warning("ID and face verification required", {
+          message: "Scan the ID and face, review the name and ID number, and resolve the duplicate-ID check before creating this staff account.",
+        });
+        return;
+      }
     }
     if (
       accountForm.role === "admin" &&
@@ -379,12 +510,35 @@ export function AdminStaffClient() {
         : {}),
     };
     let createdUsername = "";
+    let createdPassword = account.password;
     const result = await feedback.run(
       async () => {
+        const identity = account.role === "staff"
+          ? { id_type: identityType, ...Object.fromEntries(await Promise.all(["id_front", "face_front", "face_left", "face_right", ...(identityFiles.id_back ? ["id_back"] : [])].map(async (key) => {
+              const file = identityFiles[key]!;
+              const image = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Could not read image."));
+                reader.onerror = () => reject(new Error("Could not read image."));
+                reader.readAsDataURL(file);
+              });
+              return [key, image];
+            }))) }
+          : undefined;
         const response = await fetchPortalApi("/api/users", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(account),
+          body: JSON.stringify({
+            ...account,
+            identity,
+            ...(account.role === "staff"
+              ? {
+                  identity_details: newIdDetails,
+                  identity_details_reviewed: newIdDetailsReady,
+                  identity_verification_token: idScan?.verification_token,
+                }
+              : {}),
+          }),
         });
         const data = await response.json();
         if (!response.ok || !data.success) {
@@ -394,14 +548,20 @@ export function AdminStaffClient() {
           throw new Error("The new account username could not be confirmed.");
         }
         createdUsername = data.username;
+        if (account.role === "staff") {
+          if (typeof data.temporary_password !== "string" || data.temporary_password.length !== 6) {
+            throw new Error("Account created, but the temporary password could not be displayed. Reset it in staff management.");
+          }
+          createdPassword = data.temporary_password;
+        }
         return data;
       },
       {
         loading: { title: "Creating the account…", message: "Giving them access to the portal." },
         success: () => ({
           eyebrow: "Account created",
-          title: `${account.name} can sign in`,
-          message: "Share the username and temporary password with them.",
+          title: `${account.name} was added`,
+          message: account.role === "staff" ? "Identity verified and saved." : "Share the username and temporary password with them.",
           details: [
             {
               label: "Username",
@@ -414,21 +574,49 @@ export function AdminStaffClient() {
       }
     );
     if (result.ok) {
-      setAccountForm({
-        name: "",
-        email: "",
-        contact_number: "",
-        address: "",
-        role: "staff",
-        password: "",
-      });
-      setAccountDutyHours({ start: "", end: "" });
-      setAccountReason("");
-      setAccountConfirmationPassword("");
-      setAccountAttempted(false);
+      setFaceCameraOpen(false);
+      feedback.dismiss();
+      setCreatedCredentials({ name: account.name, username: createdUsername, password: createdPassword });
+      setShowCreatedPassword(true);
+      setCreateOpen(false);
+      clearRegistration();
       await load();
     }
     setCreatingAccount(false);
+  };
+
+  const scanId = async () => {
+    const file = identityFiles.id_front;
+    const face = identityFiles.face_front;
+    if (!file || !face || !accountForm.name.trim()) {
+      setIdScan({ error: "Enter the staff name and capture a front face photo before scanning." });
+      return;
+    }
+    setIdScanning(true);
+    setIdScan(null);
+    try {
+      const form = new FormData();
+      form.set("image", file);
+      form.set("type", identityType);
+      form.set("face", face);
+      form.set("name", accountForm.name.trim());
+      const response = await fetch("/api/admin/staff/id-scan", { method: "POST", body: form });
+      const data = await response.json();
+      setIdScan(response.ok ? data : { error: data.error || "Could not scan the ID." });
+      const manualTypeReviewRequired =
+        identityType === "other" &&
+        data.outcome === "uncertain" &&
+        data.face_match === "matched";
+      if (response.ok && (isStaffIdentityScanVerified(data.outcome, data.face_match) || manualTypeReviewRequired) && typeof data.verification_token === "string") {
+        setNewIdDetails(data.suggestions ?? { name: "", number: "", birth_date: "", expiration_date: "" });
+        setNewIdDetailsReady(false);
+        setNewIdReviewOpen(true);
+      }
+    } catch {
+      setIdScan({ error: "Could not scan the ID. Please try again." });
+    } finally {
+      setIdScanning(false);
+    }
   };
 
   const openEdit = (user: User) => {
@@ -480,12 +668,12 @@ export function AdminStaffClient() {
       return;
     }
     if (
-      editForm.email.trim() &&
+      !editForm.email.trim() ||
       (editForm.email.trim().length > 254 ||
         !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editForm.email.trim()))
     ) {
       feedback.warning("Check the personal email", {
-        message: "Enter a valid email address, or leave the field blank.",
+        message: "Enter a valid recovery email address.",
       });
       return;
     }
@@ -493,6 +681,10 @@ export function AdminStaffClient() {
       feedback.warning("Choose both schedule times", {
         message: "Select both a start time and an end time, or leave both blank.",
       });
+      return;
+    }
+    if (editDutyHours.start && editDutyHours.end && editDutyHours.end <= editDutyHours.start) {
+      feedback.warning("Check the duty hours", { message: "The end time must be later than the start time on the same day." });
       return;
     }
     const usernameChanged =
@@ -781,14 +973,19 @@ export function AdminStaffClient() {
     <>
       {error && <div className="error-strip" style={{ marginBottom: 13 }}>{error}</div>}
 
-      <div className="admin-two">
+      <div className="admin-staff-layout">
         <div className="panel">
           <div className="panel-head">
             <div>
               <h2>Team accounts</h2>
               <p>Staff accounts and their access details.</p>
             </div>
-            <span className="badge badge-cream">{users.length}</span>
+            <div className="staff-list-actions">
+              <span className="badge badge-cream">{users.length}</span>
+              <button ref={createTriggerRef} type="button" className="btn btn-primary" onClick={() => { setShowAccountPassword(false); setCreateOpen(true); }}>
+                <Icon name="users" size={16} /> Register new staff
+              </button>
+            </div>
           </div>
           <div className="panel-body">
             <div className="account-list">
@@ -809,11 +1006,6 @@ export function AdminStaffClient() {
                       </span>
                       <span className="account-info">
                         <strong>{user.name}</strong>
-                        <span>{user.username || "—"}</span>
-                        <span>{user.email || "No email saved"}</span>
-                        <span className="muted account-duty">
-                          Profile, attendance &amp; sales
-                        </span>
                         <span className="account-view-link">View profile</span>
                       </span>
                     </button>
@@ -829,15 +1021,21 @@ export function AdminStaffClient() {
           </div>
         </div>
 
-        <div className="panel">
+        {createOpen && (
+        <div className="modal-backdrop">
+        <section className="modal staff-create-panel" role="dialog" aria-modal="true" aria-labelledby="staff-create-title">
           <div className="panel-head">
             <div>
-              <h2>Add an account</h2>
-              <p>Create credentials for a new team member.</p>
+              <h2 id="staff-create-title">Add an account</h2>
+
             </div>
+            <button ref={createCloseRef} type="button" className="staff-create-close" disabled={creatingAccount || idScanning} onClick={() => { clearRegistration(); setCreateOpen(false); }} aria-label="Close registration">
+              <Icon name="x" />
+            </button>
           </div>
           <div className="panel-body">
-            <div className="invite-form">
+            <div className="staff-create-grid">
+            <div className="invite-form staff-create-fields">
               <div className="field">
                 <label className="label" htmlFor="acc-name">Full name (required)</label>
                 <input
@@ -847,13 +1045,13 @@ export function AdminStaffClient() {
                   required
                   aria-invalid={accountAttempted && !accountForm.name.trim()}
                   onChange={(event) =>
-                    setAccountForm((current) => ({ ...current, name: event.target.value }))
+                    { setIdScan(null); setNewIdDetailsReady(false); setAccountForm((current) => ({ ...current, name: event.target.value })); }
                   }
                   placeholder="Juan Dela Cruz"
                 />
               </div>
               <div className="field">
-                <label className="label" htmlFor="acc-email">Email (optional)</label>
+                <label className="label" htmlFor="acc-email">Recovery email {accountForm.role === "staff" ? "(required)" : "(optional)"}</label>
                 <input
                   id="acc-email"
                   className="input"
@@ -865,36 +1063,15 @@ export function AdminStaffClient() {
                   }
                   placeholder="juan@example.com"
                 />
-                  <span className="tiny">Personal email for account contact and password recovery.</span>
               </div>
               <div className="field">
-                <label className="label" htmlFor="acc-username">
-                  Login username (auto-generated)
-                </label>
-                <input
-                  id="acc-username"
-                  className="input"
-                  type="text"
-                  value={accountForm.name.trim()
-                    ? usernameForAccount(accountForm.name, accountForm.role)
-                    : ""}
-                  readOnly
-                  placeholder={accountForm.role === "admin"
-                    ? "admin-merrylane"
-                    : "First name + -merrylane"}
-                />
-                <span className="tiny">
-                  {accountForm.role === "admin"
-                    ? "Administrator usernames are always admin-merrylane."
-                    : "The username is generated automatically from the first name."}
-                </span>
-              </div>
-              <div className="field">
-                <label className="label" htmlFor="acc-contact-number">Contact number</label>
+                <label className="label" htmlFor="acc-contact-number">Contact number {accountForm.role === "staff" ? "(required)" : "(optional)"}</label>
                 <input
                   id="acc-contact-number"
                   className="input"
                   type="tel"
+                  required={accountForm.role === "staff"}
+                  aria-invalid={accountAttempted && accountForm.role === "staff" && !accountForm.contact_number.trim()}
                   maxLength={40}
                   value={accountForm.contact_number}
                   onChange={(event) =>
@@ -907,42 +1084,17 @@ export function AdminStaffClient() {
                 />
               </div>
               <div className="field">
-                <span className="label">Scheduled duty hours</span>
+                <span className="label">Scheduled duty hours {accountForm.role === "staff" ? "(required)" : "(optional)"}</span>
                 <div className="staff-duty-hours-inputs">
                   <div className="field">
-                    <label className="label" htmlFor="acc-duty-start">Start time</label>
-                    <input
-                      id="acc-duty-start"
-                      className="input"
-                      type="time"
-                      value={accountDutyHours.start}
-                      onChange={(event) =>
-                        setAccountDutyHours((current) => ({
-                          ...current,
-                          start: event.target.value,
-                        }))
-                      }
-                    />
+                    <label className="label" htmlFor="acc-duty-start">Start time{accountForm.role === "staff" ? " (required)" : ""}</label>
+                    <DutyTimePicker id="acc-duty-start" value={accountDutyHours.start} validate={(value) => accountDutyHours.end && value >= accountDutyHours.end ? "Start time must be earlier than end time." : null} onChange={(value) => setAccountDutyHours((current) => ({ ...current, start: value }))} />
                   </div>
                   <div className="field">
-                    <label className="label" htmlFor="acc-duty-end">End time</label>
-                    <input
-                      id="acc-duty-end"
-                      className="input"
-                      type="time"
-                      value={accountDutyHours.end}
-                      onChange={(event) =>
-                        setAccountDutyHours((current) => ({
-                          ...current,
-                          end: event.target.value,
-                        }))
-                      }
-                    />
+                    <label className="label" htmlFor="acc-duty-end">End time{accountForm.role === "staff" ? " (required)" : ""}</label>
+                    <DutyTimePicker id="acc-duty-end" value={accountDutyHours.end} validate={(value) => accountDutyHours.start && value <= accountDutyHours.start ? "End time must be later than start time." : null} onChange={(value) => setAccountDutyHours((current) => ({ ...current, end: value }))} />
                   </div>
                 </div>
-                <span className="field-hint">
-                  Choose this staff member’s usual hours; actual attendance is tracked separately.
-                </span>
               </div>
               <div className="field">
                 <label className="label" htmlFor="acc-address">Address</label>
@@ -1010,33 +1162,208 @@ export function AdminStaffClient() {
                   </div>
                 </div>
               )}
-              <div className="field">
+              {accountForm.role === "admin" && <div className="field">
                 <label className="label" htmlFor="acc-password">Temporary password (required)</label>
-                <input
-                  id="acc-password"
-                  className="input"
-                  type="text"
-                  value={accountForm.password}
-                  required
-                  aria-invalid={accountAttempted && !accountForm.password.trim()}
-                  onChange={(event) =>
-                    setAccountForm((current) => ({ ...current, password: event.target.value }))
-                  }
-                  placeholder="At least 6 characters"
-                />
-              </div>
+                <div className="password-input-control">
+                  <input
+                    id="acc-password"
+                    className="input"
+                    type={showAccountPassword ? "text" : "password"}
+                    value={accountForm.password}
+                    required
+                    maxLength={128}
+                    autoComplete="new-password"
+                    aria-invalid={accountAttempted && !accountForm.password.trim()}
+                    onChange={(event) =>
+                      setAccountForm((current) => ({ ...current, password: event.target.value }))
+                    }
+                    placeholder="At least 6 characters"
+                  />
+                  <button
+                    type="button"
+                    className="password-input-toggle"
+                    onClick={() => setShowAccountPassword((shown) => !shown)}
+                    aria-label={showAccountPassword ? "Hide temporary password" : "Show temporary password"}
+                    aria-pressed={showAccountPassword}
+                  >
+                    <Icon name={showAccountPassword ? "eye-off" : "eye"} size={16} />
+                  </button>
+                </div>
+              </div>}
+              {accountForm.role === "staff" && <p className="tiny">A temporary password will be generated and shown after the account is created.</p>}
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={creatingAccount}
+                disabled={creatingAccount || (accountForm.role === "staff" && !canCreateStaffAccount)}
                 onClick={createAccount}
               >
                 {creatingAccount ? <LoadingDots label="Creating" /> : "Create account"}
               </button>
             </div>
+            {accountForm.role === "staff" && (
+              <section className="staff-identity-panel" key={identityFormKey} aria-labelledby="staff-identity-title">
+                <span className="eyebrow" id="staff-identity-title">Identity registration</span>
+                {!accountDetailsReady && <div className="staff-identity-blocker" role="status" id="identity-details-required">
+                  <Icon name="lock" size={22} />
+                  <strong>Complete the account details first</strong>
+                  <p>Enter the staff member’s full name, recovery email, contact number, and valid duty hours to begin identity registration.</p>
+                </div>}
+                <fieldset className="staff-identity-fields" disabled={!accountDetailsReady} aria-describedby={!accountDetailsReady ? "identity-details-required" : undefined}>
+                <div className="staff-identity-group">
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => { setRetakePose(null); setFaceCameraOpen(true); }}>{identityFiles.face_front || identityFiles.face_left || identityFiles.face_right ? "Retake face" : "Register face"}</button>
+                  <div className="staff-identity-poses">
+                    {([
+                      ["face_front", "Straight on"],
+                      ["face_left", "Turn left"],
+                      ["face_right", "Turn right"],
+                    ] as const).map(([key, label], index) => (
+                      <div className="staff-identity-upload" key={key}>
+                        <span className={`staff-identity-step${guidedPoses[key] ? " is-passed" : ""}`} aria-label={guidedPoses[key] ? "Guided pose captured" : "Pose not checked"}>{guidedPoses[key] ? "✓" : index + 1}</span>
+                        {identityFiles[key] && <StaffFacePhotoPreview file={identityFiles[key]!} label={label} />}
+                        <strong>{label}</strong>
+                        {identityFiles[key] ? (
+                          <button type="button" className="btn btn-outline btn-sm" disabled={faceCameraOpen} onClick={() => { setRetakePose(index); setFaceCameraOpen(true); }}>Retake</button>
+                        ) : (
+                          <label className="staff-identity-id-upload">Upload photo
+                            <input type="file" accept="image/jpeg,image/png" aria-label={`${label} face photo`} onChange={(event) => { const file = event.target.files?.[0] ?? null; setIdScan(null); setNewIdDetailsReady(false); setIdentityFiles((current) => ({ ...current, [key]: file })); setGuidedPoses((current) => ({ ...current, [key]: false })); }} />
+                          </label>
+                        )}
+                        {identityFiles[key] && !guidedPoses[key] && <span>Pose not checked — retake with camera</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="staff-identity-group">
+                  <h4>Staff ID</h4>
+                  <button type="button" className="btn btn-outline btn-sm" onClick={() => setIdPopupOpen(true)}>{identityFiles.id_front ? "Review ID images" : "Add ID images"}</button>
+                </div>
+                </fieldset>
+              </section>
+            )}
+            </div>
           </div>
+        </section>
         </div>
+        )}
       </div>
+
+      {createOpen && idPopupOpen && (
+        <div className="modal-backdrop staff-face-popup-backdrop">
+          <section className="modal staff-id-popup" role="dialog" aria-modal="true" aria-labelledby="staff-id-popup-title">
+            <div className="modal-head">
+              <div><span className="eyebrow">Identity registration</span><h2 id="staff-id-popup-title">Check ID{accountForm.name.trim() ? ` — ${accountForm.name.trim()}` : ""}</h2></div>
+              <button type="button" disabled={idScanning} aria-label="Close ID check" onClick={() => setIdPopupOpen(false)}><Icon name="x" /></button>
+            </div>
+            <div className="modal-body staff-id-popup-body">
+                  <label className="field">
+                    <span className="label">Kind of ID</span>
+                    <select className="select" value={identityType} disabled={idScanning} onChange={(event) => { setIdentityType(event.target.value); setIdScan(null); setNewIdDetailsReady(false); }}>
+                      <option value="philsys">PhilSys National ID</option>
+                      <option value="drivers_license">Driver’s license</option>
+                      <option value="passport">Passport</option>
+                      <option value="postal">Postal ID</option>
+                      <option value="voter">Voter’s ID</option>
+                      <option value="philhealth">PhilHealth ID</option>
+                      <option value="other">Other government ID</option>
+                    </select>
+                  </label>
+                  {([["id_front", "Front of the ID", "Required"], ["id_back", "Back of the ID", "Optional"]] as const).map(([key, label, requirement]) => (
+                    <div className="staff-identity-id-side" key={key}>
+                      <strong>{label}</strong> <span className="badge badge-cream">{requirement}</span>
+                      <p>{key === "id_front" ? "Keep all four edges visible and the text clear." : "Add the back if available."}</p>
+                      <div className="staff-id-side-content">
+                        <div className="staff-id-preview">
+                          {identityFiles[key] ? <StaffFacePhotoPreview file={identityFiles[key]!} label={label} /> : <span>Not captured</span>}
+                        </div>
+                        <div>
+                      <p>{identityFiles[key]?.name || "No image selected"}</p>
+                      <label className="staff-identity-id-upload">
+                        <Icon name="card" size={18} /> Choose image
+                        <input type="file" accept="image/jpeg,image/png" disabled={idScanning} aria-label={`${label} image`} onChange={(event) => { setIdScan(null); setNewIdDetailsReady(false); setIdentityFiles((current) => ({ ...current, [key]: event.target.files?.[0] ?? null })); }} />
+                      </label>
+                      {identityFiles[key] && <button type="button" className="btn btn-ghost btn-sm" disabled={idScanning} onClick={() => { setIdScan(null); setNewIdDetailsReady(false); setIdentityFiles((current) => ({ ...current, [key]: null })); }}>Remove</button>}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  <p className="tiny">Scanning sends the ID to OCR.space and the ID and staff face photo to a third-party verification service. Obtain the staff member’s permission first.</p>
+                  {idScan && <div className={`staff-id-scan-result ${idScan.error || !identityScanVerified ? "is-warning" : ""}`} role={idScan.error || !identityScanVerified ? "alert" : "status"}>
+                    {idScan.error || (idScan.face_match === "rejected" ? "The face on this ID does not match the staff photo. Check the images and try again." : manualTypeReviewAvailable ? "Face comparison passed. OCR could not identify this ID type; compare it manually in the details review." : idScan.outcome !== "match" ? "The ID type could not be verified. Use a clearer image and scan again." : idScan.face_match !== "matched" ? "Face comparison is unavailable. Please try again." : "ID type and face matched. Review the ID details to enable account creation.")}
+                  </div>}
+                  <div className="staff-id-popup-actions">
+                    <button type="button" className="btn btn-outline" disabled={idScanning} onClick={() => setIdPopupOpen(false)}>Done</button>
+                    <button type="button" className="btn btn-primary" disabled={!identityFiles.id_front || idScanning} onClick={() => void scanId()}>{idScanning ? "Scanning ID…" : "Scan ID and face"}</button>
+                  </div>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {createOpen && faceCameraOpen && (
+        <div className="modal-backdrop staff-face-popup-backdrop">
+          <section className="modal staff-face-popup" role="dialog" aria-modal="true" aria-label={retakePose === null ? "Register face" : "Retake face photo"}>
+            <StaffFaceCamera initialStep={retakePose ?? 0} singlePose={retakePose !== null} completedPoses={Object.keys(guidedPoses).filter((key) => guidedPoses[key])} onClose={() => setFaceCameraOpen(false)} onCapture={(key, file) => { setIdScan(null); setNewIdDetailsReady(false); setIdentityFiles((current) => ({ ...current, [key]: file })); setGuidedPoses((current) => ({ ...current, [key]: true })); }} />
+          </section>
+        </div>
+      )}
+
+      {createOpen && newIdReviewOpen && (
+        <div className="modal-backdrop staff-face-popup-backdrop" style={{ zIndex: 1101 }}>
+          <section className="modal staff-id-popup" role="dialog" aria-modal="true" aria-label="Review ID details">
+            <div className="modal-head"><h2>ID review — {accountForm.name}</h2><button type="button" onClick={() => setNewIdReviewOpen(false)} aria-label="Close ID review">×</button></div>
+            <div className="modal-body staff-id-popup-body">
+              <p>Awaiting review · {identityType.replaceAll("_", " ")}</p>
+              <div className="staff-create-grid">{([["id_front", "Front of ID"], ["id_back", "Back of ID"]] as const).map(([key, label]) => <div className="staff-identity-id-side" key={key}><strong>{label}</strong>{identityFiles[key] ? <StaffFacePhotoPreview file={identityFiles[key]!} label={label} /> : <p>Not provided</p>}</div>)}</div>
+              <div className="staff-identity-group">
+                <h4>Review ID details</h4><p>Check OCR suggestions against the document and correct any mistakes. A date shown as required must be readable from the ID.</p>
+                <label className="field"><span className="label">Name on ID (required)</span><input className="input" maxLength={120} value={newIdDetails.name} onChange={(e) => { setNewIdDetailsReady(false); setNewIdDetails((current) => ({ ...current, name: e.target.value })); }} /></label>
+                <label className="field"><span className="label">ID number (required)</span><input className="input" maxLength={80} value={newIdDetails.number} onChange={(e) => { setNewIdDetailsReady(false); setNewIdDetails((current) => ({ ...current, number: e.target.value })); }} /></label>
+                <label className="field"><span className="label">Date of birth (if shown)</span><input className="input" type="date" value={newIdDetails.birth_date} onChange={(e) => { setNewIdDetailsReady(false); setNewIdDetails((current) => ({ ...current, birth_date: e.target.value })); }} /></label>
+                <label className="field"><span className="label">Expiration date{staffIdRequiresExpirationDate(identityType) ? " (required)" : " (if shown)"}</span><input className="input" type="date" required={staffIdRequiresExpirationDate(identityType)} value={newIdDetails.expiration_date} onChange={(e) => { setNewIdDetailsReady(false); setNewIdDetails((current) => ({ ...current, expiration_date: e.target.value })); }} /></label>
+              </div>
+              <div className="staff-identity-group">
+                <h4>ID checks</h4>
+                <p>Every check must pass before these details can be used to create the account.</p>
+                <div className="staff-id-checks">
+                  {[
+                    ["ID type", idScan?.outcome === "match" || (identityType === "other" && idScan?.outcome === "uncertain" && newIdDetailsReady) ? staffIdCheckLabel("pass") : idScan?.outcome === "mismatch" ? staffIdCheckLabel("problem") : staffIdCheckLabel("check")],
+                    ["Details reviewed", newIdDetailsReady ? staffIdCheckLabel("pass") : staffIdCheckLabel("unknown")],
+                    ["Face comparison", idScan?.face_match === "matched" ? staffIdCheckLabel("pass") : idScan?.face_match === "rejected" ? staffIdCheckLabel("problem") : staffIdCheckLabel("check")],
+                    ["Duplicate ID", newIdDuplicate === "checking" ? "Checking…" : staffIdCheckLabel(newIdDuplicate === "unique" ? "pass" : newIdDuplicate === "duplicate" ? "problem" : "unknown")],
+                    ["Name on ID", checkStaffIdName(newIdDetails.name, accountForm.name) === "pass" ? staffIdCheckLabel("pass") : checkStaffIdName(newIdDetails.name, accountForm.name) === "mismatch" ? staffIdCheckLabel("problem") : staffIdCheckLabel("check")],
+                    ["Date of birth", checkStaffIdBirthDate(newIdDetails.birth_date) === "pass" ? staffIdCheckLabel("pass") : staffIdCheckLabel("problem")],
+                    ["ID number format", checkStaffIdNumber(newIdDetails.number, identityType) === "pass" ? staffIdCheckLabel("pass") : checkStaffIdNumber(newIdDetails.number, identityType) === "mismatch" ? staffIdCheckLabel("problem") : staffIdCheckLabel("check")],
+                    ["Expiration date", checkStaffIdExpiration(newIdDetails.expiration_date, identityType) === "pass" ? staffIdCheckLabel("pass") : checkStaffIdExpiration(newIdDetails.expiration_date, identityType) === "mismatch" ? staffIdCheckLabel("problem") : staffIdCheckLabel("check")],
+                  ].map(([label, status]) => <div className="staff-id-check" key={label}><strong>{label}</strong><span>{status}</span></div>)}
+                </div>
+                {newIdDuplicate === "duplicate" && <p className="field-error" role="alert">This ID number is already attached to another staff account.</p>}
+                {identityType === "other" && <p>OCR could not identify this ID type. Compare the document manually; a detected mismatch cannot be overridden.</p>}
+                <label className="field"><span><input type="checkbox" checked={newIdDetailsReady} onChange={(event) => setNewIdDetailsReady(event.target.checked)} /> I compared the ID type and details with the document, including the expiration date if present.</span></label>
+                <p>Automated checks do not prove that the ID is authentic.</p>
+              </div>
+              <div className="staff-id-popup-actions"><button type="button" className="btn btn-outline" onClick={() => setNewIdReviewOpen(false)}>Back</button><button type="button" className="btn btn-primary" disabled={!identityScanVerified || !newIdDetailsReady || !idDetailsValid || newIdDuplicate !== "unique"} onClick={() => { setNewIdReviewOpen(false); setIdPopupOpen(false); }}>Use these details</button></div>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {createdCredentials && (
+        <div className="modal-backdrop">
+          <section className="modal staff-credentials-modal" role="dialog" aria-modal="true" aria-labelledby="staff-credentials-title">
+            <div className="modal-head">
+              <div><span className="eyebrow">Account created</span><h2 id="staff-credentials-title">Share sign-in details</h2></div>
+              <button type="button" aria-label="Close credentials" onClick={() => setCreatedCredentials(null)}><Icon name="x" /></button>
+            </div>
+            <div className="modal-body">
+              <p>Save these details for {createdCredentials.name} now. The password will not be shown again after you close this card.</p>
+              <div className="field"><label className="label" htmlFor="created-username">Username</label><input id="created-username" className="input" readOnly value={createdCredentials.username} /></div>
+              <div className="field"><label className="label" htmlFor="created-password">Temporary password</label><input id="created-password" className="input" type={showCreatedPassword ? "text" : "password"} readOnly value={createdCredentials.password} /><button type="button" className="btn btn-outline btn-sm" onClick={() => setShowCreatedPassword((shown) => !shown)}>{showCreatedPassword ? "Hide password" : "Show password"}</button></div>
+              <p>Share these details privately. Staff can change their password in My profile.</p>
+              <button type="button" className="btn btn-primary" onClick={() => setCreatedCredentials(null)}>Done</button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {viewingProfile && (
         <div className="modal-backdrop">
@@ -1117,6 +1444,8 @@ export function AdminStaffClient() {
                       <strong>{viewingProfile.created_at || "Not available"}</strong>
                     </div>
                   </div>
+                  {viewingProfile.role === "staff" && <StaffExistingIdentity key={`identity-${viewingProfile.id}`} userId={viewingProfile.id} name={viewingProfile.name} />}
+                  {viewingProfile.role === "staff" && <StaffFaceStatus key={`face-status-${viewingProfile.id}`} userId={viewingProfile.id} name={viewingProfile.name} />}
                   <div className="account-profile-actions">
                     <span className="eyebrow">Account actions</span>
                     <button
@@ -1676,7 +2005,7 @@ export function AdminStaffClient() {
                 </span>
               </div>
               <div className="field">
-                <label className="label" htmlFor="edit-email">Personal email (optional)</label>
+                <label className="label" htmlFor="edit-email">Recovery email (required)</label>
                 <input
                   id="edit-email"
                   className="input"
@@ -1714,33 +2043,11 @@ export function AdminStaffClient() {
                 <div className="staff-duty-hours-inputs">
                   <div className="field">
                     <label className="label" htmlFor="edit-duty-start">Start time</label>
-                    <input
-                      id="edit-duty-start"
-                      className="input"
-                      type="time"
-                      value={editDutyHours.start}
-                      onChange={(event) =>
-                        setEditDutyHours((current) => ({
-                          ...current,
-                          start: event.target.value,
-                        }))
-                      }
-                    />
+                    <DutyTimePicker id="edit-duty-start" value={editDutyHours.start} validate={(value) => editDutyHours.end && value >= editDutyHours.end ? "Start time must be earlier than end time." : null} onChange={(value) => setEditDutyHours((current) => ({ ...current, start: value }))} />
                   </div>
                   <div className="field">
                     <label className="label" htmlFor="edit-duty-end">End time</label>
-                    <input
-                      id="edit-duty-end"
-                      className="input"
-                      type="time"
-                      value={editDutyHours.end}
-                      onChange={(event) =>
-                        setEditDutyHours((current) => ({
-                          ...current,
-                          end: event.target.value,
-                        }))
-                      }
-                    />
+                    <DutyTimePicker id="edit-duty-end" value={editDutyHours.end} validate={(value) => editDutyHours.start && value <= editDutyHours.start ? "End time must be later than start time." : null} onChange={(value) => setEditDutyHours((current) => ({ ...current, end: value }))} />
                   </div>
                 </div>
               </div>

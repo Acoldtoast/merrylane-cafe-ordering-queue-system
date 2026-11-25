@@ -1,7 +1,8 @@
 "use client";
 
+import { errorMessage } from "@/lib/errorMessage";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { staffNav } from "@/components/portalNav";
 import { CoffeeArt, artKindForCategory } from "@/components/CoffeeArt";
 import { Icon } from "@/components/Icons";
 import { LoadingDots } from "@/components/LoadingDots";
@@ -42,6 +43,7 @@ export function StaffStockClient() {
     low_stock_threshold: "",
     stock_status: "available" as "available" | "out",
     stock_scope: "today" as "today" | "until_changed",
+    track_stock: false,
   });
   const [savedForm, setSavedForm] = useState<typeof form | null>(null);
 
@@ -54,8 +56,8 @@ export function StaffStockClient() {
       }
       setItems(data.items || []);
       setError("");
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Unable to load menu availability."));
     } finally {
       setLoading(false);
     }
@@ -164,6 +166,7 @@ export function StaffStockClient() {
       low_stock_threshold: String(item.low_stock_threshold ?? 5),
       stock_status: item.stock_manual_out_date ? "out" : "available",
       stock_scope: item.stock_scope || "today",
+      track_stock: Boolean(item.stock_tracking_enabled),
     };
     setForm(nextForm);
     setSavedForm(nextForm);
@@ -171,12 +174,13 @@ export function StaffStockClient() {
 
   const saveEdit = async () => {
     if (!editing) return;
-    const countProvided = form.stock_count.trim() !== "";
-    const stockCount = countProvided ? Number(form.stock_count) : null;
-    if (
-      countProvided &&
-      (!Number.isSafeInteger(stockCount) || Number(stockCount) < 0)
-    ) {
+    const trackStock = form.track_stock;
+    if (trackStock && form.stock_count.trim() === "") {
+      setError("Enter the number of portions left for a limited item.");
+      return;
+    }
+    const stockCount = trackStock ? Number(form.stock_count) : null;
+    if (trackStock && (!Number.isSafeInteger(stockCount) || Number(stockCount) < 0)) {
       setError("The number left must be a whole number of zero or more.");
       return;
     }
@@ -188,23 +192,23 @@ export function StaffStockClient() {
     setBusyId(editing.id);
     setError("");
     const item = editing;
+    const manuallyOut = form.stock_status === "out";
     const stockStatus =
-      form.stock_status === "out"
+      manuallyOut
         ? "out"
-        : !countProvided
+        : !trackStock
           ? "available"
           : Number(stockCount) <= 0
             ? "out"
             : Number(stockCount) <= lowStockThreshold
               ? "low"
               : "available";
-    const manuallyOut = form.stock_status === "out";
     const payload = {
       id: item.id,
       stock_status: stockStatus,
       stock_scope: form.stock_scope,
-      stock_count: manuallyOut ? 0 : stockCount,
-      stock_tracking_enabled: manuallyOut || countProvided,
+      stock_count: manuallyOut ? 0 : trackStock ? stockCount : null,
+      stock_tracking_enabled: manuallyOut || trackStock,
       manual_out: manuallyOut,
       low_stock_threshold: lowStockThreshold,
     };
@@ -236,7 +240,7 @@ export function StaffStockClient() {
               label: "Left",
               value:
                 payload.stock_count === null
-                  ? "Not counted"
+                  ? "Not tracked"
                   : String(payload.stock_count),
             },
           ],
@@ -263,27 +267,18 @@ export function StaffStockClient() {
             <Icon name="coffee" /> On the menu
           </div>
           <div className="stat-value">{items.length}</div>
-          <div className="stat-bottom">
-            <span>Items on the menu</span>
-          </div>
         </div>
         <div className="stat-card">
           <div className="stat-label">
             <Icon name="alert" /> Low portions
           </div>
           <div className="stat-value">{lowCount}</div>
-          <div className="stat-bottom">
-            <span>Shown automatically on the menu</span>
-          </div>
         </div>
         <div className="stat-card dark">
           <div className="stat-label">
             <Icon name="x" /> Sold out
           </div>
           <div className="stat-value">{outCount}</div>
-          <div className="stat-bottom">
-            <span>Hidden from ordering</span>
-          </div>
         </div>
       </div>
 
@@ -376,10 +371,10 @@ export function StaffStockClient() {
                       <td data-label="Left">
                         {item.stock_tracking_enabled
                           ? item.stock_count
-                          : "Not counted"}
+                          : "Not tracked"}
                         <span className="muted" style={{ fontSize: 8, display: "block" }}>
                           {!item.stock_tracking_enabled
-                            ? "set a count if known"
+                            ? "Made to order"
                             : item.stock_status === "out"
                               ? "nothing on hand"
                               : `low at ${item.low_stock_threshold}`}
@@ -430,15 +425,6 @@ export function StaffStockClient() {
             </div>
           )}
         </div>
-      </div>
-
-      <div className="payment-note" style={{ marginTop: 13 }}>
-        <Icon name="info" />
-        <span>
-          Set a count when you know how many portions are left; each order deducts
-          from it. Leave it blank when you do not know. At zero, it sells out
-          automatically. Manual sell-outs can last today or until staff changes them.
-        </span>
       </div>
 
       {confirming && (
@@ -507,6 +493,28 @@ export function StaffStockClient() {
               </button>
             </div>
             <div className="modal-body">
+              <label className="field">
+                <span>
+                  <input
+                    id="stock-mode"
+                    type="checkbox"
+                    checked={form.track_stock}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        track_stock: event.target.checked,
+                        stock_count: event.target.checked ? current.stock_count : "",
+                      }))
+                    }
+                  />{" "}
+                  Track portions left (limited stock)
+                </span>
+              </label>
+              <small className="muted">
+                {form.track_stock
+                  ? "Portions remaining; each order deducts one. Reaching zero marks it sold out."
+                  : "No count, no limit. Mark sold out manually when it runs out."}
+              </small>
               <div className="modal-form-row">
                 <div className="field">
                   <label className="label" htmlFor="stock-status">Availability</label>
@@ -540,7 +548,11 @@ export function StaffStockClient() {
                         stock_count: event.target.value,
                       }))
                     }
-                    placeholder="Leave blank if unknown"
+                    placeholder={
+                      form.track_stock ? "Portions left" : "Not tracked"
+                    }
+                    disabled={!form.track_stock}
+                    required={form.track_stock}
                   />
                 </div>
               </div>
@@ -566,10 +578,6 @@ export function StaffStockClient() {
                   Customers see a low-availability message at this number or below.
                 </small>
               </div>
-              <p className="muted">
-                Enter the portions remaining to deduct one for each order. Leave blank
-                if you do not know the count. Reaching zero marks it sold out.
-              </p>
               {form.stock_status === "out" && (
                 <div className="field">
                   <label className="label" htmlFor="stock-scope">
@@ -603,7 +611,8 @@ export function StaffStockClient() {
                 className="btn btn-primary"
                 disabled={
                   busyId === editing.id ||
-                  JSON.stringify(form) === JSON.stringify(savedForm)
+                  JSON.stringify(form) === JSON.stringify(savedForm) ||
+                  (form.track_stock && form.stock_count.trim() === "")
                 }
                 onClick={saveEdit}
               >

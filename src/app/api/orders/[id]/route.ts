@@ -9,7 +9,7 @@ export async function GET(
   const orderId = Number(id);
   const owner = await OrderModel.guestOwner(orderId);
   const guestId = await getGuestId();
-  if (owner && owner !== guestId) {
+  if (!guestId || owner !== guestId) {
     return Response.json(
       { error: "Order not found.", success: false },
       { status: 404 }

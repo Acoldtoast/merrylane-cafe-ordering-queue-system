@@ -19,7 +19,7 @@ export async function POST(
     const body = await request.json();
     const orderItemId = Number(body.orderItemId);
     const addonId = Number(body.addonId);
-    const quantity = Number(body.quantity) || 1;
+    const quantity = body.quantity === undefined ? 1 : Number(body.quantity);
 
     if (
       !Number.isInteger(orderId) ||
@@ -28,12 +28,11 @@ export async function POST(
       orderItemId <= 0 ||
       !Number.isInteger(addonId) ||
       addonId <= 0 ||
-      !Number.isInteger(quantity) ||
-      quantity < 1 ||
-      quantity > 20
+      !Number.isSafeInteger(quantity) ||
+      quantity < 1
     ) {
       return Response.json(
-        { error: "Choose an order item, add-on, and quantity from 1 to 20.", success: false },
+        { error: "Choose an order item, add-on, and a positive whole quantity.", success: false },
         { status: 400 }
       );
     }

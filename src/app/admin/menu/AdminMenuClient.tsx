@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { errorMessage } from "@/lib/errorMessage";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useConfirmDialog } from "@/components/ConfirmDialog";
 import { usePathname } from "next/navigation";
-import { adminNav } from "@/components/portalNav";
 import { CoffeeArt, artKindForCategory } from "@/components/CoffeeArt";
 import { Icon } from "@/components/Icons";
 import { LoadingDots } from "@/components/LoadingDots";
@@ -10,10 +12,33 @@ import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { usePolling } from "@/lib/usePolling";
-import type { Addon, Category, MenuItem, User } from "@/lib/types";
+import type { Addon, Category, MenuItem } from "@/lib/types";
 import { peso } from "@/lib/format";
 
 type Tab = "menu" | "addons" | "accounts";
+
+const menuPlaceholderOptions = [
+  { label: "Coffee", imageUrl: "/menu-placeholders/coffee.svg" },
+  { label: "Tea / non-coffee", imageUrl: "/menu-placeholders/tea.svg" },
+  { label: "Dessert / bread", imageUrl: "/menu-placeholders/dessert.svg" },
+  { label: "Meal", imageUrl: "/menu-placeholders/meal.svg" },
+] as const;
+const defaultMenuImage = menuPlaceholderOptions[0].imageUrl;
+const menuPlaceholderImageByArtKind = {
+  coffee: menuPlaceholderOptions[0].imageUrl,
+  tea: menuPlaceholderOptions[1].imageUrl,
+  pastry: menuPlaceholderOptions[2].imageUrl,
+} as const;
+const CATEGORY_DRAG_TYPE = "application/x-menu-category";
+const OPTION_GROUP_DRAG_TYPE = "application/x-menu-option-group";
+const OPTION_CHOICE_DRAG_TYPE = "application/x-menu-option-choice";
+
+function menuPlaceholderForItem(category?: string, name?: string) {
+  if (`${category ?? ""} ${name ?? ""}`.toLowerCase().includes("meal")) {
+    return menuPlaceholderOptions[3].imageUrl;
+  }
+  return menuPlaceholderImageByArtKind[artKindForCategory(category, name)];
+}
 
 interface ItemForm {
   id?: number;
@@ -22,33 +47,85 @@ interface ItemForm {
   image_url: string;
   price: string;
   category_id: string;
-  stock_count: string;
-  stock_status: "available" | "low" | "out";
-  stock_note: string;
   is_best_seller: boolean;
   addonIds: number[];
   optionGroups: OptionGroupForm[];
 }
 
 interface OptionChoiceForm {
+  id: string;
   name: string;
   price_modifier: string;
 }
 
 interface OptionGroupForm {
+  id: string;
   type: string;
   options: OptionChoiceForm[];
+}
+
+function moveListItem<T>(items: T[], fromIndex: number, toIndex: number): T[] {
+  if (
+    fromIndex < 0 ||
+    toIndex < 0 ||
+    fromIndex >= items.length ||
+    toIndex >= items.length ||
+    fromIndex === toIndex
+  ) {
+    return items;
+  }
+
+  const reordered = [...items];
+  const [moved] = reordered.splice(fromIndex, 1);
+  reordered.splice(toIndex, 0, moved);
+  return reordered;
+}
+
+function ReorderButtons({
+  label,
+  index,
+  count,
+  onMove,
+  disabled = false,
+}: {
+  label: string;
+  index: number;
+  count: number;
+  onMove: (index: number) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="menu-reorder-controls">
+      <button
+        type="button"
+        className="table-icon-btn"
+        aria-label={`Move ${label} up`}
+        title={`Move ${label} up`}
+        disabled={disabled || index === 0}
+        onClick={() => onMove(index - 1)}
+      >
+        <Icon name="chevron-up" />
+      </button>
+      <button
+        type="button"
+        className="table-icon-btn"
+        aria-label={`Move ${label} down`}
+        title={`Move ${label} down`}
+        disabled={disabled || index === count - 1}
+        onClick={() => onMove(index + 1)}
+      >
+        <Icon name="chevron-down" />
+      </button>
+    </div>
+  );
 }
 
 const emptyForm: ItemForm = {
   name: "",
   description: "",
-  image_url: "",
+  image_url: defaultMenuImage,
   price: "",
   category_id: "",
-  stock_count: "",
-  stock_status: "available",
-  stock_note: "",
   is_best_seller: false,
   addonIds: [],
   optionGroups: [],
@@ -70,11 +147,11 @@ const emptyAddonForm: AddonForm = {
 export function AdminMenuClient() {
   const pathname = usePathname();
   const feedback = useFeedback();
+  const { confirm, dialog: confirmDialog } = useConfirmDialog();
   const [tab, setTab] = useState<Tab>("menu");
   const [items, setItems] = useState<MenuItem[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [addons, setAddons] = useState<Addon[]>([]);
-  const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -86,14 +163,6 @@ export function AdminMenuClient() {
   const [deleteConfirmAddon, setDeleteConfirmAddon] = useState<Addon | null>(null);
   const [itemAttempted, setItemAttempted] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [accountForm, setAccountForm] = useState({
-    name: "",
-    email: "",
-    role: "staff",
-    password: "",
-  });
-  const [accountAttempted, setAccountAttempted] = useState(false);
-  const [creatingAccount, setCreatingAccount] = useState(false);
   const [addonModal, setAddonModal] = useState<"create" | "edit" | null>(null);
   const [addonForm, setAddonForm] = useState<AddonForm>(emptyAddonForm);
   const [savedAddonForm, setSavedAddonForm] = useState<AddonForm | null>(null);
@@ -106,40 +175,75 @@ export function AdminMenuClient() {
     useState<number | null>(null);
   const [savingCategory, setSavingCategory] = useState(false);
   const [categoryReplacements, setCategoryReplacements] = useState<Record<number, string>>({});
+  const [reorderingCategories, setReorderingCategories] = useState(false);
+  const nextFormId = useRef(0);
+  const createFormId = () => `option-${nextFormId.current++}`;
 
   const load = useCallback(async () => {
     try {
-      const [menuRes, addonsRes, usersRes] = await Promise.all([
+      const [menuRes, addonsRes] = await Promise.all([
         fetchPortalApi("/api/menu?all=1", { cache: "no-store" }),
         fetchPortalApi("/api/addons?all=1", { cache: "no-store" }),
-        fetchPortalApi("/api/users", { cache: "no-store" }),
       ]);
       const menuData = await menuRes.json();
       const addonData = await addonsRes.json();
-      const userData = await usersRes.json();
       if (!menuRes.ok || !menuData.success) {
         throw new Error(menuData.error || "Unable to load the menu.");
       }
       setItems(menuData.items || []);
       setCategories(menuData.categories || []);
       setAddons(addonData.addons || []);
-      setUsers(userData.users || []);
       setError("");
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Unable to load the menu."));
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    load();
+    void (async () => {
+      await load();
+    })();
   }, [load]);
   usePolling(load, 20_000, {
     immediate: false,
     enabled: pathname === "/admin/menu",
     resources: ["menu", "accounts"],
   });
+
+  const saveCategoryOrder = async (orderedCategories: Category[]) => {
+    const previousCategories = categories;
+    setCategories(orderedCategories);
+    setReorderingCategories(true);
+    try {
+      const response = await fetchPortalApi("/api/categories", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderedIds: orderedCategories.map((category) => category.id) }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Could not save category order.");
+      }
+    } catch (err: unknown) {
+      setCategories(previousCategories);
+      feedback.error("Couldn't save category order", {
+        message: errorMessage(err, "The category order wasn't saved."),
+      });
+      await load();
+    } finally {
+      setReorderingCategories(false);
+    }
+  };
+
+  const reorderCategories = (sourceId: number, targetId: number) => {
+    if (reorderingCategories || savingCategory || sourceId === targetId) return;
+    const sourceIndex = categories.findIndex((category) => category.id === sourceId);
+    const targetIndex = categories.findIndex((category) => category.id === targetId);
+    const reordered = moveListItem(categories, sourceIndex, targetIndex);
+    if (reordered !== categories) void saveCategoryOrder(reordered);
+  };
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -165,9 +269,14 @@ export function AdminMenuClient() {
     const groups = new Map<string, OptionGroupForm>();
     for (const variant of item.variants) {
       if (!groups.has(variant.variant_type)) {
-        groups.set(variant.variant_type, { type: variant.variant_type, options: [] });
+        groups.set(variant.variant_type, {
+          id: createFormId(),
+          type: variant.variant_type,
+          options: [],
+        });
       }
       groups.get(variant.variant_type)!.options.push({
+        id: createFormId(),
         name: variant.name,
         price_modifier: String(variant.price_modifier),
       });
@@ -176,17 +285,9 @@ export function AdminMenuClient() {
       id: item.id,
       name: item.name,
       description: item.description || "",
-      image_url: item.image_url || "",
+      image_url: item.image_url || menuPlaceholderForItem(item.category_name, item.name),
       price: String(item.price),
       category_id: String(item.category_id),
-      stock_count: item.stock_tracking_enabled
-        ? String(item.stock_count)
-        : "",
-      stock_status:
-        item.stock_tracking_enabled && item.stock_count <= 0
-          ? "out"
-          : item.stock_status,
-      stock_note: item.stock_note || "",
       is_best_seller: Boolean(item.is_best_seller),
       addonIds: item.extras.map((extra) => extra.id),
       optionGroups: Array.from(groups.values()),
@@ -233,16 +334,6 @@ export function AdminMenuClient() {
       image_url: form.image_url,
       price: Number(form.price),
       category_id: Number(form.category_id),
-      stock_count: form.stock_count.trim()
-        ? Number(form.stock_count)
-        : null,
-      stock_tracking_enabled: form.stock_count.trim() !== "",
-      stock_status: form.stock_count.trim()
-        ? form.stock_status
-        : form.stock_status === "out"
-          ? "out"
-          : "available",
-      stock_note: form.stock_note.trim() || null,
       is_best_seller: form.is_best_seller,
       addonIds: form.addonIds,
       variants: form.optionGroups.map((group) => ({
@@ -288,12 +379,6 @@ export function AdminMenuClient() {
           details: [
             { label: "Category", value: categoryName },
             { label: "Price", value: peso(payload.price) },
-            {
-              label: "Stock",
-              value: payload.stock_tracking_enabled
-                ? `${payload.stock_count} · ${payload.stock_status}`
-                : "Quantity not tracked · available",
-            },
             ...(payload.addonIds.length
               ? [{ label: "Add-ons", value: `${payload.addonIds.length} attached` }]
               : []),
@@ -341,7 +426,36 @@ export function AdminMenuClient() {
   const addOptionGroup = () => {
     setForm((current) => ({
       ...current,
-      optionGroups: [...current.optionGroups, { type: "", options: [{ name: "", price_modifier: "0" }] }],
+      optionGroups: [
+        ...current.optionGroups,
+        {
+          id: createFormId(),
+          type: "",
+          options: [{ id: createFormId(), name: "", price_modifier: "0" }],
+        },
+      ],
+    }));
+  };
+
+  const moveOptionGroup = (fromIndex: number, toIndex: number) => {
+    setForm((current) => ({
+      ...current,
+      optionGroups: moveListItem(current.optionGroups, fromIndex, toIndex),
+    }));
+  };
+
+  const moveOptionChoice = (
+    groupIndex: number,
+    fromIndex: number,
+    toIndex: number
+  ) => {
+    setForm((current) => ({
+      ...current,
+      optionGroups: current.optionGroups.map((group, index) =>
+        index === groupIndex
+          ? { ...group, options: moveListItem(group.options, fromIndex, toIndex) }
+          : group
+      ),
     }));
   };
 
@@ -438,7 +552,7 @@ export function AdminMenuClient() {
     const prompt = itemCount > 0
       ? `Remove "${category.name}" and move its ${itemCount} menu item${itemCount === 1 ? "" : "s"} to "${replacementName}"?`
       : `Remove the empty category "${category.name}"?`;
-    if (!window.confirm(prompt)) return;
+    if (!(await confirm(prompt))) return;
     setSavingCategory(true);
     setError("");
     const result = await feedback.run(
@@ -587,91 +701,6 @@ export function AdminMenuClient() {
     if (result.ok) await load();
   };
 
-  const createAccount = async () => {
-    setAccountAttempted(true);
-    if (
-      !accountForm.name.trim() ||
-      !accountForm.email.trim() ||
-      !accountForm.password.trim()
-    ) {
-      feedback.warning("Some account details are missing", {
-        message: "Add a name, email address, and temporary password to create the account.",
-      });
-      return;
-    }
-    setCreatingAccount(true);
-    setError("");
-    const account = { ...accountForm };
-    const result = await feedback.run(
-      async () => {
-        const response = await fetchPortalApi("/api/users", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(account),
-        });
-        const data = await response.json();
-        if (!response.ok || !data.success) {
-          throw new Error(data.error || "Could not create account.");
-        }
-        return data;
-      },
-      {
-        loading: {
-          title: "Creating the account…",
-          message: "Giving them access to the portal.",
-        },
-        success: () => ({
-          eyebrow: "Account created",
-          title: `${account.name} can sign in`,
-          message: "Share the username and temporary password with them.",
-          details: [
-            { label: "Email", value: account.email.toLowerCase().trim() || "Not set" },
-            { label: "Role", value: account.role === "admin" ? "Admin" : "Staff" },
-          ],
-        }),
-      }
-    );
-    if (result.ok) {
-      setAccountForm({ name: "", email: "", role: "staff", password: "" });
-      setAccountAttempted(false);
-      await load();
-    }
-    setCreatingAccount(false);
-  };
-
-  const removeAccount = async (user: User) => {
-    if (!window.confirm(`Remove ${user.name}? They will lose access immediately.`)) return;
-    const result = await feedback.run(
-      async () => {
-        const response = await fetchPortalApi("/api/users", {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: user.id }),
-        });
-        const data = await response.json();
-        if (!response.ok || !data.success) {
-          throw new Error(data.error || "Could not remove the account.");
-        }
-        return data;
-      },
-      {
-        loading: {
-          title: "Removing the account…",
-          message: `Revoking ${user.name}'s access.`,
-        },
-        success: () => ({
-          eyebrow: "Access revoked",
-          title: `${user.name} removed`,
-          message: "They can no longer sign in. Past activity stays in the log.",
-          details: [
-            { label: "Email", value: user.email || "Not set" },
-            { label: "Role", value: user.role === "admin" ? "Admin" : "Staff" },
-          ],
-        }),
-      }
-    );
-    if (result.ok) await load();
-  };
 
   const openCreateAddon = () => {
     setAddonForm(emptyAddonForm);
@@ -1134,11 +1163,35 @@ export function AdminMenuClient() {
                       }}
                     />
                     <small>JPEG, PNG, or WebP · max 1 MB</small>
-                    {form.image_url && (
+                    <fieldset className="admin-menu-placeholder-picker">
+                      <legend className="label">Choose an illustration</legend>
+                      <div className="admin-menu-placeholder-options">
+                        {menuPlaceholderOptions.map((option) => (
+                          <button
+                            key={option.imageUrl}
+                            type="button"
+                            className="admin-menu-placeholder-option"
+                            aria-pressed={form.image_url === option.imageUrl}
+                            aria-label={option.label}
+                            title={option.label}
+                            onClick={() =>
+                              setForm((current) => ({
+                                ...current,
+                                image_url: option.imageUrl,
+                              }))
+                            }
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={option.imageUrl} alt="" />
+                          </button>
+                        ))}
+                      </div>
+                    </fieldset>
+                    {form.image_url && !menuPlaceholderOptions.some((option) => option.imageUrl === form.image_url) && (
                       <button
                         type="button"
                         className="btn btn-ghost btn-sm"
-                        onClick={() => setForm((current) => ({ ...current, image_url: "" }))}
+                        onClick={() => setForm((current) => ({ ...current, image_url: defaultMenuImage }))}
                       >
                         Remove photo
                       </button>
@@ -1181,87 +1234,6 @@ export function AdminMenuClient() {
                   </select>
                 </div>
               </div>
-              <div className="modal-form-row">
-                <div className="field">
-                  <label className="label" htmlFor="item-stock">Stock on hand (optional)</label>
-                  <input
-                    id="item-stock"
-                    className="input"
-                    type="number"
-                    min={0}
-                    step={1}
-                    value={form.stock_count}
-                    onChange={(event) => {
-                      const raw = event.target.value;
-                      const hasValue = raw.trim() !== "";
-                      setForm((current) => ({
-                        ...current,
-                        stock_count: raw,
-                        stock_status:
-                          !hasValue
-                            ? current.stock_status
-                            : Number(raw) <= 0
-                              ? "out"
-                              : current.stock_status === "out"
-                                ? "available"
-                                : current.stock_status,
-                      }));
-                    }}
-                  />
-                  <small className="muted">
-                    Leave blank to mark it available without tracking a quantity.
-                  </small>
-                </div>
-                <div className="field">
-                  <label className="label" htmlFor="item-status">Stock status</label>
-                  <select
-                    id="item-status"
-                    className="select"
-                    value={form.stock_status}
-                    onChange={(event) => {
-                      const next = event.target.value as ItemForm["stock_status"];
-                      setForm((current) => ({
-                        ...current,
-                        stock_status: next,
-                        // Sold out always means zero on hand.
-                        stock_count: next === "out" ? "0" : current.stock_count,
-                      }));
-                    }}
-                  >
-                    <option
-                      value="available"
-                      disabled={
-                        form.stock_count.trim() !== "" &&
-                        Number(form.stock_count) <= 0
-                      }
-                    >
-                      Available
-                    </option>
-                    <option
-                      value="low"
-                      disabled={
-                        form.stock_count.trim() === "" ||
-                        Number(form.stock_count) <= 0
-                      }
-                    >
-                      Low stock
-                    </option>
-                    <option value="out">Sold out</option>
-                  </select>
-                </div>
-              </div>
-              <div className="field">
-                <label className="label" htmlFor="item-note">Customer stock note</label>
-                <input
-                  id="item-note"
-                  className="input"
-                  value={form.stock_note}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, stock_note: event.target.value }))
-                  }
-                  placeholder="Only a few left today"
-                />
-              </div>
               <div className="field">
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                   <label className="label" style={{ margin: 0 }}>Choose-one option groups</label>
@@ -1276,11 +1248,21 @@ export function AdminMenuClient() {
                 </div>
                 <p className="muted" style={{ fontSize: 10, marginTop: 5 }}>
                   Create as many groups as you need, such as Size, Temperature, Sugar level, or Milk.
-                  Add as many choices as needed; customers choose one from each group.
+                  Add as many choices as needed; customers choose one from each group. Drag to reorder.
                 </p>
                 {form.optionGroups.map((group, groupIndex) => (
                   <div
-                    key={groupIndex}
+                    key={group.id}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      const draggedId = event.dataTransfer.getData(OPTION_GROUP_DRAG_TYPE);
+                      const sourceIndex = form.optionGroups.findIndex(
+                        (entry) => entry.id === draggedId
+                      );
+                      if (sourceIndex >= 0) moveOptionGroup(sourceIndex, groupIndex);
+                    }}
                     style={{
                       border: "1px solid var(--line)",
                       borderRadius: 9,
@@ -1300,6 +1282,25 @@ export function AdminMenuClient() {
                         aria-invalid={itemAttempted && !group.type.trim()}
                         onChange={(event) => updateOptionGroup(groupIndex, { type: event.target.value })}
                       />
+                      <ReorderButtons
+                        label={group.type || "option group"}
+                        index={groupIndex}
+                        count={form.optionGroups.length}
+                        onMove={(targetIndex) => moveOptionGroup(groupIndex, targetIndex)}
+                        disabled={saving}
+                      />
+                      <span
+                        className="table-icon-btn menu-reorder-handle"
+                        title={`Drag ${group.type || "option group"} to reorder`}
+                        aria-hidden="true"
+                        draggable={!saving}
+                        onDragStart={(event) => {
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData(OPTION_GROUP_DRAG_TYPE, group.id);
+                        }}
+                      >
+                        <Icon name="menu" />
+                      </span>
                       <button
                         type="button"
                         className="table-icon-btn danger"
@@ -1317,9 +1318,23 @@ export function AdminMenuClient() {
                     </div>
                     {group.options.map((option, optionIndex) => (
                       <div
-                        key={optionIndex}
-                        className="modal-form-row"
-                        style={{ gridTemplateColumns: "minmax(0, 1fr) minmax(100px, 0.45fr) auto" }}
+                        key={option.id}
+                        className="modal-form-row admin-menu-option-row"
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={(event) => {
+                          const dragged = event.dataTransfer.getData(OPTION_CHOICE_DRAG_TYPE);
+                          if (!dragged) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const [sourceGroupId, sourceChoiceId] = dragged.split(":");
+                          if (sourceGroupId !== group.id) return;
+                          const sourceIndex = group.options.findIndex(
+                            (entry) => entry.id === sourceChoiceId
+                          );
+                          if (sourceIndex >= 0) {
+                            moveOptionChoice(groupIndex, sourceIndex, optionIndex);
+                          }
+                        }}
                       >
                         <input
                           className="input"
@@ -1332,34 +1347,63 @@ export function AdminMenuClient() {
                             updateOptionChoice(groupIndex, optionIndex, { name: event.target.value })
                           }
                         />
-                        <input
-                          className="input"
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          aria-label={`${option.name || "Choice"} extra price`}
-                          placeholder="Extra ₱"
-                          value={option.price_modifier}
-                          onChange={(event) =>
-                            updateOptionChoice(groupIndex, optionIndex, {
-                              price_modifier: event.target.value,
-                            })
-                          }
-                        />
-                        <button
-                          type="button"
-                          className="table-icon-btn danger"
-                          title="Remove choice"
-                          aria-label="Remove choice"
-                          disabled={group.options.length === 1}
-                          onClick={() =>
-                            updateOptionGroup(groupIndex, {
-                              options: group.options.filter((_, index) => index !== optionIndex),
-                            })
-                          }
-                        >
-                          <Icon name="trash" />
-                        </button>
+                        <div className="menu-option-price">
+                          <span aria-hidden="true">₱</span>
+                          <input
+                            className="input"
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            aria-label={`${option.name || "Choice"} extra price in pesos`}
+                            placeholder="0"
+                            value={option.price_modifier}
+                            onChange={(event) =>
+                              updateOptionChoice(groupIndex, optionIndex, {
+                                price_modifier: event.target.value,
+                              })
+                            }
+                          />
+                        </div>
+                        <div className="menu-option-actions">
+                          <ReorderButtons
+                            label={`${option.name || "choice"} in ${group.type || "option group"}`}
+                            index={optionIndex}
+                            count={group.options.length}
+                            onMove={(targetIndex) =>
+                              moveOptionChoice(groupIndex, optionIndex, targetIndex)
+                            }
+                            disabled={saving}
+                          />
+                          <span
+                            className="table-icon-btn menu-reorder-handle"
+                            title={`Drag ${option.name || "choice"} to reorder`}
+                            aria-hidden="true"
+                            draggable={!saving}
+                            onDragStart={(event) => {
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData(
+                                OPTION_CHOICE_DRAG_TYPE,
+                                `${group.id}:${option.id}`
+                              );
+                            }}
+                          >
+                            <Icon name="menu" />
+                          </span>
+                          <button
+                            type="button"
+                            className="table-icon-btn danger"
+                            title="Remove choice"
+                            aria-label="Remove choice"
+                            disabled={group.options.length === 1}
+                            onClick={() =>
+                              updateOptionGroup(groupIndex, {
+                                options: group.options.filter((_, index) => index !== optionIndex),
+                              })
+                            }
+                          >
+                            <Icon name="trash" />
+                          </button>
+                        </div>
                       </div>
                     ))}
                     <button
@@ -1369,7 +1413,10 @@ export function AdminMenuClient() {
                       disabled={group.options.length >= 50}
                       onClick={() =>
                         updateOptionGroup(groupIndex, {
-                          options: [...group.options, { name: "", price_modifier: "0" }],
+                          options: [
+                            ...group.options,
+                            { id: createFormId(), name: "", price_modifier: "0" },
+                          ],
                         })
                       }
                     >
@@ -1414,16 +1461,6 @@ export function AdminMenuClient() {
                   </div>
                 )}
               </div>
-              <label className="checkline">
-                <input
-                  type="checkbox"
-                  checked={form.is_best_seller}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, is_best_seller: event.target.checked }))
-                  }
-                />
-                Show as a best seller on the menu
-              </label>
             </div>
             <div className="modal-foot">
               <button type="button" className="btn btn-outline" onClick={() => setModal(null)}>
@@ -1527,7 +1564,7 @@ export function AdminMenuClient() {
             </div>
             <div className="modal-body">
               <p className="muted" style={{ fontSize: 10, margin: 0 }}>
-                Add categories or remove ones you no longer use. Items in a removed category can be moved to another category.
+                Add categories or remove ones you no longer use. Items in a removed category can be moved to another category. Drag to reorder.
               </p>
               <div
                 style={{
@@ -1553,18 +1590,28 @@ export function AdminMenuClient() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={savingCategory}
+                  disabled={savingCategory || reorderingCategories}
                   onClick={saveCategory}
                 >
                   <Icon name="plus" className="icon-sm" /> Add
                 </button>
               </div>
               <div style={{ display: "grid", gap: 8, maxHeight: 330, overflowY: "auto" }}>
-                {categories.map((category) => {
+                {categories.map((category, categoryIndex) => {
                   const itemCount = items.filter((item) => item.category_id === category.id).length;
                   return (
                     <div
                       key={category.id}
+                      onDragOver={(event) => {
+                        if (!reorderingCategories && !savingCategory) event.preventDefault();
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const draggedId = Number(
+                          event.dataTransfer.getData(CATEGORY_DRAG_TYPE)
+                        );
+                        if (draggedId > 0) reorderCategories(draggedId, category.id);
+                      }}
                       style={{
                         border: "1px solid var(--line)",
                         borderRadius: 9,
@@ -1581,13 +1628,36 @@ export function AdminMenuClient() {
                           {itemCount} menu item{itemCount === 1 ? "" : "s"}
                         </span>
                       </div>
-                      <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
+                      <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                        <ReorderButtons
+                          label={category.name}
+                          index={categoryIndex}
+                          count={categories.length}
+                          disabled={reorderingCategories || savingCategory}
+                          onMove={(targetIndex) => {
+                            const target = categories[targetIndex];
+                            if (target) reorderCategories(category.id, target.id);
+                          }}
+                        />
+                        <span
+                          className="table-icon-btn menu-reorder-handle"
+                          title={`Drag ${category.name} to reorder`}
+                          aria-hidden="true"
+                          draggable={!reorderingCategories && !savingCategory}
+                          onDragStart={(event) => {
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData(CATEGORY_DRAG_TYPE, String(category.id));
+                          }}
+                        >
+                          <Icon name="menu" />
+                        </span>
                         {itemCount > 0 && (
                           <select
                             className="select"
                             aria-label={`Move items from ${category.name} to`}
                             value={categoryReplacements[category.id] || ""}
                             required={itemCount > 0}
+                            disabled={savingCategory || reorderingCategories}
                             aria-invalid={invalidReplacementCategory === category.id}
                             onChange={(event) =>
                               {
@@ -1612,7 +1682,7 @@ export function AdminMenuClient() {
                         <button
                           type="button"
                           className="btn btn-outline btn-sm"
-                          disabled={savingCategory || categories.length <= 1}
+                          disabled={savingCategory || reorderingCategories || categories.length <= 1}
                           onClick={() => removeCategory(category)}
                         >
                           Remove
@@ -1715,6 +1785,7 @@ export function AdminMenuClient() {
           </div>
         </div>
       )}
+    {confirmDialog}
     </>
   );
 }

@@ -1,7 +1,9 @@
 "use client";
 
+import { errorMessage } from "@/lib/errorMessage";
+
 import Link from "next/link";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityRow } from "@/components/ActivityFeed";
 import { CoffeeArt, artKindForCategory } from "@/components/CoffeeArt";
 import { Icon } from "@/components/Icons";
@@ -35,7 +37,7 @@ export function AdminDashboardClient({
     try {
       const response = await fetchPortalApi(
         `/api/analytics/overview${fresh ? "?fresh=1" : ""}`,
-        { cache: "no-store" }
+        { cache: fresh ? "no-store" : "no-cache" }
       );
       const payload = await response.json();
       if (!response.ok || !payload.success) {
@@ -43,8 +45,8 @@ export function AdminDashboardClient({
       }
       setData(payload);
       setError("");
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Unable to load dashboard."));
     } finally {
       setLoading(false);
     }
@@ -120,7 +122,17 @@ function Dashboard({
   onMarkBestSeller: (item: BestSellingItem) => void;
 }) {
   const [bestSellerPeriod, setBestSellerPeriod] = useState<"week" | "month">("week");
+  const [chartReport, setChartReport] = useState<{
+    rows: { date: string; revenue: number }[];
+    label: string;
+  } | null>(null);
   const { overview, stats, forecast, reviews, daily_sales } = data;
+  const chartDailySales = chartReport?.rows ?? daily_sales;
+  const chartLabel = chartReport?.label ?? "Last 14 days";
+  const chartDailyAverage = chartDailySales.length
+    ? chartDailySales.reduce((sum, point) => sum + Number(point.revenue), 0) /
+      chartDailySales.length
+    : 0;
   const periodBestSelling =
     bestSellerPeriod === "week"
       ? data.weekly_best_selling
@@ -138,15 +150,6 @@ function Dashboard({
   const avgTicket = overview.all_time_orders
     ? overview.all_time_revenue / overview.all_time_orders
     : 0;
-  const inventoryReview = data.inventory_review;
-  const lowStockItems = inventoryReview.filter(
-    (item) => item.stock_status === "low" || item.stock_status === "out"
-  );
-  const sortedInventory = [...inventoryReview].sort((a, b) => {
-    const priority = { out: 0, low: 1, available: 2 };
-    return priority[a.stock_status] - priority[b.stock_status] ||
-      a.name.localeCompare(b.name);
-  });
   const salesByDate = new Map(daily_sales.map((day) => [day.date, day]));
   const dailySalesReport = Array.from({ length: 14 }, (_, index) => {
     const date = new Date(`${data.reporting_date}T00:00:00.000Z`);
@@ -222,13 +225,13 @@ function Dashboard({
 
       {mode === "analysis" && (
       <>
-      <AdminAnalyticsReport />
-      <div className="dashboard-grid">
+      <AdminAnalyticsReport onDailySales={setChartReport} />
+      <div className="dashboard-grid analytics-chart-grid">
         <section className="card chart-panel">
           <div className="chart-head">
             <div>
               <h2>Sales &amp; forecast</h2>
-              <p>Actual revenue and the next seven days, projected from your recent history.</p>
+              <p>Actual revenue · {chartLabel} · next seven days forecast.</p>
               <div className="chart-legend">
                 <span><i /> Actual</span>
                 <span><i className="dashed" /> Forecast</span>
@@ -239,10 +242,10 @@ function Dashboard({
             </span>
           </div>
           <SalesChart
-            key={`${data.reporting_date}-${daily_sales
+            key={`${data.reporting_date}-${chartDailySales
               .map((point) => `${point.date}:${point.revenue}`)
               .join(",")}`}
-            daily={daily_sales}
+            daily={chartDailySales}
             forecast={forecast.points}
           />
           <div className="chart-footer">
@@ -250,7 +253,7 @@ function Dashboard({
               Projected week <b>{peso(forecast.projected_week)}</b>
             </span>
             <span>
-              Daily average <b>{peso(forecast.average_daily)}</b>
+              Daily average <b>{peso(chartDailyAverage)}</b>
             </span>
           </div>
           <div className="insight-card">
@@ -261,87 +264,9 @@ function Dashboard({
               <h3>Forecast insight</h3>
               <p>
                 {peak.order_count > 0
-                  ? `Your busiest window is around ${hourLabel(peak.hour)}, with ${peak.order_count} orders. Consider having an extra pair of hands then.`
-                  : "Not enough order history yet — the forecast will sharpen as the week fills up."}
+                  ? `Busiest window around ${hourLabel(peak.hour)}, ${peak.order_count} orders.`
+                  : "Not enough order history yet."}
               </p>
-            </div>
-          </div>
-        </section>
-
-        <section className="card chart-panel">
-          <div className="chart-head">
-            <div>
-              <h2>Best sellers</h2>
-              <p>Most ordered menu items in the current calendar period.</p>
-            </div>
-            <div className="best-seller-periods" role="group" aria-label="Best seller period">
-              <button
-                type="button"
-                className={bestSellerPeriod === "week" ? "active" : ""}
-                aria-pressed={bestSellerPeriod === "week"}
-                onClick={() => setBestSellerPeriod("week")}
-              >
-                Week
-              </button>
-              <button
-                type="button"
-                className={bestSellerPeriod === "month" ? "active" : ""}
-                aria-pressed={bestSellerPeriod === "month"}
-                onClick={() => setBestSellerPeriod("month")}
-              >
-                Month
-              </button>
-            </div>
-          </div>
-          <div className="favorites">
-            {periodBestSelling.slice(0, 6).map((item, index) => (
-              <div className="favorite-row" key={item.name}>
-                <span className="favorite-rank">{String(index + 1).padStart(2, "0")}</span>
-                <span className="favorite-art">
-                  <CoffeeArt
-                    kind={artKindForCategory("", item.name)}
-                    variant="icon"
-                  />
-                </span>
-                <span className="favorite-name">{item.name}</span>
-                <span className="favorite-qty">{item.total_quantity} sold</span>
-                <span className="favorite-rev">{peso(item.total_revenue)}</span>
-                {item.menu_item_id && item.is_active ? (
-                  item.is_best_seller ? (
-                    <span className="favorite-featured-label">Best seller</span>
-                  ) : (
-                    <button
-                      type="button"
-                      className="favorite-feature-btn"
-                      disabled={busyMenuItemId === item.menu_item_id}
-                      onClick={() => onMarkBestSeller(item)}
-                    >
-                      {busyMenuItemId === item.menu_item_id
-                        ? <LoadingDots label="Saving" />
-                        : "Mark best seller"}
-                    </button>
-                  )
-                ) : null}
-              </div>
-            ))}
-            {periodBestSelling.length === 0 && (
-              <div className="empty-panel" style={{ border: 0 }}>
-                No confirmed orders {periodLabel}.
-              </div>
-            )}
-          </div>
-          <div className="week-tiles">
-            <div className="week-tile">
-              <small>Period</small>
-              <strong>
-                {bestSellerPeriod === "week"
-                  ? `From ${data.best_seller_periods.week_start}`
-                  : data.best_seller_periods.month_start.slice(0, 7)}
-              </strong>
-            </div>
-            <div className="week-tile">
-              <small>Avg ticket · all time</small>
-              <strong>{peso(avgTicket)}</strong>
             </div>
           </div>
         </section>
@@ -350,8 +275,8 @@ function Dashboard({
       <section className="card admin-analysis">
         <div className="chart-head">
           <div>
-            <h2>Suggestions from your sales</h2>
-            <p>Simple recommendations based on orders, menu tags, stock, and busy hours.</p>
+            <h2>Sales suggestions</h2>
+            <p>Based on orders, menu tags, stock, and busy hours.</p>
           </div>
         </div>
         <div className="analysis-suggestions">
@@ -361,8 +286,8 @@ function Dashboard({
               <h3>Promote this week&apos;s leader</h3>
               <p>
                 {weeklyLeader
-                  ? `${weeklyLeader.name} leads this week with ${weeklyLeader.total_quantity} sold. I recommend keeping it prominently visible on the customer menu to maximize conversions.`
-                  : "There are no confirmed orders this week yet. Once orders come in, I'll identify this week's leader and recommend promotional strategies."}
+                  ? `${weeklyLeader.name} leads this week with ${weeklyLeader.total_quantity} sold. Keep it visible on the customer menu.`
+                  : "No confirmed orders this week yet."}
               </p>
               {weeklyLeader?.menu_item_id &&
                 weeklyLeader.is_active &&
@@ -387,8 +312,8 @@ function Dashboard({
               <p>
                 {monthlyLeader
                   ? monthlyLeaderNeedsRestock
-                    ? `I've identified ${monthlyLeader.name} as one of this month's top sellers, but it's currently marked ${monthlyLeader.stock_status}. I recommend restocking before the next busy period to avoid missed sales.`
-                    : `${monthlyLeader.name} leads this month with ${monthlyLeader.total_quantity} sold. I recommend reviewing its stock levels in the inventory snapshot below to ensure availability.`
+                    ? `${monthlyLeader.name} is a top seller this month but is ${monthlyLeader.stock_status}. Restock before the next busy period.`
+                    : `${monthlyLeader.name} leads this month with ${monthlyLeader.total_quantity} sold. Check its stock levels.`
                   : "Monthly stock suggestions will appear once there are confirmed orders this month."}
               </p>
             </div>
@@ -399,8 +324,8 @@ function Dashboard({
               <h3>Plan for peak hours</h3>
               <p>
                 {peak.order_count > 0
-                  ? `I've identified that ${peak.order_count} orders were placed around ${hourLabel(peak.hour)} in the available history. I recommend preparing popular ingredients and staffing accordingly for that window.`
-                  : "More order history is needed before I can provide a busy-hour recommendation."}
+                  ? `${peak.order_count} orders around ${hourLabel(peak.hour)}. Prepare ingredients and staff for that window.`
+                  : "More order history needed for a busy-hour recommendation."}
               </p>
             </div>
           </article>
@@ -410,107 +335,18 @@ function Dashboard({
               <h3>Compare recent sales</h3>
               <p>
                 {periodRevenueChange === null
-                  ? "I don't have enough sales history from the previous 7-day period to make a reliable comparison yet."
+                  ? "Not enough history for comparison."
                   : periodRevenueChange > 10
-                    ? `Sales are up ${periodRevenueChange}% compared with the previous 7 days. I recommend continuing to track the items and hours driving this growth.`
+                    ? `Sales up ${periodRevenueChange}% vs previous 7 days.`
                     : periodRevenueChange < -10
-                      ? `Sales are down ${Math.abs(periodRevenueChange)}% compared with the previous 7 days. I recommend reviewing best sellers, availability, and customer feedback for possible causes.`
-                      : `Sales are broadly steady, changing ${periodRevenueChange}% compared with the previous 7 days.`}
+                      ? `Sales down ${Math.abs(periodRevenueChange)}% vs previous 7 days.`
+                      : `Sales steady, ${periodRevenueChange}% change.`}
               </p>
             </div>
           </article>
         </div>
       </section>
 
-      <section className="card admin-analysis admin-inventory-review">
-        <div className="chart-head">
-          <div>
-            <h2>Inventory review</h2>
-            <p>Read-only stock snapshot for active menu items. Stock changes stay with the service team.</p>
-          </div>
-          <span className={`badge ${lowStockItems.length ? "badge-amber" : "badge-green"}`}>
-            {lowStockItems.length} needs attention
-          </span>
-        </div>
-        {inventoryReview.length === 0 ? (
-          <div className="empty-panel" style={{ border: 0 }}>
-            No active menu items to review.
-          </div>
-        ) : (
-          <div className="inventory-review-list">
-            {sortedInventory.map((item) => (
-              <div className="inventory-review-row" key={item.id}>
-                <div>
-                  <strong>{item.name}</strong>
-                  <small>
-                    {item.category_name}
-                    {item.stock_note ? ` · ${item.stock_note}` : ""}
-                  </small>
-                </div>
-                <span className={`inventory-review-status ${item.stock_status}`}>
-                  {item.stock_status === "out"
-                    ? "Out of stock"
-                    : item.stock_status === "low"
-                      ? "Low stock"
-                      : "Available"}
-                </span>
-                <strong className="inventory-review-count">
-                  {item.stock_tracking_enabled
-                    ? `${item.stock_count} left`
-                    : "Quantity not tracked"}
-                </strong>
-              </div>
-            ))}
-            {lowStockItems.length === 0 && (
-              <p className="inventory-review-more">
-                No menu items are currently marked low or out of stock.
-              </p>
-            )}
-          </div>
-        )}
-      </section>
-      <section className="card admin-analysis daily-sales-analysis">
-        <div className="chart-head">
-          <div>
-            <h2>Daily sales</h2>
-            <p>Combined sales from all service staff, grouped by the day the order was placed.</p>
-          </div>
-          <span className="badge badge-cream">Last 14 days</span>
-        </div>
-        {dailySalesReport.length ? (
-          <div className="data-table-wrap">
-            <table className="data-table data-table-stack">
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Orders</th>
-                  <th>Sales</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...dailySalesReport].reverse().map((day) => (
-                  <tr key={day.date}>
-                    <td data-label="Date">
-                      {new Date(`${day.date}T12:00:00.000Z`).toLocaleDateString("en-PH", {
-                        timeZone: "UTC",
-                        weekday: "short",
-                        month: "short",
-                        day: "numeric",
-                      })}
-                    </td>
-                    <td data-label="Orders">{day.total_orders}</td>
-                    <td data-label="Sales"><strong>{peso(day.revenue)}</strong></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="empty-panel" style={{ border: 0 }}>
-            No confirmed sales in the last 14 days.
-          </div>
-        )}
-      </section>
       </>
       )}
 
@@ -521,7 +357,7 @@ function Dashboard({
           <div className="panel-head">
             <div>
               <h2>Recent feedback</h2>
-              <p>The last notes from your tables.</p>
+              <p>Recent customer notes.</p>
             </div>
             <Link href="/admin/reviews" className="text-link">
               View all
@@ -563,7 +399,7 @@ function Dashboard({
           <div className="panel-head">
             <div>
               <h2>Today at a glance</h2>
-              <p>What needs your attention.</p>
+              <p>Needs attention.</p>
             </div>
           </div>
           <div className="panel-body">
@@ -597,6 +433,111 @@ function Dashboard({
             </div>
           </div>
         </section>
+      </div>
+
+      <div className="best-activity-grid">
+      <section className="card chart-panel">
+        <div className="chart-head">
+          <div>
+            <h2>Best sellers</h2>
+            <p>Most ordered menu items in the current calendar period.</p>
+          </div>
+          <div className="best-seller-periods" role="group" aria-label="Best seller period">
+            <button
+              type="button"
+              className={bestSellerPeriod === "week" ? "active" : ""}
+              aria-pressed={bestSellerPeriod === "week"}
+              onClick={() => setBestSellerPeriod("week")}
+            >
+              Week
+            </button>
+            <button
+              type="button"
+              className={bestSellerPeriod === "month" ? "active" : ""}
+              aria-pressed={bestSellerPeriod === "month"}
+              onClick={() => setBestSellerPeriod("month")}
+            >
+              Month
+            </button>
+          </div>
+        </div>
+        <div className="favorites">
+          {periodBestSelling.slice(0, 6).map((item, index) => (
+            <div className="favorite-row" key={item.name}>
+              <span className="favorite-rank">{String(index + 1).padStart(2, "0")}</span>
+              <span className="favorite-art">
+                <CoffeeArt
+                  kind={artKindForCategory("", item.name)}
+                  variant="icon"
+                />
+              </span>
+              <span className="favorite-name">{item.name}</span>
+              <span className="favorite-qty">{item.total_quantity} sold</span>
+              <span className="favorite-rev">{peso(item.total_revenue)}</span>
+              <span className="favorite-flag">
+                {item.menu_item_id && item.is_active ? (
+                  item.is_best_seller ? (
+                    <span className="favorite-featured-label">Best seller</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="favorite-feature-btn"
+                      disabled={busyMenuItemId === item.menu_item_id}
+                      onClick={() => onMarkBestSeller(item)}
+                    >
+                      {busyMenuItemId === item.menu_item_id
+                        ? <LoadingDots label="Saving" />
+                        : "Mark best seller"}
+                    </button>
+                  )
+                ) : null}
+              </span>
+            </div>
+          ))}
+          {periodBestSelling.length === 0 && (
+            <div className="empty-panel" style={{ border: 0 }}>
+              No confirmed orders {periodLabel}.
+            </div>
+          )}
+        </div>
+        <div className="week-tiles">
+          <div className="week-tile">
+            <small>Period</small>
+            <strong>
+              {bestSellerPeriod === "week"
+                ? `From ${formatShortDate(data.best_seller_periods.week_start)}`
+                : formatMonth(data.best_seller_periods.month_start)}
+            </strong>
+          </div>
+          <div className="week-tile">
+            <small>Avg ticket · all time</small>
+            <strong>{peso(avgTicket)}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="card chart-panel">
+        <div className="chart-head">
+          <div>
+            <h2>Recent activity</h2>
+            <p>Payments, orders, stock, and menu changes.</p>
+          </div>
+          <Link href="/admin/activity" className="text-link">
+            Full log
+          </Link>
+        </div>
+        {data.recent_activity?.length ? (
+          <ul className="activity-list activity-list-compact">
+            {data.recent_activity.map((log) => (
+              <ActivityRow key={log.id} log={log} time="full" />
+            ))}
+          </ul>
+        ) : (
+          <div className="empty-panel" style={{ border: 0 }}>
+            No activity recorded yet.
+          </div>
+        )}
+      </section>
       </div>
 
       <div className="section-bar">
@@ -641,30 +582,6 @@ function Dashboard({
         </div>
       </div>
 
-      <div className="section-bar">
-        <div>
-          <h2>Recent activity</h2>
-          <p>Payments, orders, stock, and menu changes — with the day they happened.</p>
-        </div>
-        <Link href="/admin/activity" className="text-link">
-          Full activity log
-        </Link>
-      </div>
-      <div className="panel">
-        <div className="panel-body tight">
-          {data.recent_activity?.length ? (
-            <ul className="activity-list activity-list-compact">
-              {data.recent_activity.map((log) => (
-                <ActivityRow key={log.id} log={log} time="full" />
-              ))}
-            </ul>
-          ) : (
-            <div className="empty-panel" style={{ border: 0 }}>
-              No activity recorded yet.
-            </div>
-          )}
-        </div>
-      </div>
       </>
       )}
     </>
@@ -678,16 +595,27 @@ function SalesChart({
   daily: { date: string; revenue: number }[];
   forecast: ForecastPoint[];
 }) {
-  const actual = daily.slice(-10);
+  const [width, setWidth] = useState(620);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      setWidth(Math.max(320, Math.round(el.clientWidth)));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const actual = daily;
   const projected = forecast.slice(0, 7);
   const values = [
     ...actual.map((point) => Number(point.revenue)),
     ...projected.map((point) => Number(point.forecast)),
   ];
   const max = Math.max(1000, ...values) * 1.15;
-  const width = 620;
-  const height = 170;
-  const padding = { top: 12, right: 8, bottom: 20, left: 8 };
+  const height = Math.max(170, Math.min(300, Math.round(width * 0.2)));
+  const padding = { top: 18, right: 12, bottom: 24, left: 54 };
   const chartW = width - padding.left - padding.right;
   const chartH = height - padding.top - padding.bottom;
   const total = actual.length + projected.length;
@@ -715,8 +643,15 @@ function SalesChart({
       ? `M${actualPoints[actualPoints.length - 1].x} ${actualPoints[actualPoints.length - 1].y} L${forecastPoints[0].x} ${forecastPoints[0].y}`
       : "";
 
+  const labelIndexes = new Set<number>();
+  const labelStep = Math.max(1, Math.ceil(actual.length / 4));
+  for (let index = 0; index < actual.length; index += labelStep) {
+    labelIndexes.add(index);
+  }
+  if (!projected.length && actual.length) labelIndexes.add(actual.length - 1);
+
   return (
-    <div className="chart-wrap">
+    <div className="chart-wrap" ref={wrapRef}>
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Sales and forecast chart">
         {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
           const y = padding.top + chartH * ratio;
@@ -729,7 +664,7 @@ function SalesChart({
                 x2={width - padding.right}
                 y2={y}
               />
-              <text className="axis-label" x={padding.left} y={y - 3}>
+              <text className="axis-label" x={padding.left - 6} y={y + 4} textAnchor="end">
                 {peso(Math.round(max * (1 - ratio))).replace("₱", "")}
               </text>
             </g>
@@ -754,7 +689,7 @@ function SalesChart({
           <path className="forecast-line" d={line(forecastPoints)} />
         )}
 
-        {actualPoints.map((point, index) => (
+        {actual.length <= 40 && actualPoints.map((point, index) => (
           <circle
             key={`a-${index}`}
             className="chart-dot"
@@ -766,13 +701,13 @@ function SalesChart({
         ))}
 
         {actual.map((point, index) =>
-          index % 3 === 0 || index === actual.length - 1 ? (
+          labelIndexes.has(index) ? (
             <text
               key={`al-${index}`}
               className="axis-label"
               x={pointFor(index, 0).x}
               y={height - 5}
-              textAnchor={index === 0 ? "start" : index === actual.length - 1 ? "end" : "middle"}
+              textAnchor={index === 0 ? "start" : "middle"}
             >
               {shortDate(point.date)}
             </text>
@@ -828,4 +763,24 @@ export function hourLabel(hour: number) {
   const date = new Date();
   date.setHours(hour, 0, 0, 0);
   return date.toLocaleTimeString("en-PH", { hour: "numeric" });
+}
+
+function parseDateOnly(value: string) {
+  return new Date(`${value}T00:00:00.000Z`);
+}
+
+function formatShortDate(value: string) {
+  return parseDateOnly(value).toLocaleDateString("en-PH", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatMonth(value: string) {
+  return parseDateOnly(value).toLocaleDateString("en-PH", {
+    timeZone: "UTC",
+    month: "long",
+    year: "numeric",
+  });
 }

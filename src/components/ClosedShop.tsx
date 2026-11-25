@@ -90,11 +90,6 @@ export function ClosedShop({
           )}
         </div>
 
-        <p className="closed-shop-note">
-          <Icon name="info" size={12} /> You can&apos;t place an order right now.
-          Table {String(table).padStart(2, "0")} will be waiting when we reopen.
-        </p>
-
         <div className="closed-shop-actions">
           <Link
             href={`/customer/hours?table=${table}`}

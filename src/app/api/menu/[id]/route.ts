@@ -2,6 +2,8 @@ import { AddonModel, MenuItemModel, normalizeVariantGroups } from "@/lib/models"
 import { requireAdmin } from "@/lib/auth";
 import { menuImageValidationError } from "@/lib/menuImage";
 import { logActivity } from "@/lib/activityLog";
+import { invalidateCache } from "@/lib/serverCache";
+import { errorMessage } from "@/lib/errorMessage";
 
 export async function GET(
   _request: Request,
@@ -33,6 +35,10 @@ export async function PATCH(
       return Response.json({ error: "Menu item not found.", success: false }, { status: 404 });
     }
     const body = await request.json();
+    const stockChanged =
+      body.stock_count !== undefined ||
+      body.stock_tracking_enabled !== undefined ||
+      body.stock_status !== undefined;
     const trackingEnabled =
       typeof body.stock_tracking_enabled === "boolean"
         ? body.stock_tracking_enabled
@@ -46,7 +52,7 @@ export async function PATCH(
     const stockCount = trackingEnabled ? Number(rawStockCount) : null;
     const stockStatus = body.stock_status ?? existing.stock_status;
     if (
-      trackingEnabled &&
+      stockChanged && trackingEnabled &&
       (!Number.isSafeInteger(stockCount) || Number(stockCount) < 0)
     ) {
       return Response.json(
@@ -63,7 +69,7 @@ export async function PATCH(
         { status: 400 }
       );
     }
-    if (trackingEnabled && stockCount === 0 && stockStatus !== "out") {
+    if (stockChanged && trackingEnabled && stockCount === 0 && stockStatus !== "out") {
       return Response.json(
         { error: "An item with zero stock must be marked sold out.", success: false },
         { status: 400 }
@@ -91,18 +97,20 @@ export async function PATCH(
     if (body.variants !== undefined) {
       try {
         variants = normalizeVariantGroups(body.variants);
-      } catch (error: any) {
+      } catch (error: unknown) {
         return Response.json(
-          { error: error.message, success: false },
+          { error: errorMessage(error, "Check the menu item details and try again."), success: false },
           { status: 400 }
         );
       }
     }
     await MenuItemModel.update(itemId, {
       ...body,
-      stock_count: finalStockCount,
-      stock_tracking_enabled: trackingEnabled,
-      stock_status: finalStockStatus,
+      ...(stockChanged ? {
+        stock_count: finalStockCount,
+        stock_tracking_enabled: trackingEnabled,
+        stock_status: finalStockStatus,
+      } : {}),
     });
     if (variants !== undefined) {
       await MenuItemModel.setVariants(itemId, variants);
@@ -117,9 +125,9 @@ export async function PATCH(
     if (body.category_id !== undefined && Number(body.category_id) !== Number(existing.category_id)) changed.push("category");
     if (body.is_best_seller !== undefined && Boolean(body.is_best_seller) !== Boolean(existing.is_best_seller)) changed.push("best seller");
     if (body.is_active !== undefined && Boolean(body.is_active) !== Boolean(existing.is_active)) changed.push("availability");
-    if (trackingEnabled !== Boolean(existing.stock_tracking_enabled)) changed.push("stock tracking");
-    if (finalStockStatus !== existing.stock_status) changed.push(`stock status ${existing.stock_status} → ${finalStockStatus}`);
-    if (trackingEnabled && Number(finalStockCount) !== Number(existing.stock_count)) changed.push(`stock count ${existing.stock_count ?? 0} → ${finalStockCount ?? 0}`);
+    if (stockChanged && trackingEnabled !== Boolean(existing.stock_tracking_enabled)) changed.push("stock tracking");
+    if (stockChanged && finalStockStatus !== existing.stock_status) changed.push(`stock status ${existing.stock_status} → ${finalStockStatus}`);
+    if (stockChanged && trackingEnabled && Number(finalStockCount) !== Number(existing.stock_count)) changed.push(`stock count ${existing.stock_count ?? 0} → ${finalStockCount ?? 0}`);
     if (variants !== undefined) changed.push("variants");
     if (Array.isArray(body.addonIds)) changed.push("add-ons");
     logActivity(auth.user, {
@@ -129,10 +137,11 @@ export async function PATCH(
       entity_type: "menu_item",
       entity_id: itemId,
     });
+    invalidateCache("menu");
     return Response.json({ item: updated, success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not save the menu item."), success: false },
       { status: 500 }
     );
   }
@@ -156,10 +165,11 @@ export async function DELETE(
       entity_type: "menu_item",
       entity_id: itemId,
     });
+    invalidateCache("menu");
     return Response.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not save the menu item."), success: false },
       { status: 500 }
     );
   }

@@ -38,14 +38,13 @@ export async function PATCH(
       orderItemId <= 0 ||
       !Number.isSafeInteger(quantity) ||
       quantity < 1 ||
-      quantity > 20 ||
       !validIds(variantIds) ||
       !validIds(extraIds) ||
       (sugarLevel !== null && !SUGAR_LEVELS.has(sugarLevel)) ||
       note.length > 180
     ) {
       return Response.json(
-        { error: "Enter valid options, notes, and a quantity from 1 to 20.", success: false },
+        { error: "Enter valid options, notes, and a positive whole quantity.", success: false },
         { status: 400 }
       );
     }

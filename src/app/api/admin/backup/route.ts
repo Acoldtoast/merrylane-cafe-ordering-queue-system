@@ -1,7 +1,6 @@
-import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { SettingsModel } from "@/lib/models";
-import { getDbPath } from "@/lib/db";
+import { getDbPath, isUsingSupabaseDatabase } from "@/lib/db";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -43,6 +42,18 @@ export async function GET(request: Request) {
     );
   }
 
+  if (isUsingSupabaseDatabase()) {
+    return Response.json({
+      backups: [],
+      last_backup_at: null,
+      auto_backup_enabled: false,
+      backup_provider: "supabase",
+      backup_message:
+        "File-based backups are unavailable for the hosted database. Configure and verify backups in the Supabase project dashboard.",
+      success: true,
+    });
+  }
+
   ensureBackupDir();
 
   // List existing backups
@@ -77,6 +88,17 @@ export async function POST(request: Request) {
     return auth.error || Response.json(
       { error: "Administrator access is required.", success: false },
       { status: 403 }
+    );
+  }
+
+  if (isUsingSupabaseDatabase()) {
+    return Response.json(
+      {
+        error:
+          "File-based backups are unavailable for the hosted database. Configure backups in the Supabase project dashboard.",
+        success: false,
+      },
+      { status: 409 }
     );
   }
 

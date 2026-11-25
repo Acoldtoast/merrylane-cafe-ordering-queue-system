@@ -1,8 +1,9 @@
 "use client";
 
+import { errorMessage } from "@/lib/errorMessage";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
-import { adminNav } from "@/components/portalNav";
 import { Brand } from "@/components/Brand";
 import { Icon } from "@/components/Icons";
 import { useFeedback } from "@/components/Feedback";
@@ -42,15 +43,17 @@ export function AdminReviewsClient() {
       if (data.stats) setStats(data.stats);
       setSelectedId((current) => current || data.reviews?.[0]?.id || null);
       setError("");
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Unable to load reviews."));
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    load();
+    void (async () => {
+      await load();
+    })();
   }, [load]);
   usePolling(load, 30_000, {
     immediate: false,
@@ -304,7 +307,7 @@ export function AdminReviewsClient() {
                     <p>{review.comment || "No written note."}</p>
                     <div className="review-card-foot">
                       <span className="badge badge-cream">
-                        Order #{String(review.order_id).padStart(3, "0")}
+                        {review.order_id == null ? "General review" : `Order #${String(review.order_id).padStart(3, "0")}`}
                       </span>
                       {review.photo_url && (
                         <ReviewPhoto

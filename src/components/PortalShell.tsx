@@ -17,10 +17,10 @@ import { LoadingDots } from "./LoadingDots";
 import {
   fetchPortalApi,
   notifyPortalDataChanged,
+  onPortalDataChanged,
   prefetchPortalRouteData,
 } from "@/lib/portalPrefetch";
 import { preloadPortalRouteCode } from "@/lib/preloadPortalRouteCode";
-import { useIdleRoutePrefetch } from "@/lib/useIdleRoutePrefetch";
 import { usePolling } from "@/lib/usePolling";
 import {
   getBrowserStorageItem,
@@ -93,7 +93,6 @@ export function PortalShell({
   area,
   className,
   title,
-  contextLabel,
   contextTitle,
   nav,
   children,
@@ -148,6 +147,7 @@ export function PortalShell({
     cachedUser
   );
   const [sessionReady, setSessionReady] = useState(Boolean(cachedUser));
+  const [smtpReady, setSmtpReady] = useState<boolean | null>(null);
   const [adminIdleTimeoutMinutes, setAdminIdleTimeoutMinutes] = useState(
     () => storedIdleTimeoutMinutes(ADMIN_IDLE_TIMEOUT_KEY, 5)
   );
@@ -166,6 +166,8 @@ export function PortalShell({
   const [unlockError, setUnlockError] = useState("");
   const [unlocking, setUnlocking] = useState(false);
   const [notifications, setNotifications] = useState<PortalNotification[]>([]);
+  const [unreadReviews, setUnreadReviews] = useState(0);
+  const [workCounts, setWorkCounts] = useState({ payments: 0, orders: 0, requests: 0 });
   const [notificationError, setNotificationError] = useState("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [markingNotificationId, setMarkingNotificationId] = useState<string | null>(null);
@@ -177,6 +179,32 @@ export function PortalShell({
     secondsRemaining: number;
   } | null>(null);
   const idleWarningTimerRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (area !== "admin") return;
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await fetchPortalApi("/api/admin/email-settings", { cache: "no-store" });
+        const data = await response.json();
+        if (active && response.ok) setSmtpReady(data.smtp_connection_ready === true);
+      } catch {
+        if (active) setSmtpReady(null);
+      }
+    };
+    const unsubscribe = onPortalDataChanged((detail) => {
+      if (detail.path.startsWith("/api/admin/email-settings")) void load();
+    });
+    void load();
+    return () => { active = false; unsubscribe(); };
+  }, [area]);
+
+  useEffect(() => {
+    if (area !== "staff") return;
+    return onPortalDataChanged((detail) => {
+      if (detail.path.startsWith("/api/users")) setAuthRetryKey((key) => key + 1);
+    });
+  }, [area]);
 
   const startIdleWarningCountdown = (seconds: number) => {
     if (idleWarningTimerRef.current) {
@@ -238,6 +266,10 @@ export function PortalShell({
           if (!response.ok || !data.authenticated) {
             portalSessionCache.delete(area);
             if (!active) return;
+            if (area === "staff" && (data.reason === "face_required" || data.reason === "password_change_required")) {
+              window.dispatchEvent(new Event("staff-face-required"));
+              return;
+            }
             if (data.reason === "session_conflict") {
               authRedirectingRef.current = true;
               setSessionConflict(true);
@@ -441,8 +473,13 @@ export function PortalShell({
       if (detail?.area !== area || authRedirectingRef.current) return;
       void fetch(`/api/auth/verify?area=${area}`, { cache: "no-store" })
         .then(async (response) => {
+          if (!response.ok) return;
           const data = await response.json();
           if (data.authenticated) return;
+          if (area === "staff" && (data.reason === "face_required" || data.reason === "password_change_required")) {
+            window.dispatchEvent(new Event("staff-face-required"));
+            return;
+          }
           portalSessionCache.delete(area);
           if (data.reason === "session_conflict") {
             authRedirectingRef.current = true;
@@ -456,7 +493,7 @@ export function PortalShell({
           void fetch(`/api/auth/login?area=${area}`, { method: "DELETE" }).finally(
             () => {
               router.replace(
-                `/login?next=${encodeURIComponent(nextPath)}&reason=session_expired`
+                `/login?next=${encodeURIComponent(nextPath)}&reason=${data.reason === "face_reset" ? "face_reset" : "session_expired"}`
               );
             }
           );
@@ -489,8 +526,13 @@ export function PortalShell({
         const response = await fetch(`/api/auth/verify?area=${area}`, {
           cache: "no-store",
         });
+        if (!response.ok) return;
         const data = await response.json();
         if (!active || data.authenticated) return;
+        if (area === "staff" && (data.reason === "face_required" || data.reason === "password_change_required")) {
+          window.dispatchEvent(new Event("staff-face-required"));
+          return;
+        }
         portalSessionCache.delete(area);
         if (data.reason === "session_conflict") {
           authRedirectingRef.current = true;
@@ -501,7 +543,7 @@ export function PortalShell({
         void fetch(`/api/auth/login?area=${area}`, { method: "DELETE" }).finally(
           () => {
             router.replace(
-              `/login?next=${encodeURIComponent(pathname)}&reason=session_expired`
+              `/login?next=${encodeURIComponent(pathname)}&reason=${data.reason === "face_reset" ? "face_reset" : "session_expired"}`
             );
           }
         );
@@ -642,7 +684,12 @@ export function PortalShell({
           const verification = await fetch(`/api/auth/verify?area=${area}`, {
             cache: "no-store",
           });
+          if (!verification.ok) {
+            lastHeartbeatAt = 0;
+            return;
+          }
           const status = await verification.json();
+          if (status.authenticated) return;
           if (!status.authenticated && status.reason === "session_conflict") {
             authRedirectingRef.current = true;
             portalSessionCache.delete(area);
@@ -892,6 +939,8 @@ export function PortalShell({
         throw new Error(data.error || "Could not refresh alerts.");
       }
       setNotifications(data.notifications || []);
+      setUnreadReviews(Number(data.unreadReviews) || 0);
+      if (data.workCounts) setWorkCounts(data.workCounts);
       setNotificationError("");
     } catch {
       setNotificationError("Alerts could not be refreshed.");
@@ -921,8 +970,7 @@ export function PortalShell({
     }
   }, []);
 
-  // Alerts for the page the user is already looking at count as seen, so the
-  // sidebar badges clear once the work has been viewed.
+  // Mark alerts as seen independently of the outstanding-work sidebar counts.
   useEffect(() => {
     if (area !== "staff") return;
     const pageKey =
@@ -949,23 +997,34 @@ export function PortalShell({
     return () => window.clearTimeout(timer);
   }, [area, pathname, notifications, markNotificationsSeen]);
 
+  useEffect(() => {
+    if (area !== "admin" || !pathname.startsWith("/admin/reviews") || unreadReviews === 0) return;
+    let active = true;
+    void (async () => {
+      try {
+        const response = await fetchPortalApi("/api/staff/notifications", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ markReviewsSeen: true }),
+        });
+        if (!response.ok) throw new Error("Could not mark reviews as seen.");
+        if (active) await refreshNotifications();
+      } catch {
+        if (active) setNotificationError("Could not mark reviews as seen.");
+      }
+    })();
+    return () => { active = false; };
+  }, [area, pathname, unreadReviews, refreshNotifications]);
+
   const unreadNotificationCount = notifications.filter(
     (notification) => !notification.read
   ).length;
 
-  const badgeCounts: Record<string, number> = {};
-  if (area === "staff") {
-    for (const notification of notifications) {
-      if (notification.read) continue;
-      if (notification.id.startsWith("unpaid-cancelled-")) continue;
-      const pageKey = notificationPageKey(notification);
-      if (!pageKey) continue;
-      if (pageKey === "/staff" && notification.kind !== "preparing") continue;
-      if (pageKey === "/staff/payments" && notification.kind !== "payment") continue;
-      if (pageKey === "/staff/requests" && notification.kind !== "waiter") continue;
-      badgeCounts[pageKey] = (badgeCounts[pageKey] || 0) + 1;
-    }
-  }
+  const badgeCounts: Record<string, number> = area === "staff" ? {
+    "/staff": workCounts.orders,
+    "/staff/payments": workCounts.payments,
+    "/staff/requests": workCounts.requests,
+  } : { "/admin/reviews": unreadReviews };
   const navWithBadges = nav.map((item) =>
     badgeCounts[item.href]
       ? { ...item, badge: badgeCounts[item.href] }
@@ -995,6 +1054,9 @@ export function PortalShell({
             item.id === notification.id ? { ...item, read: true } : item
           )
         );
+        if (notification.kind === "review") {
+          setUnreadReviews((count) => Math.max(0, count - 1));
+        }
       }
       setNotificationError("");
       setNotificationsOpen(false);
@@ -1122,53 +1184,6 @@ export function PortalShell({
     .slice(0, 2)
     .join("")
     .toUpperCase();
-  const canPrefetchPortalRoutes = Boolean(user && user.role === area);
-  const prefetchPaths = canPrefetchPortalRoutes
-    ? nav.map((item) => item.href)
-    : [];
-  const prefetchPathsKey = prefetchPaths.join("\n");
-  useIdleRoutePrefetch(
-    prefetchPaths,
-    canPrefetchPortalRoutes && area !== "admin" && area !== "staff",
-    true
-  );
-
-  useEffect(() => {
-    if (!canPrefetchPortalRoutes) return;
-    const network = (
-      navigator as Navigator & {
-        connection?: { saveData?: boolean; effectiveType?: string };
-      }
-    ).connection;
-    if (
-      network?.saveData ||
-      network?.effectiveType === "slow-2g" ||
-      network?.effectiveType === "2g"
-    ) {
-      return;
-    }
-
-    let disposed = false;
-    const dataPaths = prefetchPathsKey.split("\n").filter(Boolean);
-    const prefetchSidebarData = () => {
-      if (disposed || document.visibilityState !== "visible") return;
-      for (const href of dataPaths) {
-        if (href === pathname) continue;
-        void preloadPortalRouteCode(area, href);
-        prefetchPortalRouteData(area, href);
-      }
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") prefetchSidebarData();
-    };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    onVisibilityChange();
-
-    return () => {
-      disposed = true;
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, [area, canPrefetchPortalRoutes, pathname, prefetchPathsKey]);
 
   if (!sessionReady || authCheckError) {
     return (
@@ -1316,11 +1331,28 @@ export function PortalShell({
 
         <div className="sidebar-foot">
           <div className="sidebar-profile">
-            <span className="avatar">{initials}</span>
-            <div className="sidebar-profile-text">
-              <strong>{user?.name || <LoadingDots label="Loading" />}</strong>
-              <span>{user?.role === "admin" ? "Administrator" : "Staff member"}</span>
-            </div>
+            {area === "staff" ? (
+              <Link
+                href="/staff/profile"
+                className="sidebar-profile-link"
+                aria-current={pathname.startsWith("/staff/profile") ? "page" : undefined}
+                title="View profile"
+              >
+                <span className="avatar">{initials}</span>
+                <div className="sidebar-profile-text">
+                  <strong>{user?.name || <LoadingDots label="Loading" />}</strong>
+                  <span>Staff member</span>
+                </div>
+              </Link>
+            ) : (
+              <>
+                <span className="avatar">{initials}</span>
+                <div className="sidebar-profile-text">
+                  <strong>{user?.name || <LoadingDots label="Loading" />}</strong>
+                  <span>Administrator</span>
+                </div>
+              </>
+            )}
             <button
               type="button"
               className="logout-icon"
@@ -1350,14 +1382,20 @@ export function PortalShell({
             </button>
             <Icon name={area === "admin" ? "chart" : "receipt"} />
             <div>
-              <div className="portal-context-label">{contextLabel}</div>
               <div className="portal-context-title">{contextTitle}</div>
             </div>
           </div>
           <div className="portal-topbar-right">
-            <span className="live-pill">
-              <span className="live-dot" /> Live
-            </span>
+            {area === "staff" && user && !user.email?.trim() && (
+              <Link href="/staff/profile" style={{ color: "#8a4b00", background: "#fff2d6", borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 700 }}>
+                Add recovery email
+              </Link>
+            )}
+            {area === "admin" && smtpReady === false && (
+              <Link href="/admin/settings#email" style={{ color: "#8a4b00", background: "#fff2d6", borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 700 }}>
+                Configure SMTP for password recovery
+              </Link>
+            )}
             <span className="topbar-time">{clock}</span>
             <div className="portal-notifications">
               <button
@@ -1449,9 +1487,11 @@ export function PortalShell({
         </header>
 
         <main className="portal-content">
-          <div className="content-heading">
-            <h1>{title}</h1>
-          </div>
+          {title && (
+            <div className="content-heading">
+              <h1>{title}</h1>
+            </div>
+          )}
           {area === "staff" ? (
             <div key={pathname}>{children}</div>
           ) : (
@@ -1514,10 +1554,7 @@ export function PortalShell({
               Welcome back{user?.name ? `, ${user.name.split(" ")[0]}` : ""}.
             </h2>
             <p id="staff-lock-message" className="feedback-message">
-              This screen was locked after {staffIdleTimeoutMinutes} minutes away.
-              Enter your password to continue. Active sessions remain signed in
-              across midnight. After shop closing, idle sessions are warned and
-              signed out after the closing idle threshold.
+              Locked after {staffIdleTimeoutMinutes} minutes. Enter your password to continue.
             </p>
             <form className="session-lock-form" onSubmit={unlockStaffSession}>
               <label className="label" htmlFor="staff-session-password">

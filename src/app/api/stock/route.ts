@@ -1,15 +1,16 @@
 import { MenuItemModel, StockModel } from "@/lib/models";
 import { requireStaff } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
+import { errorMessage } from "@/lib/errorMessage";
 
 export async function GET(request: Request) {
   try {
     const auth = await requireStaff(request);
     if (auth.error) return auth.error;
     return Response.json({ items: await MenuItemModel.all(), success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not update menu availability."), success: false },
       { status: 500 }
     );
   }
@@ -55,6 +56,22 @@ export async function PATCH(request: Request) {
             : Boolean(existing.stock_tracking_enabled);
     const rawStockCount =
       body.stock_count === undefined ? existing.stock_count : body.stock_count;
+    // A limited (tracked) item must carry an explicit count. Reject an empty
+    // count when tracking is being turned on, so a crafted request cannot
+    // create a "limited but countless" item.
+    if (
+      trackingEnabled &&
+      body.manual_out !== true &&
+      (rawStockCount === undefined ||
+        rawStockCount === null ||
+        rawStockCount === "") &&
+      body.stock_tracking_enabled === true
+    ) {
+      return Response.json(
+        { error: "Enter the number of portions left for a limited item.", success: false },
+        { status: 400 }
+      );
+    }
     const stockCount = trackingEnabled ? Number(rawStockCount) : null;
     if (
       trackingEnabled &&
@@ -137,9 +154,9 @@ export async function PATCH(request: Request) {
       entity_id: id,
     });
     return Response.json({ success: true, item });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not update menu availability."), success: false },
       { status: 500 }
     );
   }

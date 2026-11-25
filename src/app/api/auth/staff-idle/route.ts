@@ -2,7 +2,7 @@ import { SignJWT } from "jose";
 import { NextResponse } from "next/server";
 import {
   getStaffIdleTimeoutMinutes,
-  JWT_SECRET,
+  getJwtSecret,
   requireStaff,
 } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
@@ -25,7 +25,7 @@ async function staffSessionResponse(
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(Math.floor(Date.now() / 1000) + staffSessionSeconds)
-    .sign(new TextEncoder().encode(JWT_SECRET));
+    .sign(new TextEncoder().encode(getJwtSecret()));
   const response = NextResponse.json({
     action,
     ...(idleTimeoutMinutes === undefined

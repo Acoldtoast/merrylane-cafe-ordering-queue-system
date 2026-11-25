@@ -20,7 +20,6 @@ import {
   orderTypeLabel,
   peso,
   smartDateTime,
-  statusLabel,
 } from "@/lib/format";
 import { orderItemMeta } from "@/lib/orderItems";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
@@ -256,10 +255,19 @@ export function StatusClient({
     }
 
     load();
-    const timer = window.setInterval(load, 9000);
+    const timer = window.setInterval(() => {
+      // Skip network refreshes while the phone screen is off or another app is
+      // in front; resume as soon as the tab becomes visible again.
+      if (document.visibilityState === "visible") void load();
+    }, 9000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [resolvedId, lastOrderId, initialTable, fetchOrder, setLastOrderId, ready]);
 
@@ -331,10 +339,6 @@ export function StatusClient({
       </Link>
       <div className="status-head">
         <div>
-          <span className="eyebrow" style={{ color: "var(--brown)" }}>
-            Order #{String(order.order_number ?? order.id).padStart(3, "0")} ·{" "}
-            {orderTypeLabel(order.order_type)}
-          </span>
           <h1>
             {order.cancellation_reason === "unpaid_timeout"
               ? "Order automatically cancelled."
@@ -350,38 +354,7 @@ export function StatusClient({
                     ? "You're in the queue."
                     : "We have your order."}
           </h1>
-          <p>
-            {order.cancellation_reason === "unpaid_timeout"
-              ? "No cash payment was recorded within 90 minutes, so this order was removed from the queue. If you already paid at the counter, please speak with a staff member."
-              : order.status === "cancelled"
-                ? "This order is no longer active. Please contact a staff member if you need help."
-                : order.status === "pending" || order.status === "payment_pending"
-              ? "Our team is confirming your order and payment."
-              : order.status === "ready"
-                ? "Your order is served and waiting. Please confirm when you have received it."
-                : order.status === "completed"
-                  ? "Thank you for spending a little time with us."
-                  : "Watch this page update in real time."}
-          </p>
         </div>
-        <span
-          className={`status-pill ${
-            order.status === "ready" || order.status === "completed"
-              ? "ready"
-              : order.status === "cancelled"
-                ? "cancelled"
-                : ""
-          }`}
-        >
-          <span className="dot" />
-          {order.status === "completed"
-            ? "Received"
-            : order.status === "ready"
-              ? "Served · waiting"
-              : order.cancellation_reason === "unpaid_timeout"
-              ? "Cancelled · unpaid"
-              : statusLabel(order.status)}
-        </span>
       </div>
 
       {order.cancellation_reason === "unpaid_timeout" && (
@@ -486,13 +459,6 @@ export function StatusClient({
               </p>
             </div>
             <div className="queue-status">
-              <span className="badge">
-                {order.status === "ready"
-                  ? "Served"
-                  : order.status === "completed"
-                    ? "Received"
-                    : statusLabel(order.status)}
-              </span>
               <small>
                 {order.status === "ready"
                   ? "Served · waiting"
@@ -526,32 +492,6 @@ export function StatusClient({
                   </div>
                 );
               })}
-            </div>
-            <div className="status-note">
-              <Icon name="info" />
-              <span>
-                {order.status === "ready" ? (
-                  <>
-                    <strong>Your order has been served.</strong> It is waiting for you.
-                    Once you have received it, use the confirmation slider below.
-                  </>
-                ) : order.status === "completed" ? (
-                  <>
-                    <strong>Receipt confirmed.</strong> We hope every sip was a good
-                    one. Your feedback means a lot to our small team.
-                  </>
-                ) : order.status === "preparing" ? (
-                  <>
-                    <strong>In the works.</strong> Our barista is making your order
-                    fresh. We&apos;ll update this page when it&apos;s ready.
-                  </>
-                ) : (
-                  <>
-                    <strong>We&apos;ll keep you posted.</strong> This page updates
-                    automatically every few seconds.
-                  </>
-                )}
-              </span>
             </div>
           </div>
 

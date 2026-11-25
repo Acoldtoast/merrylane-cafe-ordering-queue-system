@@ -8,6 +8,36 @@ import { NextRequest } from "next/server";
 import { PGliteDatabase } from "../src/lib/db/pglite.ts";
 import { LOGIN_DEVICE_COOKIE } from "../src/lib/loginDevice.ts";
 
+// Tests configure their own signing secret; the app no longer ships an
+// insecure default, so every test secret must be set before route handlers
+// resolve it lazily on first use.
+process.env.JWT_SECRET = "test-only-login-secret-do-not-use-in-production";
+
+test("session verification returns temporary unavailability on a database timeout", async (t) => {
+  const { UserModel } = await import("../src/lib/models.ts");
+  const { GET } = await import("../src/app/api/auth/verify/route.ts");
+  const lookup = t.mock.method(UserModel, "byId", async () => {
+    throw new Error("Connection terminated due to connection timeout");
+  });
+  const token = await new SignJWT({ userId: 1, role: "admin", sid: "test" })
+    .setProtectedHeader({ alg: "HS256" })
+    .setExpirationTime("1m")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const url = "http://localhost/api/auth/verify?area=admin";
+  const response = await GET(new Request(url, {
+    headers: { cookie: `auth-admin-token=${token}` },
+  }));
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).reason, undefined);
+
+  const invalid = await GET(new Request(url, {
+    headers: { cookie: "auth-admin-token=invalid" },
+  }));
+  assert.equal(invalid.status, 200);
+  assert.equal((await invalid.json()).reason, "session_expired");
+  assert.equal(lookup.mock.callCount(), 1);
+});
+
 async function createAuthDatabase(t, prefix) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `merrylane-${prefix}-`));
   const database = PGliteDatabase.open(path.join(root, "pgdata"));
@@ -88,6 +118,279 @@ function recoveryCodeRequest(username) {
   });
 }
 
+test("creating staff requires contact number and complete duty hours", async (t) => {
+  await createAuthDatabase(t, "staff-required-details");
+  const { UserModel } = await import("../src/lib/models.ts");
+  const { POST } = await import("../src/app/api/users/route.ts");
+  const id = await UserModel.create({ name: "Admin", username: "details-admin", role: "admin", password: "password" });
+  await UserModel.setSession(id, "details-admin-session");
+  const token = await new SignJWT({ userId: id, role: "admin", sid: "details-admin-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const create = (fields) => POST(new Request("http://localhost/api/users", {
+    method: "POST",
+    headers: { cookie: `auth-admin-token=${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ name: "New Staff", email: "staff@example.com", role: "staff", ...fields }),
+  }));
+  const noContact = await create({ duty_hours: "10:00 AM – 6:00 PM" });
+  assert.equal(noContact.status, 400);
+  assert.match((await noContact.json()).error, /contact number/i);
+  const noHours = await create({ contact_number: "09123456789" });
+  assert.equal(noHours.status, 400);
+  assert.match((await noHours.json()).error, /start time and an end time/i);
+  const ready = await create({ contact_number: "09123456789", duty_hours: "10:00 AM – 6:00 PM" });
+  assert.match((await ready.json()).error, /valid ID/i);
+});
+
+test("admin face-check reset requires a new verification and rejects in-flight results", async (t) => {
+  const database = await createAuthDatabase(t, "face-reset");
+  const { UserModel, SettingsModel } = await import("../src/lib/models.ts");
+  const { staffFaceAccess, recordStaffFaceCheck } = await import("../src/lib/staffFaceAccess.ts");
+  const { getUserAuthStatus } = await import("../src/lib/auth.ts");
+  const route = await import("../src/app/api/admin/staff/[id]/face-check/route.ts");
+  const faceRoute = await import("../src/app/api/auth/face-check/route.ts");
+  const admin = await UserModel.create({ name: "Admin", username: "face-admin", role: "admin", password: "password" });
+  const staff = await UserModel.create({ name: "Staff", username: "face-staff", role: "staff", password: "password" });
+  await UserModel.setSession(admin, "admin-face-session");
+  await UserModel.setSession(staff, "staff-face-session");
+  await SettingsModel.set("staff_face_check_enabled", "true");
+  await staffFaceAccess(staff);
+  await database.prepare("INSERT INTO staff_identity_registrations (user_id, encrypted_images, status) VALUES (?, ?, 'verified')").run(staff, "test-encrypted-data");
+  const before = await staffFaceAccess(staff);
+  assert.equal(before.required, true);
+  assert.equal(await recordStaffFaceCheck(staff, before.hash, before.resetToken), true);
+  assert.equal((await staffFaceAccess(staff)).required, false);
+  const token = await new SignJWT({ userId: admin, role: "admin", sid: "admin-face-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const staffToken = await new SignJWT({ userId: staff, role: "staff", sid: "staff-face-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const staffRequest = () => new Request("http://localhost/api/auth/face-check", { headers: { cookie: `auth-staff-token=${staffToken}` } });
+  const request = (method, cookie = "") => new Request(`http://localhost/api/admin/staff/${staff}/face-check`, { method, headers: { cookie } });
+  const params = Promise.resolve({ id: String(staff) });
+  assert.equal((await route.DELETE(request("DELETE"), { params })).status, 403);
+  assert.equal((await route.DELETE(request("DELETE", `auth-admin-token=${token}`), { params })).status, 200);
+  assert.equal((await staffFaceAccess(staff)).required, true);
+  assert.equal((await getUserAuthStatus(staffRequest(), "staff")).reason, "face_reset");
+  assert.equal((await (await faceRoute.GET(staffRequest())).json()).reason, "face_reset");
+  assert.equal(await recordStaffFaceCheck(staff, before.hash, before.resetToken), false);
+  await UserModel.setSession(staff, "new-staff-session");
+  const newToken = await new SignJWT({ userId: staff, role: "staff", sid: "new-staff-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  assert.equal((await getUserAuthStatus(new Request("http://localhost/api/stock", { headers: { cookie: `auth-staff-token=${newToken}` } }), "staff")).reason, "face_required");
+});
+
+test("admin can review only the enrolled face photos", async (t) => {
+  const database = await createAuthDatabase(t, "face-photo-review");
+  const previousKey = process.env.STAFF_IDENTITY_ENCRYPTION_KEY;
+  process.env.STAFF_IDENTITY_ENCRYPTION_KEY = "test-only-face-review-key-1234567890";
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.STAFF_IDENTITY_ENCRYPTION_KEY;
+    else process.env.STAFF_IDENTITY_ENCRYPTION_KEY = previousKey;
+  });
+  const { UserModel } = await import("../src/lib/models.ts");
+  const { ensureStaffIdentityTable, encryptStaffIdentityImages } = await import("../src/lib/staffIdentityRegistration.ts");
+  const { GET } = await import("../src/app/api/admin/staff/[id]/identity/route.ts");
+  const admin = await UserModel.create({ name: "Admin", username: "face-review-admin", role: "admin", password: "password" });
+  const staff = await UserModel.create({ name: "Staff", username: "face-review-staff", role: "staff", password: "password" });
+  await UserModel.setSession(admin, "face-review-admin-session");
+  await UserModel.setSession(staff, "face-review-staff-session");
+  await ensureStaffIdentityTable();
+  const image = `data:image/jpeg;base64,${Buffer.from([255, 216, 255, 217]).toString("base64")}`;
+  const images = {
+    id_front: image,
+    face_front: image,
+    face_left: image,
+    face_right: image,
+    id_type: "philsys",
+  };
+  await database.prepare(
+    "INSERT INTO staff_identity_registrations (user_id, encrypted_images, status) VALUES (?, ?, 'verified')"
+  ).run(staff, encryptStaffIdentityImages(images));
+  const adminToken = await new SignJWT({ userId: admin, role: "admin", sid: "face-review-admin-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const staffToken = await new SignJWT({ userId: staff, role: "staff", sid: "face-review-staff-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const params = Promise.resolve({ id: String(staff) });
+  const request = (cookie) => GET(new Request(
+    `http://localhost/api/admin/staff/${staff}/identity?review=face`,
+    { headers: { cookie } },
+  ), { params });
+
+  const response = await request(`auth-admin-token=${adminToken}`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    face_front: image,
+    face_left: image,
+    face_right: image,
+  });
+  assert.equal((await request(`auth-staff-token=${staffToken}`)).status, 403);
+});
+
+test("admin can replace a staff ID without changing enrolled face photos", async (t) => {
+  const database = await createAuthDatabase(t, "staff-id-update");
+  const previousKey = process.env.STAFF_IDENTITY_ENCRYPTION_KEY;
+  process.env.STAFF_IDENTITY_ENCRYPTION_KEY = "test-only-id-update-key-123456789012";
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.STAFF_IDENTITY_ENCRYPTION_KEY;
+    else process.env.STAFF_IDENTITY_ENCRYPTION_KEY = previousKey;
+  });
+  const { UserModel, SettingsModel } = await import("../src/lib/models.ts");
+  const {
+    createStaffIdentityVerificationToken,
+    decryptStaffIdentityData,
+    encryptStaffIdentityImages,
+    ensureStaffIdentityTable,
+    staffIdentityFingerprint,
+    staffIdentityRevision,
+  } = await import("../src/lib/staffIdentityRegistration.ts");
+  const { recordStaffFaceCheck, staffFaceAccess } = await import("../src/lib/staffFaceAccess.ts");
+  const { PUT } = await import("../src/app/api/admin/staff/[id]/identity/route.ts");
+  const admin = await UserModel.create({ name: "Admin", username: "id-update-admin", role: "admin", password: "password" });
+  const staff = await UserModel.create({ name: "Test Staff", username: "id-update-staff", role: "staff", password: "password" });
+  await UserModel.setSession(admin, "id-update-admin-session");
+  await SettingsModel.set("staff_face_check_enabled", "true");
+  await ensureStaffIdentityTable();
+  const image = (marker) => `data:image/jpeg;base64,${Buffer.from([255, 216, 255, marker, 217]).toString("base64")}`;
+  const oldFace = { face_front: image(1), face_left: image(2), face_right: image(3) };
+  const oldImages = { id_front: image(4), id_back: image(5), id_type: "philsys", ...oldFace };
+  const oldDetails = { name: "Test Staff", number: "1111111111111111", birth_date: "2000-01-01", expiration_date: "" };
+  const encryptedImages = encryptStaffIdentityImages(oldImages);
+  const encryptedDetails = encryptStaffIdentityImages(oldDetails);
+  await database.prepare(
+    "INSERT INTO staff_identity_registrations (user_id, encrypted_images, status, encrypted_details, details_fingerprint) VALUES (?, ?, 'verified', ?, ?)"
+  ).run(staff, encryptedImages, encryptedDetails, staffIdentityFingerprint("philsys", oldDetails.number));
+  const previousFaceCheck = await staffFaceAccess(staff);
+  assert.equal(await recordStaffFaceCheck(staff, previousFaceCheck.hash, previousFaceCheck.resetToken), true);
+  assert.ok((await staffFaceAccess(staff)).verifiedAt);
+
+  const token = await new SignJWT({ userId: admin, role: "admin", sid: "id-update-admin-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const newId = image(6);
+  const newDetails = { name: "Test Staff", number: "2222222222222222", birth_date: "2000-01-01", expiration_date: "" };
+  const verificationToken = createStaffIdentityVerificationToken({
+    id_front: newId,
+    face_front: oldFace.face_front,
+    id_type: "philsys",
+  }, "Test Staff");
+  const requestBody = JSON.stringify({
+    replacing: "id",
+    revision: staffIdentityRevision(encryptedImages, encryptedDetails),
+    id_type: "philsys",
+    id_front: newId,
+    ...oldFace,
+    details: newDetails,
+    details_reviewed: true,
+    identity_verification_token: verificationToken,
+  });
+  const response = await PUT(new Request(`http://localhost/api/admin/staff/${staff}/identity`, {
+    method: "PUT",
+    headers: {
+      cookie: `auth-admin-token=${token}`,
+      "content-type": "application/json",
+      "content-length": String(Buffer.byteLength(requestBody)),
+    },
+    body: requestBody,
+  }), { params: Promise.resolve({ id: String(staff) }) });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { success: true, status: "verified" });
+  const stored = await database.prepare(
+    "SELECT encrypted_images, encrypted_details FROM staff_identity_registrations WHERE user_id = ?"
+  ).get(staff);
+  assert.deepEqual(decryptStaffIdentityData(stored.encrypted_images), {
+    id_front: newId,
+    id_type: "philsys",
+    ...oldFace,
+  });
+  assert.deepEqual(decryptStaffIdentityData(stored.encrypted_details), newDetails);
+  const updatedFaceCheck = await staffFaceAccess(staff);
+  assert.equal(updatedFaceCheck.verifiedAt, null);
+  assert.equal(updatedFaceCheck.required, true);
+});
+
+test("new staff must replace their temporary password before staff access", async (t) => {
+  const database = await createAuthDatabase(t, "temporary-password");
+  const { UserModel, verifyPassword } = await import("../src/lib/models.ts");
+  const { getUserAuthStatus } = await import("../src/lib/auth.ts");
+  const { POST } = await import("../src/app/api/auth/change-temporary-password/route.ts");
+  const id = await UserModel.create({ name: "New Staff", username: "new-staff", role: "staff", password: "AB23CD" });
+  await UserModel.setSession(id, "temporary-session");
+  await database.prepare("UPDATE users SET must_change_password = 1 WHERE id = ?").run(id);
+  const token = await new SignJWT({ userId: id, role: "staff", sid: "temporary-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const headers = { cookie: `auth-staff-token=${token}`, "content-type": "application/json" };
+  const status = () => getUserAuthStatus(new Request("http://localhost/api/stock", { headers }), "staff");
+  assert.equal((await status()).reason, "password_change_required");
+  const change = (new_password) => POST(new Request("http://localhost/api/auth/change-temporary-password", {
+    method: "POST", headers, body: JSON.stringify({ new_password }),
+  }));
+  assert.equal((await change("AB23CD")).status, 400);
+  assert.equal((await change("my-new-password")).status, 200);
+  assert.equal(verifyPassword("my-new-password", await UserModel.passwordHashById(id)), true);
+  assert.ok((await status()).user);
+});
+
+test("staff profile returns its registered identity alongside the user", async (t) => {
+  const database = await createAuthDatabase(t, "staff-profile-identity");
+  const previousKey = process.env.STAFF_IDENTITY_ENCRYPTION_KEY;
+  process.env.STAFF_IDENTITY_ENCRYPTION_KEY = "test-only-identity-storage-key-123456789";
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.STAFF_IDENTITY_ENCRYPTION_KEY;
+    else process.env.STAFF_IDENTITY_ENCRYPTION_KEY = previousKey;
+  });
+  const { UserModel } = await import("../src/lib/models.ts");
+  const { ensureStaffIdentityTable, encryptStaffIdentityImages } = await import("../src/lib/staffIdentityRegistration.ts");
+  const route = await import("../src/app/api/staff/profile/route.ts");
+  const id = await UserModel.create({ name: "Test Staff", username: "id-staff", role: "staff", password: "password" });
+  await UserModel.setSession(id, "identity-session");
+  await ensureStaffIdentityTable();
+  const image = "data:image/jpeg;base64,/9j/4A==";
+  const encrypted = encryptStaffIdentityImages({ id_type: "philsys", id_front: image, face_front: image, face_left: image, face_right: image });
+  const details = encryptStaffIdentityImages({ name: "Test Staff", number: "1234", birth_date: "", expiration_date: "" });
+  await database.prepare("INSERT INTO staff_identity_registrations (user_id, encrypted_images, encrypted_details, status) VALUES (?, ?, ?, ?)").run(id, encrypted, details, "verified");
+  const token = await new SignJWT({ userId: id, role: "staff", sid: "identity-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const response = await route.GET(new Request("http://localhost/api/staff/profile", { headers: { cookie: `auth-staff-token=${token}` } }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.user.username, "id-staff");
+  assert.equal(body.identity.status, "verified");
+  assert.equal(body.identity.id_front, image);
+  assert.equal(body.identity.details.name, "Test Staff");
+});
+
+test("staff profile requires password and invalidates old sessions after a password change", async (t) => {
+  await createAuthDatabase(t, "staff-profile");
+  const { UserModel, verifyPassword } = await import("../src/lib/models.ts");
+  const route = await import("../src/app/api/staff/profile/route.ts");
+  const id = await UserModel.create({ name: "Test Staff", username: "profile-staff", email: "", role: "staff", password: "old-password" });
+  await UserModel.create({ name: "Other Staff", username: "other-staff", email: "other@example.com", role: "staff", password: "other-password" });
+  await UserModel.setSession(id, "profile-session");
+  const token = await new SignJWT({ userId: id, role: "staff", sid: "profile-session" })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("1h")
+    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+  const request = (body) => new Request("http://localhost/api/staff/profile", {
+    method: "PATCH",
+    headers: { cookie: `auth-staff-token=${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  assert.equal((await route.PATCH(request({ email: "staff@example.com", current_password: "wrong" }))).status, 401);
+  assert.equal((await route.PATCH(request({ email: "", current_password: "old-password" }))).status, 400);
+  assert.equal((await route.PATCH(request({ email: "OTHER@example.com", current_password: "old-password" }))).status, 409);
+  assert.equal((await route.PATCH(request({ email: "staff@example.com", current_password: "old-password" }))).status, 200);
+  assert.equal((await UserModel.byId(id)).email, "staff@example.com");
+  assert.equal((await route.PATCH(request({ new_password: "new-password", current_password: "old-password" }))).status, 200);
+  assert.equal(verifyPassword("new-password", await UserModel.passwordHashById(id)), true);
+  assert.equal((await route.PATCH(request({ email: "other@example.com", current_password: "new-password" }))).status, 401);
+});
+
 function staffIdleRequest(token, lastActivityAt) {
   return new Request("http://localhost/api/auth/staff-idle", {
     method: "POST",
@@ -136,13 +439,13 @@ test("login failures share a device streak across emails and successful login cl
   );
   assert.equal(successfulLogin.status, 200);
   assert.equal((await successfulLogin.json()).success, true);
-  const { JWT_SECRET } = await import("../src/lib/auth.ts");
+  const { getJwtSecret } = await import("../src/lib/auth.ts");
   const rememberedToken =
     successfulLogin.cookies.get("auth-staff-token")?.value;
   assert.ok(rememberedToken);
   const { payload } = await jwtVerify(
     rememberedToken,
-    new TextEncoder().encode(JWT_SECRET)
+    new TextEncoder().encode(getJwtSecret())
   );
   assert.equal(Number(payload.exp) - Number(payload.iat), 12 * 60 * 60);
 
@@ -153,6 +456,7 @@ test("login failures share a device streak across emails and successful login cl
     status: "allowed",
     failedAttempts: 0,
   });
+  assert.equal(Number(payload.exp) - Number(payload.iat), 12 * 60 * 60);
 
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     const response = await POST(
@@ -172,6 +476,24 @@ test("login failures share a device streak across emails and successful login cl
       );
     }
   }
+});
+
+test("a newly created account can sign in with the exact password entered", async (t) => {
+  await createAuthDatabase(t, "exact-account-password");
+  const { UserModel } = await import("../src/lib/models.ts");
+  const username = "staff-space-password";
+  const password = "  staff-password  ";
+  await UserModel.create({
+    name: "Staff Member",
+    username,
+    role: "staff",
+    password,
+  });
+
+  const { POST } = await import("../src/app/api/auth/login/route.ts");
+  const response = await POST(loginRequest(username, password, undefined, false));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).success, true);
 });
 
 test("device cooldown escalates to a next-day lock and resets the streak at Manila midnight", async (t) => {
@@ -266,7 +588,7 @@ test("Never is only a valid idle timeout for staff", async () => {
 test("staff session unlock accepts the same scrypt password as sign-in", async (t) => {
   await createAuthDatabase(t, "staff-unlock");
   const { UserModel } = await import("../src/lib/models.ts");
-  const { JWT_SECRET } = await import("../src/lib/auth.ts");
+  const { getJwtSecret } = await import("../src/lib/auth.ts");
   const password = "test-staff-password";
   const userId = await UserModel.create({
     name: "Angelu Dela Cruz",
@@ -284,7 +606,7 @@ test("staff session unlock accepts the same scrypt password as sign-in", async (
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("12h")
-    .sign(new TextEncoder().encode(JWT_SECRET));
+    .sign(new TextEncoder().encode(getJwtSecret()));
   const { POST } = await import("../src/app/api/auth/unlock/route.ts");
   const request = (submittedPassword) =>
     new Request("http://localhost/api/auth/unlock", {
@@ -722,7 +1044,7 @@ test("several accounts can have no saved email at the same time", async (t) => {
 
 test("staff sessions remain available at closing and sign out after the closing idle threshold", async (t) => {
   const database = await createAuthDatabase(t, "staff-idle-close");
-  const { JWT_SECRET } = await import("../src/lib/auth.ts");
+  const { getJwtSecret } = await import("../src/lib/auth.ts");
   const { getNextManilaMidnight } = await import("../src/lib/authSecurity.ts");
   const { POST } = await import("../src/app/api/auth/staff-idle/route.ts");
   const { SettingsModel, hashPassword } = await import("../src/lib/models.ts");
@@ -776,7 +1098,7 @@ test("staff sessions remain available at closing and sign out after the closing 
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("12h")
-    .sign(new TextEncoder().encode(JWT_SECRET));
+    .sign(new TextEncoder().encode(getJwtSecret()));
 
   const localTime = SettingsModel.localDateTime(now).slice(11, 16);
   const [hours, minutes] = localTime.split(":").map(Number);

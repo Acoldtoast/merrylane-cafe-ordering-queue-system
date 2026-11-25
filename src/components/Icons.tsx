@@ -10,6 +10,7 @@ export type IconName =
   | "chevron-left"
   | "chevron-right"
   | "chevron-down"
+  | "chevron-up"
   | "plus"
   | "minus"
   | "search"
@@ -129,6 +130,8 @@ function content(name: IconName) {
       return <path d="m9 18 6-6-6-6" />;
     case "chevron-down":
       return <path d="m6 9 6 6 6-6" />;
+    case "chevron-up":
+      return <path d="m6 15 6-6 6 6" />;
     case "plus":
       return <path d="M12 5v14M5 12h14" />;
     case "minus":

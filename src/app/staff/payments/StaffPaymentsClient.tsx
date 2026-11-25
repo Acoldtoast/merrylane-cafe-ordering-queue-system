@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useConfirmDialog } from "@/components/ConfirmDialog";
 import { Icon } from "@/components/Icons";
 import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { useFeedback } from "@/components/Feedback";
@@ -19,16 +20,9 @@ import { orderTypeLabel, peso, relativeTime, smartDateTime } from "@/lib/format"
 import { orderItemMeta } from "@/lib/orderItems";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
 import { usePolling } from "@/lib/usePolling";
+import { needsPaymentReview } from "@/lib/orderLifecycle";
 
 const PREP_OPTIONS = [5, 10, 15, 20, 30];
-
-function needsPaymentReview(order: Order) {
-  return (
-    order.payment_status === "pending" &&
-    (order.status === "payment_pending" ||
-      (order.payment_method === "counter" && order.status === "pending"))
-  );
-}
 
 function readyClock(minutes: string) {
   const date = new Date(Date.now() + (Number(minutes) || 0) * 60000);
@@ -49,6 +43,7 @@ function discountTypeLabel(type: DiscountType) {
 
 export function StaffPaymentsClient() {
   const feedback = useFeedback();
+  const { confirm, dialog: confirmDialog } = useConfirmDialog();
   const [pendingOrders, setPendingOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [balancePayments, setBalancePayments] = useState<
@@ -64,6 +59,9 @@ export function StaffPaymentsClient() {
   const [cashReceived, setCashReceived] = useState<string | null>(null);
   const [discountEditorOpen, setDiscountEditorOpen] = useState(false);
   const [discountRecipients, setDiscountRecipients] = useState<DiscountRecipient[]>([]);
+  const [staffAccounts, setStaffAccounts] = useState<
+    { id: number; name: string; username: string }[]
+  >([]);
   const [itemEditor, setItemEditor] = useState<{
     item: OrderItem | null;
     menuItemId: string;
@@ -127,6 +125,25 @@ export function StaffPaymentsClient() {
   };
 
   usePolling(load, 12000, { resources: ["orders", "payments", "sales"] });
+
+  // The staff list only feeds the discount picker and changes rarely, so it is
+  // loaded once per visit (reusing the route prefetch) instead of every poll.
+  useEffect(() => {
+    let active = true;
+    fetchPortalApi("/api/staff/discount-accounts")
+      .then(async (response) => {
+        const data = await response.json();
+        if (active && response.ok && data.success) {
+          setStaffAccounts(data.staff || []);
+        }
+      })
+      .catch(() => {
+        // The picker falls back to manual ID and name entry.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const pending = useMemo(
     () => pendingOrders.filter(needsPaymentReview),
@@ -353,8 +370,17 @@ export function StaffPaymentsClient() {
         (recipient) => !recipient.id_number.trim() || !recipient.name.trim()
       )
     ) {
-      setError("Enter both the ID number and name for each discount.");
+      setError("Choose a staff member, or enter an ID number and name for each discount.");
       return;
+    }
+    const seenIds = new Set<string>();
+    for (const recipient of discountRecipients) {
+      const id = recipient.id_number.trim().toLowerCase();
+      if (seenIds.has(id)) {
+        setError("Each staff member or ID can only be used once on an order.");
+        return;
+      }
+      seenIds.add(id);
     }
 
     setBusyId(target.id);
@@ -432,19 +458,21 @@ export function StaffPaymentsClient() {
   ) => {
     if (
       payment_status === "rejected" &&
-      !window.confirm(
+      !(await confirm(
         `Reject the GCash payment for order #${String(
           order.order_number ?? order.id
         ).padStart(
           3,
           "0"
         )}? The customer will be asked to upload a clearer receipt.`
-      )
+      ))
     ) {
       return;
     }
 
     const minutes = Math.min(240, Math.max(0, Number(prepMinutes) || 15));
+    const nextStatus =
+      order.payment_method === "gcash" ? "confirmed" : "preparing";
     setBusyId(order.id);
     setError("");
     const orderCode = `#${String(order.order_number ?? order.id).padStart(3, "0")}`;
@@ -461,7 +489,10 @@ export function StaffPaymentsClient() {
               ? { cash_received: tendered }
               : {}),
             ...(payment_status === "verified"
-              ? { status: "preparing", prep_minutes: minutes }
+              ? {
+                  status: nextStatus,
+                  ...(nextStatus === "preparing" ? { prep_minutes: minutes } : {}),
+                }
               : {}),
           }),
         });
@@ -472,10 +503,10 @@ export function StaffPaymentsClient() {
         if (
           payment_status === "verified" &&
           (data.order?.payment_status !== "verified" ||
-            data.order?.status !== "preparing")
+            data.order?.status !== nextStatus)
         ) {
           throw new Error(
-            "The payment update did not confirm that preparation started. Refresh and check the order board."
+            "The payment update did not reach the expected order status. Refresh and check the order board."
           );
         }
         return data;
@@ -488,18 +519,24 @@ export function StaffPaymentsClient() {
               : "Rejecting the receipt…",
           message:
             payment_status === "verified"
-              ? "Assigning a queue number and starting preparation."
+              ? order.payment_method === "gcash"
+                ? "Assigning a queue number. A staff member will start preparation from the order board."
+                : "Assigning a queue number and starting preparation."
               : "Asking the customer for a clearer receipt.",
         },
         success: (data) => ({
           eyebrow: payment_status === "verified" ? "Payment verified" : "Receipt rejected",
           title:
             payment_status === "verified"
-              ? `${orderCode} is preparing`
+              ? order.payment_method === "gcash"
+                ? `${orderCode} is ready for preparation`
+                : `${orderCode} is preparing`
               : `${orderCode} needs a new receipt`,
           message:
             payment_status === "verified"
-              ? "The order is on the preparation board and the guest can see the estimate."
+              ? order.payment_method === "gcash"
+                ? "The paid order is on the preparation board. Start preparation there when ready."
+                : "The order is on the preparation board and the guest can see the estimate."
               : "The customer will be asked to upload a clearer GCash receipt.",
           duration: payment_status === "verified" ? 4200 : 3200,
           details: [
@@ -530,10 +567,14 @@ export function StaffPaymentsClient() {
               : []),
             ...(payment_status === "verified"
               ? [
-                  {
-                    label: "Ready around",
-                    value: readyClock(String(minutes)),
-                  },
+                  ...(order.payment_method === "counter"
+                    ? [
+                        {
+                          label: "Ready around",
+                          value: readyClock(String(minutes)),
+                        },
+                      ]
+                    : []),
                   ...(data?.order?.queue_number
                     ? [
                         {
@@ -557,11 +598,11 @@ export function StaffPaymentsClient() {
 
   const cancelOrder = async (order: Order) => {
     if (
-      !window.confirm(
+      !(await confirm(
         `Cancel order #${String(
           order.order_number ?? order.id
         ).padStart(3, "0")}? This will remove it from the payment queue.`
-      )
+      ))
     ) {
       return;
     }
@@ -612,11 +653,11 @@ export function StaffPaymentsClient() {
   ) => {
     if (
       status === "rejected" &&
-      !window.confirm(
+      !(await confirm(
         `Reject the additional GCash receipt for order #${String(
           payment.order_id
         ).padStart(3, "0")}? The outstanding balance will remain due.`
-      )
+      ))
     ) {
       return;
     }
@@ -872,12 +913,6 @@ export function StaffPaymentsClient() {
                 </button>
               ))}
             </div>
-            <div className="payment-queue-tip">
-              <Icon name="info" className="icon-sm" />
-              <span>
-                Approved orders move into the preparation queue.
-              </span>
-            </div>
           </section>
 
           <section className="payment-evidence-panel">
@@ -994,10 +1029,10 @@ export function StaffPaymentsClient() {
               {discountEditorOpen && (
                 <div className="payment-discount-editor">
                   <div className="payment-discount-heading">
-                    <strong>Discount IDs</strong>
+                    <strong>Discounts</strong>
                     <span>
-                      20% off one highest-priced meal and one drink per ID.
-                      Coffee and Non-Coffee items count as drinks.
+                      20% off one highest-priced meal and one drink per staff
+                      member or ID. Coffee and Non-Coffee items count as drinks.
                     </span>
                   </div>
                   {discountRecipients.map((recipient, index) => (
@@ -1007,18 +1042,23 @@ export function StaffPaymentsClient() {
                         <select
                           className="input"
                           value={recipient.type}
-                          onChange={(event) =>
+                          onChange={(event) => {
+                            const type = event.target.value as DiscountType;
                             setDiscountRecipients((current) =>
-                              current.map((entry, entryIndex) =>
-                                entryIndex === index
-                                  ? {
-                                      ...entry,
-                                      type: event.target.value as DiscountType,
-                                    }
-                                  : entry
-                              )
-                            )
-                          }
+                              current.map((entry, entryIndex) => {
+                                if (entryIndex !== index) return entry;
+                                // Staff names and ID documents are different
+                                // kinds of evidence; never carry one across.
+                                const switching = type === "staff" || entry.type === "staff";
+                                return {
+                                  ...entry,
+                                  type,
+                                  id_number: switching ? "" : entry.id_number,
+                                  name: type === "staff" ? "" : entry.name,
+                                };
+                              })
+                            );
+                          }}
                         >
                           <option value="staff">Staff</option>
                           <option value="senior">Senior citizen</option>
@@ -1026,42 +1066,94 @@ export function StaffPaymentsClient() {
                           <option value="other">Other ID</option>
                         </select>
                       </label>
-                      <label className="field">
-                        <span className="label">ID number</span>
-                        <input
-                          className="input"
-                          value={recipient.id_number}
-                          maxLength={40}
-                          onChange={(event) =>
-                            setDiscountRecipients((current) =>
-                              current.map((entry, entryIndex) =>
-                                entryIndex === index
-                                  ? { ...entry, id_number: event.target.value }
-                                  : entry
-                              )
-                            )
-                          }
-                          placeholder="Enter ID number"
-                        />
-                      </label>
-                      <label className="field">
-                        <span className="label">Name on ID</span>
-                        <input
-                          className="input"
-                          value={recipient.name}
-                          maxLength={80}
-                          onChange={(event) =>
-                            setDiscountRecipients((current) =>
-                              current.map((entry, entryIndex) =>
-                                entryIndex === index
-                                  ? { ...entry, name: event.target.value }
-                                  : entry
-                              )
-                            )
-                          }
-                          placeholder="Enter name"
-                        />
-                      </label>
+                      {recipient.type === "staff" && staffAccounts.length > 0 ? (
+                        <label className="field">
+                          <span className="label">Staff member</span>
+                          <select
+                            className="input"
+                            value={recipient.id_number}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              const selected = staffAccounts.find(
+                                (staff) => staff.username === value
+                              );
+                              setDiscountRecipients((current) =>
+                                current.map((entry, entryIndex) => {
+                                  if (entryIndex !== index) return entry;
+                                  if (selected) {
+                                    return {
+                                      ...entry,
+                                      id_number: selected.username,
+                                      name: selected.name,
+                                    };
+                                  }
+                                  if (value === "") {
+                                    return { ...entry, id_number: "", name: "" };
+                                  }
+                                  // Keep a previously saved (retired) username
+                                  // selectable instead of clearing it.
+                                  if (value === entry.id_number) return entry;
+                                  return entry;
+                                })
+                              );
+                            }}
+                          >
+                            <option value="">Select staff…</option>
+                            {recipient.id_number &&
+                              !staffAccounts.some(
+                                (staff) => staff.username === recipient.id_number
+                              ) && (
+                                <option value={recipient.id_number}>
+                                  {recipient.name || recipient.id_number} (saved)
+                                </option>
+                              )}
+                            {staffAccounts.map((staff) => (
+                              <option key={staff.id} value={staff.username}>
+                                {staff.name} ({staff.username})
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : (
+                        <>
+                          <label className="field">
+                            <span className="label">ID number</span>
+                            <input
+                              className="input"
+                              value={recipient.id_number}
+                              maxLength={40}
+                              onChange={(event) =>
+                                setDiscountRecipients((current) =>
+                                  current.map((entry, entryIndex) =>
+                                    entryIndex === index
+                                      ? { ...entry, id_number: event.target.value }
+                                      : entry
+                                  )
+                                )
+                              }
+                              placeholder="Enter ID number"
+                            />
+                          </label>
+                          <label className="field">
+                            <span className="label">Name on ID</span>
+                            <input
+                              className="input"
+                              value={recipient.name}
+                              maxLength={80}
+                              onChange={(event) =>
+                                setDiscountRecipients((current) =>
+                                  current.map((entry, entryIndex) =>
+                                    entryIndex === index
+                                      ? { ...entry, name: event.target.value }
+                                      : entry
+                                  )
+                                )
+                              }
+                              placeholder="Enter name"
+                            />
+                          </label>
+                        </>
+                      )}
                       <button
                         type="button"
                         className="btn btn-ghost btn-sm"
@@ -1163,11 +1255,13 @@ export function StaffPaymentsClient() {
                         {(preview.items || []).length > 1 && (
                           <button
                             type="button"
-                            className="btn btn-ghost btn-sm"
+                            className="btn btn-danger btn-sm"
+                            aria-label={`Remove ${item.name} from order`}
+                            title={`Remove ${item.name}`}
                             disabled={busyId === preview.id}
                             onClick={() => setPendingRemoval(item)}
                           >
-                            <Icon name="trash" className="icon-sm" /> Remove
+                            <Icon name="trash" className="icon-sm" />
                           </button>
                         )}
                       </div>
@@ -1239,15 +1333,6 @@ export function StaffPaymentsClient() {
                   </span>
                 </div>
               )}
-
-              <div className="payment-review-check">
-                <Icon name="check" className="icon-sm" />
-                <span>
-                  {preview.payment_method === "gcash"
-                    ? "Confirm recipient and reference in your GCash account."
-                    : "Confirm cash or card payment at the counter."}
-                </span>
-              </div>
 
               {preview.remarks && (
                 <div className="payment-customer-note">
@@ -1375,9 +1460,6 @@ export function StaffPaymentsClient() {
                   </span>
                 </div>
               )}
-              <p className="payment-review-footnote">
-                Verified orders move straight into preparation and appear on the order board.
-              </p>
             </section>
           )}
         </div>
@@ -1815,14 +1897,7 @@ export function StaffPaymentsClient() {
         </div>
       )}
 
-      <div className="payment-note" style={{ marginTop: 13 }}>
-        <Icon name="info" />
-        <span>
-          Verifying a payment assigns the next queue number, starts preparation and
-          sets the prep ETA chosen here for the guest. Rejecting a GCash payment asks
-          the customer to upload a clearer receipt.
-        </span>
-      </div>
+    {confirmDialog}
     </>
   );
 }

@@ -39,6 +39,15 @@ export function clientIp(headers: Headers): string {
   );
 }
 
+/**
+ * Client-reported address. X-Forwarded-For / X-Real-IP / CF-Connecting-IP and
+ * the Host header are trivial to forge, so this must never be used for access
+ * control. It is only used for informational displays.
+ */
+export function reportedClientIp(headers: Headers): string {
+  return clientIp(headers);
+}
+
 export function requestHostname(headers: Headers): string {
   const raw = (headers.get("x-forwarded-host") || headers.get("host") || "").trim();
   const first = raw.split(",")[0].trim();
@@ -50,6 +59,22 @@ export function requestHostname(headers: Headers): string {
   return first.split(":")[0].toLowerCase();
 }
 
+/**
+ * Trusted cafe-network check. `connectionIp` is the socket remote address seen
+ * by the server (e.g. `request.ip` in middleware) — the only address an
+ * attacker cannot forge. Direct internet access arrives from a public address
+ * and is blocked; cafe LAN access arrives via the local router's private
+ * address and is allowed.
+ */
+export function isCafeNetworkFromIp(connectionIp: string): boolean {
+  return isPrivateAddress(connectionIp);
+}
+
+/**
+ * Header-based cafe network hint. Kept for UI-level hinting in Server
+ * Components where the socket address is unavailable. NOT an access control:
+ * X-Forwarded-For and Host are client-supplied and forgeable.
+ */
 export function isCafeNetwork(headers: Headers): boolean {
   if (isPrivateAddress(clientIp(headers))) return true;
 

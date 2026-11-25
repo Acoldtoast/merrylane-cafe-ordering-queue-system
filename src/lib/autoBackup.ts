@@ -1,5 +1,5 @@
 import { SettingsModel } from "@/lib/models";
-import { getDbPath } from "@/lib/db";
+import { getDbPath, isUsingSupabaseDatabase } from "@/lib/db";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -27,6 +27,8 @@ function manilaDateKey(date: Date): string {
 }
 
 async function createAutoBackup(): Promise<void> {
+  if (isUsingSupabaseDatabase()) return;
+
   try {
     const autoEnabled = await SettingsModel.get("auto_backup_enabled");
     if (autoEnabled === "false") return;
@@ -38,12 +40,30 @@ async function createAutoBackup(): Promise<void> {
     const backupPath = path.join(BACKUP_DIR, name);
 
     if (fs.existsSync(dbPath)) {
+      // shortcut: a plain file copy of the live PGlite directory is only safe
+      // while idle, which is why this runs at startup and at midnight. Switch
+      // to PGlite's dumpDataDir() if backups must run under load.
       fs.cpSync(dbPath, backupPath, { recursive: true });
       await SettingsModel.set("last_backup_at", now.toISOString());
+      pruneOldBackups();
       console.log(`[AutoBackup] Created backup: ${name}`);
     }
   } catch (error) {
     console.error("[AutoBackup] Failed to create backup:", error);
+  }
+}
+
+const KEEP_BACKUPS = 14;
+
+function pruneOldBackups(): void {
+  const backups = fs
+    .readdirSync(BACKUP_DIR)
+    .filter((name) => /^backup-\d{8}-\d{6}$/.test(name))
+    .sort()
+    .reverse();
+  for (const name of backups.slice(KEEP_BACKUPS)) {
+    fs.rmSync(path.join(BACKUP_DIR, name), { recursive: true, force: true });
+    console.log(`[AutoBackup] Pruned old backup: ${name}`);
   }
 }
 
@@ -87,6 +107,7 @@ async function checkAndBackup(): Promise<void> {
 let timerStarted = false;
 
 export function startAutoBackupScheduler(): void {
+  if (isUsingSupabaseDatabase()) return;
   if (timerStarted) return;
   timerStarted = true;
 

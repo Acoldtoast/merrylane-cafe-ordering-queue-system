@@ -2,19 +2,19 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Icon } from "@/components/Icons";
 import { prefetchPortalRouteData } from "@/lib/portalPrefetch";
 import { preloadPortalRouteCode } from "@/lib/preloadPortalRouteCode";
 
 export function CustomerOrderNowLink({
   className,
   children,
+  href = "/customer/menu?table=7",
 }: {
   className: string;
   children: React.ReactNode;
+  href?: string;
 }) {
   const router = useRouter();
-  const href = "/customer/menu?table=7";
   const [navigating, setNavigating] = useState(false);
 
   useEffect(() => {

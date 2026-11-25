@@ -4,6 +4,7 @@ import {
   getSmtpConfiguration,
   getEmailNotificationConfig,
   hasSmtpPassword,
+  smtpConnectionIsReady,
   saveEmailNotificationConfig,
   type EmailNotificationConfig,
 } from "@/lib/emailSettings";
@@ -29,6 +30,7 @@ export async function GET(request: Request) {
       {
         config: await getEmailNotificationConfig(),
         smtp_password_configured: await hasSmtpPassword(),
+        smtp_connection_ready: smtpConnectionIsReady(await getSmtpConfiguration()),
         success: true,
       },
       { headers: { "Cache-Control": "no-store" } }

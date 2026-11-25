@@ -2,32 +2,11 @@ import { PGlite, type Results, type Transaction } from "@electric-sql/pglite";
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
+import type { Database, RunResult } from "./types";
 
-export interface RunResult {
-  changes: number;
-  lastInsertRowid?: number;
-}
+export type { RunResult } from "./types";
 
 type Executor = PGlite | Transaction;
-
-function isRecoverableDatabaseError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /Aborted\(\)|aborted|database is corrupt|corrupt database|invalid page size/i.test(message);
-}
-
-function renameCorruptDatabaseDirectory(directory: string): string | null {
-  if (!fs.existsSync(directory)) {
-    fs.mkdirSync(directory, { recursive: true });
-    return null;
-  }
-
-  const backupDirectory = `${directory}-corrupt-${new Date()
-    .toISOString()
-    .replace(/[:.]/g, "-")}`;
-  fs.renameSync(directory, backupDirectory);
-  fs.mkdirSync(directory, { recursive: true });
-  return backupDirectory;
-}
 
 /**
  * PGlite runs on a single connection. While a transaction is open, every
@@ -459,7 +438,7 @@ export class PGliteDatabase {
     });
   }
 
-  async transaction<T>(callback: (database: PGliteDatabase) => Promise<T>): Promise<T> {
+  async transaction<T>(callback: (database: Database) => Promise<T>): Promise<T> {
     const active = transactionStorage.getStore();
     if (active) {
       // Nested calls join the transaction that is already in progress.
@@ -494,34 +473,11 @@ export class PGliteDatabase {
   }
 
   private async withDatabaseRecovery<T>(
-    operation: () => Promise<T>,
-    retryCount = 0
+    operation: () => Promise<T>
   ): Promise<T> {
-    try {
-      return await operation();
-    } catch (error) {
-      if (
-        this.transactionClient ||
-        !isRecoverableDatabaseError(error) ||
-        retryCount > 0
-      ) {
-        throw error;
-      }
-
-      await this.client.close();
-      const backupDirectory = renameCorruptDatabaseDirectory(this.directory);
-      if (backupDirectory) {
-        console.warn(
-          `[PGlite] Corrupt database state detected at ${this.directory}. It was moved to ${backupDirectory} and a fresh database was started.`
-        );
-      }
-      const replacement = new PGlite(this.directory);
-      this.client = replacement;
-      this.identityColumns.clear();
-      this.ready = this.initializeClient(replacement);
-      await this.ready;
-      return this.withDatabaseRecovery(operation, retryCount + 1);
-    }
+    // Never replace the active database automatically after an error.
+    // Preserve the directory for an operator to diagnose and recover.
+    return operation();
   }
 
   private async initializeClient(client: PGlite): Promise<void> {

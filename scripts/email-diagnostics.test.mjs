@@ -32,6 +32,61 @@ test("explains SMTP server refusals and transient provider limits", () => {
   assert.match(rateLimit.title, /temporarily/i);
 });
 
+test("identifies a rejected recipient address instead of blaming the SMTP host", () => {
+  const result = diagnoseEmailDeliveryFailure(
+    Object.assign(
+      new Error(
+        "Message failed: 550 5.1.1 <nobody@example.com>: Recipient address rejected: User unknown"
+      ),
+      { code: "EENVELOPE", responseCode: 550, command: "RCPT TO" }
+    ),
+    ["nobody@example.com"]
+  );
+
+  assert.match(result.title, /rejected the recipient address/i);
+  assert.match(result.fix, /typo/i);
+  assert.doesNotMatch(result.fix, /encryption/i);
+  assert.doesNotMatch(result.title, /connection or account/i);
+  assert.equal(result.transient, false);
+});
+
+test("does not report a sender-address refusal as a rejected recipient", () => {
+  const result = diagnoseEmailDeliveryFailure({
+    code: "EENVELOPE",
+    responseCode: 550,
+    command: "MAIL FROM",
+    message:
+      "Message failed: 550 5.1.8 <cafe@example.com>: Sender address rejected",
+  });
+
+  assert.doesNotMatch(result.title, /recipient/i);
+  assert.match(result.title, /SMTP server rejected/i);
+
+  const withoutCommand = diagnoseEmailDeliveryFailure({
+    code: "EENVELOPE",
+    responseCode: 550,
+    message: "Message failed: 550 5.1.8 Sender address rejected",
+  });
+  assert.doesNotMatch(withoutCommand.title, /recipient/i);
+});
+
+test("reads recipient refusals from Nodemailer rejectedErrors", () => {
+  const result = diagnoseEmailDeliveryFailure({
+    code: "EENVELOPE",
+    message: "Message failed",
+    rejectedErrors: [
+      {
+        command: "RCPT TO",
+        responseCode: 550,
+        response: "550 5.1.1 mailbox unavailable",
+      },
+    ],
+  });
+
+  assert.match(result.title, /rejected the recipient address/i);
+  assert.match(result.server ?? "", /mailbox unavailable/);
+});
+
 test("recognizes host and TLS configuration errors", () => {
   const missingHost = diagnoseEmailDeliveryFailure({
     code: "ESOCKET",

@@ -1,6 +1,7 @@
 import { OrderModel, ReviewModel } from "@/lib/models";
 import type { Order, Review } from "@/lib/types";
 import { StatusClient } from "./StatusClient";
+import { getGuestId } from "@/lib/guest";
 
 export const metadata = { title: "Order status" };
 export const dynamic = "force-dynamic";
@@ -18,9 +19,16 @@ export default async function StatusPage({
   let initialReview: Review | null = null;
 
   try {
-    initialOrder = orderId
-      ? (await OrderModel.byId(orderId)) || null
-      : (await OrderModel.byTable(table, 1))[0] || null;
+    const guestId = await getGuestId();
+    if (guestId) {
+      initialOrder = orderId
+        ? (await OrderModel.guestOwner(orderId)) === guestId
+          ? (await OrderModel.byId(orderId)) || null
+          : null
+        : (await OrderModel.byGuest(guestId)).find(
+            (order) => order.table_number === table
+          ) || null;
+    }
     if (initialOrder) {
       initialReview = (await ReviewModel.byOrder(initialOrder.id)) || null;
     }

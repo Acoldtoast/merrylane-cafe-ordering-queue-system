@@ -30,9 +30,8 @@ export async function POST(
       orderId <= 0 ||
       !Number.isInteger(menuItemId) ||
       menuItemId <= 0 ||
-      !Number.isInteger(quantity) ||
+      !Number.isSafeInteger(quantity) ||
       quantity < 1 ||
-      quantity > 20 ||
       [...variantIds, ...extraIds].some(
         (value) => !Number.isInteger(value) || value <= 0
       ) ||
@@ -41,7 +40,7 @@ export async function POST(
       note.length > 180
     ) {
       return Response.json(
-        { error: "Choose an item, valid options, and a quantity from 1 to 20.", success: false },
+        { error: "Choose an item, valid options, and a positive whole quantity.", success: false },
         { status: 400 }
       );
     }

@@ -4,9 +4,9 @@ const path = require("node:path");
 
 const nextPackagePath = require.resolve("next/package.json");
 const nextVersion = require(nextPackagePath).version;
-if (nextVersion !== "16.4.3") {
+if (nextVersion !== "16.4.6") {
   throw new Error(
-    `The dev debug-stream patch targets Next.js 16.4.3, but found ${nextVersion}. Review or remove this patch before upgrading Next.js.`
+    `The dev debug-stream patch targets Next.js 16.4.6, but found ${nextVersion}. Review or remove this patch before upgrading Next.js.`
   );
 }
 

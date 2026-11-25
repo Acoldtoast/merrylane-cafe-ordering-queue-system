@@ -4,16 +4,19 @@
  */
 
 import { getDb } from "./db";
-import type { PGliteDatabase } from "./db/pglite";
+import type { Database } from "./db";
 import {
   calculateOrderDiscounts,
+  normalizeDiscountId,
   type DiscountRecipient,
   type OrderDiscount,
 } from "./orderDiscount";
 import { STAFF_BOARD_ACTIVE_STATUSES } from "./orderLifecycle";
+import { defaultLastOrder, minutesOf, validLastOrder, WEEK_DAYS } from "./orderingHours";
 import { usernameForAccount } from "./usernames";
+import { parseServiceChargePct } from "./serviceCharge";
 import type { RejectedPayment, SalesTransaction } from "./types";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
 export function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex");
@@ -81,6 +84,28 @@ export const CategoryModel = {
       .prepare("SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order FROM categories")
       .get()) as { next_order: number };
     return row.next_order;
+  },
+
+  async setDisplayOrder(ids: number[]): Promise<void> {
+    const db = getDb();
+    await db.transaction(async () => {
+      const current = (await db.prepare("SELECT id FROM categories").all()) as {
+        id: number;
+      }[];
+      const currentIds = new Set(current.map((category) => category.id));
+      if (
+        ids.length !== currentIds.size ||
+        new Set(ids).size !== ids.length ||
+        ids.some((id) => !currentIds.has(id))
+      ) {
+        throw new Error("Category order must include each category exactly once.");
+      }
+
+      const update = db.prepare("UPDATE categories SET display_order = ? WHERE id = ?");
+      for (const [index, id] of ids.entries()) {
+        await update.run(index, id);
+      }
+    });
   },
 
   async itemCount(id: number): Promise<number> {
@@ -224,6 +249,77 @@ export function normalizeVariantGroups(input: unknown): {
   });
 }
 
+function groupVariantsAndExtrasByItem<T extends { menu_item_id: number }>(
+  rows: T[]
+): Map<number, T[]> {
+  const byItem = new Map<number, T[]>();
+  for (const row of rows) {
+    const list = byItem.get(row.menu_item_id);
+    if (list) list.push(row);
+    else byItem.set(row.menu_item_id, [row]);
+  }
+  return byItem;
+}
+
+function attachOptionsFromMaps(
+  item: MenuItem,
+  variantsByItem: Map<number, Variant[]>,
+  extrasByItem: Map<number, Extra[]>
+): MenuItemFull {
+  const trackingEnabled =
+    item.stock_tracking_enabled !== false &&
+    Number(item.stock_tracking_enabled) !== 0;
+  const manualOut = Boolean(item.stock_manual_out_date);
+  const counted = trackingEnabled ? Math.max(0, Number(item.stock_count) || 0) : 0;
+  const stockCount = manualOut ? 0 : counted;
+  const stockStatus: MenuItem["stock_status"] = manualOut
+    ? "out"
+    : !trackingEnabled
+      ? "available"
+      : stockCount <= 0
+        ? "out"
+        : stockCount <= item.low_stock_threshold
+          ? "low"
+          : "available";
+  return {
+    ...item,
+    stock_count: stockCount,
+    stock_status: stockStatus,
+    variants: variantsByItem.get(item.id) || [],
+    extras: extrasByItem.get(item.id) || [],
+  };
+}
+
+async function attachOptionsBatch(
+  db: ReturnType<typeof getDb>,
+  rows: MenuItem[]
+): Promise<MenuItemFull[]> {
+  if (!rows.length) return [];
+  const ids = rows.map((row) => row.id);
+  const placeholders = ids.map(() => "?").join(", ");
+  const variants = (await db
+    .prepare(
+      `SELECT * FROM item_variants
+       WHERE menu_item_id IN (${placeholders})
+       ORDER BY menu_item_id, display_order, variant_type`
+    )
+    .all(...ids)) as unknown as Variant[];
+  const extras = (await db
+    .prepare(
+      `SELECT a.id, ia.menu_item_id, a.name, a.price_modifier
+       FROM item_addons ia
+       JOIN addons a ON a.id = ia.addon_id
+       WHERE ia.menu_item_id IN (${placeholders})
+       ORDER BY ia.menu_item_id, ia.display_order, a.display_order, a.name`
+    )
+    .all(...ids)) as unknown as Extra[];
+  const variantsByItem = groupVariantsAndExtrasByItem(variants);
+  const extrasByItem = groupVariantsAndExtrasByItem(extras);
+  return rows.map((item) =>
+    attachOptionsFromMaps(item, variantsByItem, extrasByItem)
+  );
+}
+
 const menuStockColumnsReady = new WeakMap<object, Promise<void>>();
 
 async function ensureMenuStockColumns(): Promise<void> {
@@ -291,7 +387,7 @@ async function attachOptions(item: MenuItem): Promise<MenuItemFull> {
   const db = getDb();
   const variants = (await db
     .prepare(
-      "SELECT * FROM item_variants WHERE menu_item_id = ? ORDER BY variant_type, display_order"
+      "SELECT * FROM item_variants WHERE menu_item_id = ? ORDER BY display_order, variant_type"
     )
     .all(item.id)) as unknown as Variant[];
   const extras = (await db
@@ -392,7 +488,7 @@ export const AddonModel = {
     values.push(id);
     await getDb()
       .prepare(`UPDATE addons SET ${fields.join(", ")} WHERE id = ?`)
-      .run(...(values as any[]));
+      .run(...values);
   },
 
   async remove(id: number): Promise<void> {
@@ -429,7 +525,8 @@ export const AddonModel = {
 export const MenuItemModel = {
   async allActive(): Promise<MenuItemFull[]> {
     await resetExpiredManualStockOuts();
-    const rows = (await getDb()
+    const db = getDb();
+    const rows = (await db
       .prepare(
         `SELECT m.*, c.name AS category_name, c.display_order AS category_order
          FROM menu_items m
@@ -438,7 +535,7 @@ export const MenuItemModel = {
          ORDER BY c.display_order, m.display_order, m.name`
       )
       .all()) as unknown as MenuItem[];
-    return Promise.all(rows.map(attachOptions));
+    return attachOptionsBatch(db, rows);
   },
 
   async stockAlerts(
@@ -496,7 +593,8 @@ export const MenuItemModel = {
 
   async all(): Promise<MenuItemFull[]> {
     await resetExpiredManualStockOuts();
-    const rows = (await getDb()
+    const db = getDb();
+    const rows = (await db
       .prepare(
         `SELECT m.*, c.name AS category_name
          FROM menu_items m
@@ -504,7 +602,7 @@ export const MenuItemModel = {
          ORDER BY c.display_order, m.display_order, m.name`
       )
       .all()) as unknown as MenuItem[];
-    return Promise.all(rows.map(attachOptions));
+    return attachOptionsBatch(db, rows);
   },
 
   async byId(id: number): Promise<MenuItemFull | undefined> {
@@ -573,32 +671,6 @@ export const MenuItemModel = {
     const item = await db.prepare("SELECT id FROM menu_items WHERE id = ?").get(menuItemId);
     if (!item) throw new Error("Menu item not found.");
 
-    const pglite = db as typeof db & Partial<PGliteDatabase>;
-    if (pglite.transaction) {
-      await pglite.transaction(async (transactionDb) => {
-        await transactionDb
-          .prepare("DELETE FROM item_variants WHERE menu_item_id = ?")
-          .run(menuItemId);
-        const insert = transactionDb.prepare(
-          `INSERT INTO item_variants
-             (menu_item_id, name, variant_type, price_modifier, display_order)
-           VALUES (?, ?, ?, ?, ?)`
-        );
-        for (const group of groups) {
-          for (const [index, option] of group.options.entries()) {
-            await insert.run(
-              menuItemId,
-              option.name,
-              group.type,
-              option.price_modifier,
-              index
-            );
-          }
-        }
-      });
-      return;
-    }
-
     await db.transaction(async () => {
       await db.prepare("DELETE FROM item_variants WHERE menu_item_id = ?").run(menuItemId);
       const insert = db.prepare(
@@ -606,14 +678,14 @@ export const MenuItemModel = {
            (menu_item_id, name, variant_type, price_modifier, display_order)
          VALUES (?, ?, ?, ?, ?)`
       );
-      for (const group of groups) {
+      for (const [groupIndex, group] of groups.entries()) {
         for (const [index, option] of group.options.entries()) {
           await insert.run(
             menuItemId,
             option.name,
             group.type,
             option.price_modifier,
-            index
+            groupIndex * 50 + index
           );
         }
       }
@@ -698,7 +770,7 @@ export const MenuItemModel = {
       .prepare(
         `UPDATE menu_items SET ${fields.join(", ")}, updated_at = datetime('now', 'localtime') WHERE id = ?`
       )
-      .run(...(values as any[]));
+      .run(...values);
   },
 
   async delete(id: number): Promise<void> {
@@ -970,12 +1042,55 @@ async function ensureOrderColumns(): Promise<void> {
     await db.exec(
       "CREATE INDEX IF NOT EXISTS idx_orders_preparing_at ON orders(preparing_at)"
     );
+    await ensurePerformanceIndexes();
   })();
   orderColumnsReady.set(db, ready);
   try {
     await ready;
   } catch (error) {
     orderColumnsReady.delete(db);
+    throw error;
+  }
+}
+
+const performanceIndexesReady = new WeakMap<object, Promise<void>>();
+
+/**
+ * Indexes for the queries that run on every poll: the staff board, customer
+ * status, waiter requests and the notification counters. Adding one is cheap
+ * and idempotent; a missing optional table must never block startup.
+ */
+async function ensurePerformanceIndexes(): Promise<void> {
+  const db = getDb();
+  const existing = performanceIndexesReady.get(db);
+  if (existing) return existing;
+  const ready = (async () => {
+    const indexes = [
+      "CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at, id)",
+      "CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON orders(payment_status, status)",
+      "CREATE INDEX IF NOT EXISTS idx_orders_table_created ON orders(table_number, created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id)",
+      "CREATE INDEX IF NOT EXISTS idx_order_item_addons_order ON order_item_addons(order_id)",
+      "CREATE INDEX IF NOT EXISTS idx_order_balance_payments_order ON order_balance_payments(order_id)",
+      "CREATE INDEX IF NOT EXISTS idx_waiter_requests_table_created ON waiter_requests(table_number, created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_waiter_requests_status_created ON waiter_requests(status, created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_reviews_order ON reviews(order_id)",
+      "CREATE INDEX IF NOT EXISTS idx_reviews_created ON reviews(created_at)",
+    ];
+    for (const sql of indexes) {
+      try {
+        await db.exec(sql);
+      } catch (error) {
+        console.warn(`Could not create performance index: ${sql}`, error);
+      }
+    }
+  })();
+  performanceIndexesReady.set(db, ready);
+  try {
+    await ready;
+  } catch (error) {
+    performanceIndexesReady.delete(db);
     throw error;
   }
 }
@@ -1091,6 +1206,139 @@ async function calculateDiscountsForOrder(
     category_name: string;
   }[];
   return calculateOrderDiscounts(rows, recipients);
+}
+
+export class DailyDiscountIdAlreadyUsedError extends Error {
+  constructor() {
+    super("This ID has already been used for a discount today.");
+    this.name = "DailyDiscountIdAlreadyUsedError";
+  }
+}
+
+const dailyDiscountIdUsesTableReady = new WeakMap<object, Promise<void>>();
+const dailyDiscountIdBackfillsReady = new WeakMap<
+  object,
+  Map<string, Promise<void>>
+>();
+
+function discountIdFingerprint(idNumber: string): string {
+  const secret = process.env.JWT_SECRET;
+  if (
+    !secret ||
+    secret.length < 32 ||
+    secret === "merrylane-secret-change-me-in-production"
+  ) {
+    throw new Error("Daily discount ID protection requires a configured JWT_SECRET.");
+  }
+  return createHmac("sha256", secret)
+    .update(`merrylane:daily-discount:v1|${normalizeDiscountId(idNumber)}`)
+    .digest("hex");
+}
+
+async function ensureDailyDiscountIdUses(): Promise<string> {
+  const db = getDb();
+  const businessDate = await SettingsModel.paymentBusinessDate();
+  let tableReady = dailyDiscountIdUsesTableReady.get(db);
+  if (!tableReady) {
+    tableReady = (async () => {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS daily_discount_id_uses (
+          business_date DATE NOT NULL,
+          id_fingerprint TEXT NOT NULL,
+          order_id INTEGER,
+          PRIMARY KEY (business_date, id_fingerprint),
+          FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL
+        )
+      `);
+      await db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_daily_discount_id_uses_order ON daily_discount_id_uses(order_id, business_date)"
+      );
+    })();
+    dailyDiscountIdUsesTableReady.set(db, tableReady);
+  }
+  try {
+    await tableReady;
+  } catch (error) {
+    dailyDiscountIdUsesTableReady.delete(db);
+    throw error;
+  }
+
+  let dateBackfills = dailyDiscountIdBackfillsReady.get(db);
+  if (!dateBackfills) {
+    dateBackfills = new Map<string, Promise<void>>();
+    dailyDiscountIdBackfillsReady.set(db, dateBackfills);
+  }
+  let dateReady = dateBackfills.get(businessDate);
+  if (!dateReady) {
+    dateReady = (async () => {
+      await db
+        .prepare("DELETE FROM daily_discount_id_uses WHERE business_date < ?")
+        .run(businessDate);
+      const existing = (await db
+        .prepare(
+          `SELECT id, discounts_json FROM orders
+           WHERE discounts_json IS NOT NULL AND discounts_json <> ''
+             AND date(created_at) = date(?)
+           ORDER BY created_at, id`
+        )
+        .all(businessDate)) as { id: number; discounts_json: string }[];
+      const insert = db.prepare(
+        `INSERT INTO daily_discount_id_uses
+          (business_date, id_fingerprint, order_id)
+         VALUES (?, ?, ?)
+         ON CONFLICT (business_date, id_fingerprint) DO NOTHING`
+      );
+      for (const order of existing) {
+        const orderIds = new Set<string>();
+        for (const recipient of discountRecipientsFromJson(order.discounts_json)) {
+          const normalizedId = normalizeDiscountId(recipient.id_number);
+          if (!normalizedId) continue;
+          const fingerprint = discountIdFingerprint(normalizedId);
+          if (orderIds.has(fingerprint)) continue;
+          orderIds.add(fingerprint);
+          await insert.run(businessDate, fingerprint, order.id);
+        }
+      }
+    })();
+    dateBackfills.set(businessDate, dateReady);
+  }
+  try {
+    await dateReady;
+  } catch (error) {
+    dateBackfills.delete(businessDate);
+    throw error;
+  }
+  return businessDate;
+}
+
+async function syncDailyDiscountIdUses(
+  db: Database,
+  orderId: number,
+  discountsJson: string | null | undefined,
+  businessDate: string
+): Promise<void> {
+  const fingerprints = discountRecipientsFromJson(discountsJson)
+    .map((recipient) => normalizeDiscountId(recipient.id_number))
+    .filter(Boolean)
+    .map(discountIdFingerprint);
+  if (new Set(fingerprints).size !== fingerprints.length) {
+    throw new DailyDiscountIdAlreadyUsedError();
+  }
+
+  const insert = db.prepare(
+    `INSERT INTO daily_discount_id_uses
+      (business_date, id_fingerprint, order_id)
+     VALUES (?, ?, ?)
+     ON CONFLICT (business_date, id_fingerprint)
+     DO UPDATE SET order_id = EXCLUDED.order_id
+     WHERE daily_discount_id_uses.order_id = EXCLUDED.order_id`
+  );
+  for (const fingerprint of fingerprints) {
+    const result = await insert.run(businessDate, fingerprint, orderId);
+    if (Number(result.changes) !== 1) {
+      throw new DailyDiscountIdAlreadyUsedError();
+    }
+  }
 }
 
 async function orderDetailsFor(orders: Order[]): Promise<Order[]> {
@@ -1376,6 +1624,34 @@ async function restoreOrderStock(orderId: number): Promise<void> {
   }
 }
 
+async function cancelUnpaidGcashOrder(id: number): Promise<boolean> {
+  await ensureOrderColumns();
+  await ensureOrderStockDeductionsTable();
+  const db = getDb();
+  return db.transaction(async () => {
+    const result = await db
+      .prepare(
+        `UPDATE orders
+         SET status = 'cancelled',
+             cancelled_at = datetime('now', 'localtime'),
+             cancellation_reason = COALESCE('unpaid_timeout', cancellation_reason),
+             updated_at = datetime('now', 'localtime')
+         WHERE id = ?
+           AND status IN ('pending', 'payment_pending')
+           AND payment_method = 'gcash'
+           AND payment_status = 'pending'
+           AND payment_proof_url IS NULL
+           AND created_at <= datetime('now', 'localtime', '-1 day')`
+      )
+      .run(id);
+    if (Number(result.changes) !== 1) {
+      return false;
+    }
+    await restoreOrderStock(id);
+    return true;
+  });
+}
+
 async function cancelUnpaidOrder(
   id: number,
   guestId?: string,
@@ -1417,9 +1693,30 @@ async function cancelUnpaidOrder(
 }
 
 export const OrderModel = {
-  async autoCancelUnpaidCounterOrders(): Promise<number> {
+  async completeServedByStaff(id: number): Promise<boolean> {
     await ensureOrderColumns();
-    const orders = (await getDb()
+    const result = await getDb().prepare(
+      `UPDATE orders
+       SET status = 'completed',
+           completed_at = to_char(timezone('Asia/Manila', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS'),
+           updated_at = to_char(timezone('Asia/Manila', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS'),
+           completion_reason = 'staff_after_one_hour'
+       WHERE id = ? AND status = 'ready' AND payment_status = 'verified'
+         AND ready_at IS NOT NULL
+         AND ready_at::timestamp <= timezone('Asia/Manila', CURRENT_TIMESTAMP) - INTERVAL '1 hour'`
+    ).run(id);
+    return Number(result.changes) === 1;
+  },
+  /**
+   * Cancels counter/cash orders unpaid for over 90 minutes and GCash orders
+   * awaiting payment for over 24 hours. Reserves stock only until payment is
+   * actually verified, so abandoned GCash checkouts cannot tie up stock
+   * indefinitely.
+   */
+  async autoCancelUnpaidOrders(): Promise<{ counter: number; gcash: number }> {
+    await ensureOrderColumns();
+    const db = getDb();
+    const counterOrders = (await db
       .prepare(
         `SELECT id FROM orders
          WHERE status IN ('pending', 'payment_pending')
@@ -1429,13 +1726,31 @@ export const OrderModel = {
          ORDER BY id`
       )
       .all()) as { id: number }[];
-    let cancelled = 0;
-    for (const order of orders) {
+    const gcashOrders = (await db
+      .prepare(
+        `SELECT id FROM orders
+         WHERE status IN ('pending', 'payment_pending')
+            AND payment_method = 'gcash'
+            AND payment_status = 'pending'
+            AND payment_proof_url IS NULL
+            AND created_at <= datetime('now', 'localtime', '-1 day')
+         ORDER BY id`
+      )
+      .all()) as { id: number }[];
+
+    let counterCancelled = 0;
+    for (const order of counterOrders) {
       if (await cancelUnpaidOrder(order.id, undefined, "unpaid_timeout")) {
-        cancelled += 1;
+        counterCancelled += 1;
       }
     }
-    return cancelled;
+    let gcashCancelled = 0;
+    for (const order of gcashOrders) {
+      if (await cancelUnpaidGcashOrder(order.id)) {
+        gcashCancelled += 1;
+      }
+    }
+    return { counter: counterCancelled, gcash: gcashCancelled };
   },
 
   async recentVerified(
@@ -1487,11 +1802,15 @@ export const OrderModel = {
              COALESCE(customer_name, 'Guest') AS customer_name,
              CASE WHEN payment_method = 'gcash' THEN 'gcash' ELSE 'counter' END AS payment_method,
              COALESCE(payment_amount, total) AS amount,
+             COALESCE(discount_amount, 0) AS discount_amount,
              confirmed_at AS paid_at,
              payment_reference,
              (SELECT NULLIF(log.actor_name, 'Merrylane staff')
               FROM activity_logs AS log
-              WHERE log.action = 'payment.verified'
+              WHERE log.action = CASE
+                  WHEN orders.payment_method = 'gcash' THEN 'order.preparing'
+                  ELSE 'payment.verified'
+                END
                 AND log.entity_type = 'order'
                 AND log.entity_id = orders.id
               ORDER BY log.created_at DESC, log.id DESC
@@ -1519,6 +1838,7 @@ export const OrderModel = {
              COALESCE(orders.customer_name, 'Guest') AS customer_name,
              payments.payment_method,
              payments.amount,
+             0 AS discount_amount,
              payments.verified_at AS paid_at,
              payments.payment_reference,
              (SELECT users.name
@@ -1946,7 +2266,7 @@ export const OrderModel = {
     params.push(limit);
     const orders = (await db
       .prepare(query)
-      .all(...(params as any[]))) as unknown as Order[];
+      .all(...params)) as unknown as Order[];
     return orderDetailsFor(orders);
   },
 
@@ -2039,11 +2359,22 @@ export const OrderModel = {
     }
     if (!fields.length) return;
     values.push(id);
-    await getDb()
-      .prepare(
-        `UPDATE orders SET ${fields.join(", ")}, updated_at = datetime('now', 'localtime') WHERE id = ?`
-      )
-      .run(...(values as any[]));
+    const db = getDb();
+    const query = `UPDATE orders SET ${fields.join(", ")}, updated_at = datetime('now', 'localtime') WHERE id = ?`;
+    if (data.discounts_json === undefined) {
+      await db.prepare(query).run(...values);
+      return;
+    }
+
+    const businessDate = await ensureDailyDiscountIdUses();
+    await db.transaction(async () => {
+      const current = await db
+        .prepare("SELECT id FROM orders WHERE id = ? FOR UPDATE")
+        .get(id);
+      if (!current) throw new Error("Order not found.");
+      await syncDailyDiscountIdUses(db, id, data.discounts_json, businessDate);
+      await db.prepare(query).run(...values);
+    });
   },
 
   async rejectPayment(
@@ -2054,6 +2385,10 @@ export const OrderModel = {
   ): Promise<void> {
     await ensureOrderColumns();
     await ensureOrderPaymentRejectionsTable();
+    const discountBusinessDate =
+      data.discounts_json === undefined
+        ? undefined
+        : await ensureDailyDiscountIdUses();
     const db = getDb();
     await db.transaction(async () => {
       const current = (await db
@@ -2093,7 +2428,17 @@ export const OrderModel = {
           );
       }
 
-      await OrderModel.update(id, data);
+      if (discountBusinessDate !== undefined) {
+        await syncDailyDiscountIdUses(
+          db,
+          id,
+          data.discounts_json,
+          discountBusinessDate
+        );
+        await OrderModel.update(id, { ...data, discounts_json: undefined });
+      } else {
+        await OrderModel.update(id, data);
+      }
     });
   },
 
@@ -2126,7 +2471,7 @@ export const OrderModel = {
     const pctRow = (await db
       .prepare("SELECT value FROM settings WHERE key = 'service_charge_pct'")
       .get()) as { value?: string } | undefined;
-    const serviceCharge = round(subtotal * (Number(pctRow?.value || 0) / 100));
+    const serviceCharge = round(subtotal * (parseServiceChargePct(pctRow?.value) / 100));
     const total = round(subtotal + serviceCharge - discountAmount);
     await db
       .prepare(
@@ -2250,7 +2595,7 @@ export const OrderModel = {
     if (selectedExtras.some((extra) => !extra)) {
       return { ok: false, error: "One of the selected extras is unavailable.", status: 400 };
     }
-    const quantity = Math.min(20, Math.max(1, Math.floor(Number(data.quantity) || 1)));
+    const quantity = data.quantity ?? 1;
     const variantName = selectedVariants
       .filter((variant): variant is Variant => Boolean(variant))
       .map((variant) => variant.name)
@@ -2735,6 +3080,13 @@ export const OrderModel = {
     const db = getDb();
     const order = await OrderModel.byId(data.orderId);
     if (!order) return { ok: false, error: "Order not found.", status: 404 };
+    if (order.payment_status === "verified") {
+      return {
+        ok: false,
+        error: "Add-ons can only be added before the order is paid.",
+        status: 409,
+      };
+    }
     if (!["pending", "payment_pending", "confirmed", "preparing"].includes(order.status)) {
       return {
         ok: false,
@@ -2768,7 +3120,7 @@ export const OrderModel = {
     if (!addon || !addon.is_active) {
       return { ok: false, error: "That add-on is not available.", status: 400 };
     }
-    const quantity = Math.max(1, Math.min(20, Number(data.quantity) || 1));
+    const quantity = data.quantity;
     try {
       await db.transaction(async () => {
         const current = await OrderModel.byId(order.id);
@@ -2777,13 +3129,16 @@ export const OrderModel = {
           !["pending", "payment_pending", "confirmed", "preparing"].includes(
             current.status
           ) ||
+          current.payment_status === "verified" ||
           current.balance_payments?.some((payment) => payment.status === "pending") ||
           (current.payment_method === "gcash" &&
             current.payment_status === "pending" &&
             Boolean(current.payment_proof_url))
         ) {
           throw new OrderChangeConflict(
-            "The order can no longer be changed while its payment is being reviewed.",
+            current?.payment_status === "verified"
+              ? "Add-ons can only be added before the order is paid."
+              : "The order can no longer be changed while its payment is being reviewed.",
             409
           );
         }
@@ -3081,7 +3436,8 @@ export const OrderModel = {
         `SELECT COUNT(*) AS count
          FROM orders
          WHERE status IN ('pending', 'payment_pending')
-           AND payment_status = 'pending'`
+            AND payment_status = 'pending'
+            AND (payment_method <> 'gcash' OR payment_proof_url IS NOT NULL)`
       )
       .get()) as { count: number } | undefined;
     return Number(row?.count || 0);
@@ -3101,7 +3457,15 @@ export const OrderModel = {
          WHERE ${dateFilter}
            AND status != 'cancelled'`
       )
-      .get(...(date ? [date] : []))) as any;
+      .get(...(date ? [date] : []))) as
+      | {
+          orders?: number;
+          revenue?: number;
+          preparing?: number;
+          ready?: number;
+          awaiting?: number;
+        }
+      | undefined;
     return {
       orders: Number(row?.orders || 0),
       revenue: Number(row?.revenue || 0),
@@ -3384,7 +3748,9 @@ export const WaiterRequestModel = {
           COALESCE(SUM(CASE WHEN status = 'resolved' AND resolved_at >= DATE('now','localtime') AND resolved_at < DATE('now','localtime', '+1 day') THEN 1 ELSE 0 END), 0) AS resolved_today
          FROM waiter_requests`
       )
-      .get()) as any;
+      .get()) as
+      | { pending?: number; acknowledged?: number; resolved_today?: number }
+      | undefined;
     return {
       pending: Number(row?.pending || 0),
       acknowledged: Number(row?.acknowledged || 0),
@@ -3398,7 +3764,7 @@ export const WaiterRequestModel = {
 // ============================================================
 export interface Review {
   id: number;
-  order_id: number;
+  order_id: number | null;
   table_number: number;
   rating: number;
   customer_name?: string | null;
@@ -3407,16 +3773,54 @@ export interface Review {
   created_at: string;
 }
 
+const generalReviewsReady = new WeakMap<Database, Promise<void>>();
+
 export const ReviewModel = {
+  async unreadCount(userId: number): Promise<number> {
+    await ensureStaffNotificationReadsTable();
+    const row = await getDb().prepare(
+      `SELECT COUNT(*) AS count FROM reviews r
+       WHERE NOT EXISTS (
+         SELECT 1 FROM staff_notification_reads n
+         WHERE n.user_id = ? AND n.notification_id = 'admin-review-' || r.id::text
+       )`
+    ).get(userId) as { count: number };
+    return Number(row.count);
+  },
+
+  async markAllSeen(userId: number): Promise<void> {
+    await ensureStaffNotificationReadsTable();
+    await getDb().prepare(
+      `INSERT INTO staff_notification_reads (user_id, notification_id)
+       SELECT ?, 'admin-review-' || id::text FROM reviews
+       ON CONFLICT (user_id, notification_id) DO NOTHING`
+    ).run(userId);
+  },
+
+  async ensureGeneralReviews(): Promise<void> {
+    const db = getDb();
+    let ready = generalReviewsReady.get(db);
+    if (!ready) {
+      ready = db.exec("ALTER TABLE reviews ALTER COLUMN order_id DROP NOT NULL")
+        .catch((error: unknown) => {
+          generalReviewsReady.delete(db);
+          throw error;
+        });
+      generalReviewsReady.set(db, ready);
+    }
+    await ready;
+  },
   async create(data: {
-    order_id: number;
+    order_id: number | null;
     table_number: number;
     rating: number;
     customer_name?: string;
     comment?: string;
     photo_url?: string;
   }): Promise<number> {
-    const result = await getDb()
+    const db = getDb();
+    if (data.order_id === null) await ReviewModel.ensureGeneralReviews();
+    const result = await db
       .prepare(
         `INSERT INTO reviews (order_id, table_number, rating, customer_name, comment, photo_url)
          VALUES (?, ?, ?, ?, ?, ?)`
@@ -3453,7 +3857,9 @@ export const ReviewModel = {
            COALESCE(ROUND(100.0 * SUM(CASE WHEN rating >= 4 THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 0), 0) AS positive_pct
          FROM reviews`
       )
-      .get() as any;
+      .get() as
+      | { avg_rating?: number; total_reviews?: number; positive_pct?: number }
+      | undefined;
     const latest = await getDb()
       .prepare("SELECT rating FROM reviews ORDER BY created_at DESC LIMIT 1")
       .get() as { rating?: number } | undefined;
@@ -3479,6 +3885,7 @@ export interface User {
   duty_hours?: string | null;
   role: "admin" | "staff";
   password_hash?: string;
+  must_change_password?: number;
   created_at?: string;
   is_active?: number;
   last_login_at?: string | null;
@@ -3495,9 +3902,38 @@ async function ensureUserColumns(): Promise<void> {
   const existing = userColumnsReady.get(db);
   if (existing) return existing;
   const ready = (async () => {
-    const columns = (await db.prepare("PRAGMA table_info(users)").all()) as {
+    let columns: { name: string }[] = (await db.prepare("PRAGMA table_info(users)").all()) as {
       name: string;
     }[];
+    if (columns.length === 0) {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          name TEXT NOT NULL,
+          username TEXT,
+          email TEXT,
+          role TEXT NOT NULL,
+          password_hash TEXT NOT NULL,
+          contact_number TEXT,
+          address TEXT,
+          duty_hours TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::text,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          last_login_at TEXT,
+          last_logout_at TEXT,
+          duty_minutes INTEGER NOT NULL DEFAULT 0,
+          session_id TEXT
+        );
+      `);
+      await db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nonblank
+          ON users (lower(email)) WHERE trim(email) <> '';
+      `);
+      columns = (await db.prepare("PRAGMA table_info(users)").all()) as {
+        name: string;
+      }[];
+    }
+
     const add = async (name: string, sql: string) => {
       if (!columns.some((column) => column.name === name)) {
         await db.exec(sql);
@@ -3512,15 +3948,24 @@ async function ensureUserColumns(): Promise<void> {
     await add("address", "ALTER TABLE users ADD COLUMN address TEXT");
     await add("duty_hours", "ALTER TABLE users ADD COLUMN duty_hours TEXT");
     await add("username", "ALTER TABLE users ADD COLUMN username TEXT");
-    // Email is optional for accounts. Drop the old table-wide UNIQUE rule (which
-    // would let only one account have no email) and keep real addresses unique
-    // with a partial index instead.
+    await add("must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0");
     await db.exec("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key");
     await db.exec(
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nonblank
        ON users (lower(email)) WHERE trim(email) <> ''`
     );
-    // Backfill usernames for existing users
+    const existingUsers = (await db
+      .prepare("SELECT COUNT(*) AS count FROM users")
+      .get()) as { count: number };
+    if (existingUsers.count === 0) {
+      await db.transaction(async () => {
+        await db.prepare(
+          `INSERT INTO users (name, username, email, role, password_hash, contact_number, address, duty_hours, is_active)
+           VALUES (?, ?, '', ?, ?, NULL, NULL, NULL, 1)`
+        ).run("Administrator", "admin", "admin", hashPassword("admin123"));
+      });
+    }
+
     await getDb()
       .prepare(
         `UPDATE users SET username = lower(
@@ -3590,7 +4035,7 @@ export const UserModel = {
     await ensureUserColumns();
     return await getDb()
       .prepare(
-        "SELECT id, name, username, email, contact_number, address, duty_hours, role, created_at, is_active, last_login_at, last_logout_at, duty_minutes, session_id FROM users WHERE id = ?"
+        "SELECT id, name, username, email, contact_number, address, duty_hours, role, created_at, is_active, last_login_at, last_logout_at, duty_minutes, session_id, must_change_password FROM users WHERE id = ?"
       )
       .get(id) as User | undefined;
   },
@@ -4105,15 +4550,6 @@ export interface OrderingWindow {
   schedule: ScheduleDay[];
 }
 
-const WEEK_DAYS = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-];
 const ORDERING_TIME_ZONE = "Asia/Manila";
 const ORDERING_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: ORDERING_TIME_ZONE,
@@ -4123,33 +4559,25 @@ const ORDERING_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   hourCycle: "h23",
 });
 
-const DEFAULT_WEEKLY_SCHEDULE: ScheduleDay[] = [
-  { day: "Monday", open: true, start: "09:00", end: "22:00", last_order: "21:00" },
-  { day: "Tuesday", open: true, start: "09:00", end: "22:00", last_order: "21:00" },
-  { day: "Wednesday", open: true, start: "09:00", end: "22:00", last_order: "21:00" },
-  { day: "Thursday", open: true, start: "09:00", end: "22:00", last_order: "21:00" },
-  { day: "Friday", open: true, start: "09:00", end: "22:00", last_order: "21:00" },
-  { day: "Saturday", open: true, start: "08:00", end: "22:00", last_order: "21:00" },
-  { day: "Sunday", open: true, start: "08:00", end: "21:00", last_order: "21:00" },
+const DEFAULT_WEEKLY_SCHEDULE: Omit<ScheduleDay, "last_order">[] = [
+  { day: "Monday", open: true, start: "09:00", end: "22:00" },
+  { day: "Tuesday", open: true, start: "09:00", end: "22:00" },
+  { day: "Wednesday", open: true, start: "09:00", end: "22:00" },
+  { day: "Thursday", open: true, start: "09:00", end: "22:00" },
+  { day: "Friday", open: true, start: "09:00", end: "22:00" },
+  { day: "Saturday", open: true, start: "08:00", end: "22:00" },
+  { day: "Sunday", open: true, start: "08:00", end: "21:00" },
 ];
-
-function minutesOf(value?: string | null): number | null {
-  const match = /^(\d{1,2}):(\d{2})/.exec((value || "").trim());
-  if (!match) return null;
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  if (hours > 23 || minutes > 59) return null;
-  return hours * 60 + minutes;
-}
 
 async function scheduleOf(): Promise<ScheduleDay[]> {
   const legacyLastOrder = await SettingsModel.get("last_order_time");
-  const defaultLastOrder =
-    minutesOf(legacyLastOrder) !== null ? legacyLastOrder! : "21:00";
+  const rawSchedule = await SettingsModel.get("weekly_schedule");
+  return parseSchedule(rawSchedule, legacyLastOrder);
+}
+
+function parseSchedule(rawSchedule: string | undefined, legacyLastOrder: string | undefined): ScheduleDay[] {
   try {
-    const parsed: unknown = JSON.parse(
-      (await SettingsModel.get("weekly_schedule")) || "null"
-    );
+    const parsed: unknown = JSON.parse(rawSchedule || "null");
     if (Array.isArray(parsed) && parsed.length === 7) {
       const entries = parsed.map((entry): ScheduleDay | null => {
         if (typeof entry !== "object" || entry === null) return null;
@@ -4162,24 +4590,16 @@ async function scheduleOf(): Promise<ScheduleDay[]> {
         ) {
           return null;
         }
+        const start = minutesOf(value.start) !== null ? value.start : "09:00";
+        const end = minutesOf(value.end) !== null ? value.end : "22:00";
         return {
           day: value.day,
           open: value.open !== false,
-          start: minutesOf(value.start) !== null ? value.start : "09:00",
-          end: minutesOf(value.end) !== null ? value.end : "22:00",
-          last_order: normalizedLastOrder(
-            typeof value.last_order === "string" &&
-              minutesOf(value.last_order) !== null
-              ? value.last_order
-              : defaultLastOrder,
-            typeof value.start === "string" &&
-              minutesOf(value.start) !== null
-              ? value.start
-              : "09:00",
-            typeof value.end === "string" && minutesOf(value.end) !== null
-              ? value.end
-              : "22:00"
-          ),
+          start,
+          end,
+          last_order: typeof value.last_order === "string" && validLastOrder(value.last_order, start, end)
+            ? value.last_order
+            : defaultLastOrder(start, end),
         };
       });
       const days = entries.flatMap((entry) => (entry ? [entry.day] : []));
@@ -4195,36 +4615,10 @@ async function scheduleOf(): Promise<ScheduleDay[]> {
   }
   return DEFAULT_WEEKLY_SCHEDULE.map((entry) => ({
     ...entry,
-    last_order: normalizedLastOrder(
-      defaultLastOrder,
-      entry.start,
-      entry.end
-    ),
+    last_order: legacyLastOrder && validLastOrder(legacyLastOrder, entry.start, entry.end)
+      ? legacyLastOrder
+      : defaultLastOrder(entry.start, entry.end),
   }));
-}
-
-function normalizedLastOrder(
-  value: string,
-  startValue: string,
-  endValue: string
-): string {
-  const cutoff = minutesOf(value);
-  const start = minutesOf(startValue);
-  const end = minutesOf(endValue);
-  if (cutoff === null || start === null || end === null) return "21:00";
-
-  const overnight = end !== 0 && end <= start;
-  const endOfShift =
-    end === 0 ? 24 * 60 : overnight ? end + 24 * 60 : end;
-  let cutoffOfShift = cutoff;
-  if (overnight && cutoffOfShift < start) cutoffOfShift += 24 * 60;
-  if (end === 0 && cutoffOfShift === 0) cutoffOfShift = 24 * 60;
-  cutoffOfShift = Math.min(cutoffOfShift, endOfShift);
-
-  const normalized = cutoffOfShift % (24 * 60);
-  return `${String(Math.floor(normalized / 60)).padStart(2, "0")}:${String(
-    normalized % 60
-  ).padStart(2, "0")}`;
 }
 
 function orderingTimeOf(at: Date): { day: string; minutes: number } {
@@ -4375,8 +4769,22 @@ function nextScheduledOpening(
   return null;
 }
 
+const settingsTableReady = new WeakMap<object, Promise<void>>();
+async function ensureSettingsTable(): Promise<void> {
+  const db = getDb();
+  let ready = settingsTableReady.get(db);
+  if (!ready) {
+    ready = db.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`).catch((error: unknown) => {
+      settingsTableReady.delete(db);
+      throw error;
+    });
+    settingsTableReady.set(db, ready);
+  }
+  await ready;
+}
 export const SettingsModel = {
   async get(key: string): Promise<string | undefined> {
+    await ensureSettingsTable();
     const row = await getDb()
       .prepare("SELECT value FROM settings WHERE key = ?")
       .get(key) as { value: string } | undefined;
@@ -4384,6 +4792,7 @@ export const SettingsModel = {
   },
 
   async set(key: string, value: string): Promise<void> {
+    await ensureSettingsTable();
     await getDb()
       .prepare(
         `INSERT INTO settings (key, value) VALUES (?, ?)
@@ -4393,6 +4802,7 @@ export const SettingsModel = {
   },
 
   async getAll(): Promise<Setting[]> {
+    await ensureSettingsTable();
     return (await getDb()
       .prepare("SELECT key, value FROM settings ORDER BY key")
       .all()) as unknown as Setting[];
@@ -4513,7 +4923,12 @@ export const SettingsModel = {
 
   /** Full picture of the ordering window, for customer-facing copy. */
   async orderingWindow(at: Date = new Date()): Promise<OrderingWindow> {
-    const schedule = await scheduleOf();
+    await ensureSettingsTable();
+    const rows = await getDb().prepare(
+      "SELECT key, value FROM settings WHERE key IN ('weekly_schedule', 'last_order_time', 'ordering_closed')"
+    ).all<{ key: string; value: string }>();
+    const values = Object.fromEntries(rows.map(({ key, value }) => [key, value]));
+    const schedule = parseSchedule(values.weekly_schedule, values.last_order_time);
     const { day: today, minutes: current } = orderingTimeOf(at);
     const entry = schedule.find((day) => day.day === today);
     const upcoming = nextOpening(schedule, today, current);
@@ -4529,7 +4944,7 @@ export const SettingsModel = {
       next_opening: nextScheduledOpening(schedule, today, current),
     };
 
-    if ((await SettingsModel.get("ordering_closed")) === "true") {
+    if (values.ordering_closed === "true") {
       return { ...base, open: false, reason: "manual" };
     }
 
@@ -4654,7 +5069,9 @@ export const SalesModel = {
              AND ready_at IS NOT NULL
              AND payment_status = 'verified'`
       )
-      .get() as any;
+      .get() as
+      | { total_revenue?: number; total_orders?: number; avg_prep_time?: number }
+      | undefined;
     return {
       total_revenue: Number(row?.total_revenue || 0),
       total_orders: Number(row?.total_orders || 0),

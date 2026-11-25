@@ -47,7 +47,11 @@ export function OrderDiscountDetails({
               <strong>
                 {discountTypeLabels[discount.type]} · {discount.name}
               </strong>
-              <span>ID {discount.id_number}</span>
+              <span>
+                {discount.type === "staff"
+                  ? `Staff · ${discount.id_number}`
+                  : `ID ${discount.id_number}`}
+              </span>
             </div>
             <span>
               {allocations.length ? allocations.join(" · ") : "No qualifying items"}{" "}

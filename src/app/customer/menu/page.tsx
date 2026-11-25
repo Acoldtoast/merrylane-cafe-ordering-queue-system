@@ -1,6 +1,6 @@
-import { CategoryModel, MenuItemModel, SettingsModel } from "@/lib/models";
 import type { OrderingWindow } from "@/lib/models";
 import type { Category, MenuItem } from "@/lib/types";
+import { readMenuCatalog, readOrderingWindow } from "@/lib/portalReadData";
 import { ClosedShop } from "@/components/ClosedShop";
 import { MenuClient } from "./MenuClient";
 
@@ -21,13 +21,7 @@ export default async function MenuPage({
   let closingTime = "22:00";
 
   try {
-    categories = await CategoryModel.all();
-    items = (await MenuItemModel.allActive()) as unknown as MenuItem[];
-    ordering = await SettingsModel.orderingWindow();
-    closingTime =
-      ordering.schedule.find((day) => day.day === ordering?.today)?.end ||
-      (await SettingsModel.get("closing_time")) ||
-      closingTime;
+    ordering = await readOrderingWindow();
   } catch {
     // Render an empty menu rather than failing before the database is ready.
   }
@@ -36,13 +30,22 @@ export default async function MenuPage({
   if (ordering && !ordering.open) {
     return <ClosedShop ordering={ordering} table={table} />;
   }
+  try {
+    const catalog = await readMenuCatalog();
+    categories = catalog.categories;
+    items = catalog.items as unknown as MenuItem[];
+  } catch {
+    // Leave ordering disabled until the menu can be read.
+    ordering = null;
+  }
+  closingTime = ordering?.closes_at ?? closingTime;
 
   return (
     <MenuClient
       initialTable={table}
       initialCategories={JSON.parse(JSON.stringify(categories))}
       initialItems={JSON.parse(JSON.stringify(items))}
-      initialOpen={ordering?.open ?? true}
+      initialOpen={ordering?.open ?? false}
       initialClosingTime={closingTime}
       initialOrdering={ordering}
     />

@@ -64,15 +64,8 @@ export function CustomerHoursClient() {
   return (
     <div className="customer-hours-page">
       <header className="customer-hours-heading">
-        <span className="eyebrow">Merrylane Cafe</span>
         <h1>Come by when it suits you.</h1>
         <p>Our opening hours and last-order times, kept up to date by the cafe.</p>
-        {settings && (
-          <span className={`customer-hours-status ${orderingOpen ? "open" : "closed"}`}>
-            <span className="dot" />
-            {orderingOpen ? "Open for orders" : "Not taking orders right now"}
-          </span>
-        )}
       </header>
 
       {error ? (

@@ -1,6 +1,6 @@
 import { CustomerProvider } from "@/components/CustomerProvider";
 import { CustomerShell } from "@/components/CustomerShell";
-import { SettingsModel } from "@/lib/models";
+import { readOrderingWindow } from "@/lib/portalReadData";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +11,7 @@ export default async function CustomerLayout({
 }) {
   let initialOrderingOpen: boolean | null = null;
   try {
-    initialOrderingOpen = await SettingsModel.isOrderingOpen();
+    initialOrderingOpen = (await readOrderingWindow()).open;
   } catch (error) {
     console.error("Could not load the initial ordering status.", error);
   }

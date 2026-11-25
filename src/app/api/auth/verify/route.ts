@@ -9,6 +9,18 @@ import {
 } from "@/lib/auth";
 
 export async function GET(request: Request) {
+  try {
+    return await verify(request);
+  } catch (error) {
+    console.warn("Session verification is unavailable.", error);
+    return Response.json(
+      { error: "Session verification is temporarily unavailable." },
+      { status: 503, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+}
+
+async function verify(request: Request) {
   const area = new URL(request.url).searchParams.get("area");
   const status = await getUserAuthStatus(
     request,

@@ -24,13 +24,76 @@ function errorText(error: unknown) {
 function cleanServerMessage(error: unknown, secrets: string[]) {
   let message = errorText(error).trim();
   message = message.replace(
-    /^(Message failed|Connection timeout|Greeting never received|Invalid login|Sending failed|Login denied)\s*:\s*/i,
+    /^(Message failed|Connection timeout|Greeting never received|Invalid login|Sending failed|Login denied)\s*:?\s*/i,
     ""
   );
   for (const secret of secrets) {
     if (secret) message = message.replaceAll(secret, "[redacted]");
   }
   return message.slice(0, 300);
+}
+
+const RECIPIENT_REJECTION_CODES = new Set([550, 551, 553, 554]);
+const RECIPIENT_REJECTION_TEXT =
+  /(recipient|mailbox|user unknown|unknown user|no such user|does not exist|not a local user)/i;
+const SENDER_REJECTION_TEXT = /(sender|return.?path|from address)/i;
+
+function smtpErrorEntries(error: unknown): Record<string, unknown>[] {
+  if (typeof error !== "object" || error === null) return [];
+  const details = error as Record<string, unknown>;
+  const entries = [details];
+  if (Array.isArray(details.rejectedErrors)) {
+    for (const rejected of details.rejectedErrors) {
+      if (
+        typeof rejected === "object" &&
+        rejected !== null &&
+        !Array.isArray(rejected)
+      ) {
+        entries.push(rejected as Record<string, unknown>);
+      }
+    }
+  }
+  return entries;
+}
+
+function serverResponses(error: unknown): string[] {
+  return smtpErrorEntries(error)
+    .map((entry) =>
+      typeof entry.response === "string" ? entry.response.trim() : ""
+    )
+    .filter(Boolean);
+}
+
+function serverDetail(
+  error: unknown,
+  secrets: string[]
+): string | undefined {
+  const message = errorText(error);
+  const responses = serverResponses(error).filter(
+    (response) => !message.includes(response)
+  );
+  return (
+    cleanServerMessage([message, ...responses].join(" "), secrets) || undefined
+  );
+}
+
+function recipientAddressWasRejected(
+  error: unknown,
+  responseCode: number,
+  message: string
+): boolean {
+  const entries = smtpErrorEntries(error);
+  const commands = entries.map((entry) =>
+    typeof entry.command === "string" ? entry.command.toUpperCase() : ""
+  );
+  if (commands.some((command) => command.includes("RCPT"))) return true;
+  // A refusal on MAIL FROM is about the sender, never the recipient.
+  if (commands.some((command) => command.includes("MAIL"))) return false;
+  if (!RECIPIENT_REJECTION_CODES.has(responseCode)) return false;
+
+  const detail = `${message} ${serverResponses(error).join(" ")}`;
+  if (SENDER_REJECTION_TEXT.test(detail)) return false;
+  return RECIPIENT_REJECTION_TEXT.test(detail);
 }
 
 export function diagnoseEmailDeliveryFailure(
@@ -52,6 +115,12 @@ export function diagnoseEmailDeliveryFailure(
     diagnosis = {
       title: "The mail server rejected the account password.",
       fix: "Check the account email and use the provider's app password if required. Gmail, for example, needs 2-Step Verification enabled before you can create an app password.",
+      transient: false,
+    };
+  } else if (recipientAddressWasRejected(error, responseCode, message)) {
+    diagnosis = {
+      title: "The mail server rejected the recipient address.",
+      fix: "That address cannot receive mail, usually because it does not exist. Check it for a typo and correct or remove it from the email recipients; retrying will not succeed until the address changes.",
       transient: false,
     };
   } else if ([550, 553, 554].includes(responseCode) || code === "EENVELOPE") {
@@ -116,6 +185,6 @@ export function diagnoseEmailDeliveryFailure(
     };
   }
 
-  const server = cleanServerMessage(error, secrets);
+  const server = serverDetail(error, secrets);
   return server ? { ...diagnosis, server } : diagnosis;
 }

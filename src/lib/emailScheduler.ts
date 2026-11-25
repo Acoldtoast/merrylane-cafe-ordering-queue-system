@@ -474,5 +474,4 @@ export function startEmailNotificationScheduler() {
     POLL_INTERVAL_MS
   );
   globalThis.__merrylaneEmailSchedulerTimer.unref();
-  void tick();
 }

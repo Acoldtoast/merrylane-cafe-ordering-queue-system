@@ -1,6 +1,8 @@
 import { AddonModel } from "@/lib/models";
+import { errorMessage } from "@/lib/errorMessage";
 import { requireAdmin } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
+import { invalidateCache } from "@/lib/serverCache";
 
 export async function PATCH(
   request: Request,
@@ -44,14 +46,15 @@ export async function PATCH(
       entity_type: "addon",
       entity_id: addonId,
     });
+    invalidateCache("menu");
     return Response.json({ addon: updated, success: true });
-  } catch (error: any) {
-    const duplicate = /UNIQUE/i.test(error.message || "");
+  } catch (error: unknown) {
+    const duplicate = /UNIQUE/i.test(errorMessage(error, ""));
     return Response.json(
       {
         error: duplicate
           ? "An add-on with that name already exists."
-          : error.message,
+          : errorMessage(error, "Could not update the add-on."),
         success: false,
       },
       { status: duplicate ? 409 : 500 }
@@ -78,10 +81,11 @@ export async function DELETE(
       entity_type: "addon",
       entity_id: addonId,
     });
+    invalidateCache("menu");
     return Response.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not remove the add-on."), success: false },
       { status: 500 }
     );
   }

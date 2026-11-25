@@ -77,13 +77,6 @@ export function WaiterClient({
   const checkingHistory = checkedHistoryTable !== initialTable;
 
   const atLimit = attempts.remaining <= 0;
-  const attemptNote = atLimit
-    ? "You've used all three waiter calls for today. Please ask a team member directly if you still need anything."
-    : attempts.next_attempt === 2
-      ? `You have ${attempts.remaining} of ${attempts.limit} waiter calls left today. Your next call unlocks 5 minutes after your last one.`
-      : attempts.next_attempt === 3
-        ? `You have ${attempts.remaining} of ${attempts.limit} waiter calls left today. Your last call unlocks 10 minutes after your previous one.`
-        : `You have ${attempts.remaining} of ${attempts.limit} waiter calls left today. Calls are spaced 5 minutes apart, with 10 minutes before your third.`;
 
   useEffect(() => {
     setTable(initialTable);
@@ -270,11 +263,6 @@ export function WaiterClient({
             </div>
           )}
 
-          <div className="payment-note">
-            <Icon name="info" />
-            <span>{attemptNote}</span>
-          </div>
-
           <div className="confirm-footer">
             <Link
               href={`/customer/status?id=${orderId}&table=${initialTable}`}
@@ -301,7 +289,6 @@ export function WaiterClient({
           <div className="waiter-intro">
             <span className="eyebrow">Table {String(initialTable).padStart(2, "0")} · At your service</span>
             <h1>A hand at your table.</h1>
-            <p>Let us know what you need — no need to flag anyone down.</p>
           </div>
 
           <div className="card waiter-form">
@@ -338,11 +325,6 @@ export function WaiterClient({
                 placeholder="Two glasses, please. No ice."
                 maxLength={200}
               />
-            </div>
-
-            <div className="payment-note">
-              <Icon name="info" />
-              <span>{attemptNote}</span>
             </div>
 
             <div className="waiter-submit">

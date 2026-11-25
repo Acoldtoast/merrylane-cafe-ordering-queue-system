@@ -78,7 +78,7 @@ test("PGlite adapter handles async statements, IDs, placeholders, and transactio
   }
 });
 
-test("PGlite database recovers from a stale abort", async (t) => {
+test("PGlite preserves the existing database when an abort occurs", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "merrylane-pglite-recovery-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
 
@@ -87,13 +87,23 @@ test("PGlite database recovers from a stale abort", async (t) => {
     await database.close();
   });
 
-  await database.prepare("SELECT 1").get();
-  database["ready"] = Promise.reject(
-    new Error("Aborted(). Build with -sASSERTIONS for more info.")
-  );
   await database.exec("CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)");
-  const row = await database.prepare("SELECT COUNT(*)::integer AS count FROM demo").get();
-  assert.equal(row.count, 0);
+  await database.prepare("INSERT INTO demo (id, name) VALUES (?, ?)").run(1, "preserved");
+  const originalReady = database["ready"];
+  try {
+    database["ready"] = Promise.reject(
+      new Error("Aborted(). Build with -sASSERTIONS for more info.")
+    );
+    await assert.rejects(
+      database.exec("CREATE TABLE should_not_exist (id INTEGER)"),
+      /Aborted/
+    );
+  } finally {
+    database["ready"] = originalReady;
+  }
+  const row = await database.prepare("SELECT name FROM demo WHERE id = ?").get(1);
+  assert.equal(row.name, "preserved");
+  assert.deepEqual((await fs.readdir(root)).filter((name) => name.includes("-corrupt-")), []);
 });
 
 test("SQL placeholder conversion skips quoted strings and comments", () => {

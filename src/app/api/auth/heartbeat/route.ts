@@ -2,7 +2,7 @@ import { SignJWT } from "jose";
 import { NextResponse } from "next/server";
 import {
   getAdminIdleTimeoutMinutes,
-  JWT_SECRET,
+  getJwtSecret,
   requireAdmin,
 } from "@/lib/auth";
 import { UserModel } from "@/lib/models";
@@ -30,7 +30,7 @@ export async function POST(request: Request) {
       Math.floor(Date.now() / 1000) + idleTimeoutSeconds
     );
   }
-  const token = await tokenBuilder.sign(new TextEncoder().encode(JWT_SECRET));
+  const token = await tokenBuilder.sign(new TextEncoder().encode(getJwtSecret()));
 
   const response = NextResponse.json({ success: true });
   response.cookies.set("auth-admin-token", token, {

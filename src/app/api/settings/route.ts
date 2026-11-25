@@ -2,6 +2,11 @@ import { SettingsModel } from "@/lib/models";
 import { requireAdmin } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
 import { settingsAuditChanges } from "@/lib/settingsAudit";
+import { cached, invalidateCache } from "@/lib/serverCache";
+import { validLastOrder, weeklyScheduleError } from "@/lib/orderingHours";
+import { readOrderingWindow } from "@/lib/portalReadData";
+import { errorMessage } from "@/lib/errorMessage";
+import { parseServiceChargePct } from "@/lib/serviceCharge";
 
 const MAX_GCASH_QR_BYTES = 1024 * 1024;
 const GCASH_QR_DATA_URL =
@@ -32,48 +37,82 @@ function isValidGcashQr(value: unknown): value is string {
   );
 }
 
-export async function GET() {
+async function buildSettingsPayload() {
+  const [values, ordering] = await Promise.all([
+    SettingsModel.object(),
+    SettingsModel.orderingWindow(),
+  ]);
+  const todaySchedule = ordering.schedule.find((day) => day.day === ordering.today);
+  return {
+    settings: {
+      cafe_name: values.cafe_name || "Merrylane Cafe",
+      cafe_location: values.cafe_location || "Lipa City, Batangas",
+      wifi_ssid: values.wifi_ssid || "MERLYLANE-WIFI",
+      gcash_number: values.gcash_number || "0917 123 4567",
+      gcash_name: values.gcash_name || "Merrylane Cafe",
+      gcash_qr_data_url: values.gcash_qr_data_url || "",
+      ordering_closed: values.ordering_closed === "true",
+      opening_time: todaySchedule?.start || values.opening_time || "09:00",
+      last_order_time: todaySchedule?.last_order ?? "21:00",
+      closing_time: todaySchedule?.end || values.closing_time || "22:00",
+      service_charge_pct: parseServiceChargePct(values.service_charge_pct),
+      vat_inclusive: values.vat_inclusive !== "false",
+      days_operating:
+        values.days_operating ||
+        "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday",
+      weekly_schedule: ordering.schedule,
+      facebook_url: values.facebook_url || "",
+      twitter_url: values.twitter_url || "",
+      tiktok_url: values.tiktok_url || "",
+      instagram_url: values.instagram_url || "",
+      social_media_enabled: values.social_media_enabled !== "false",
+    },
+    ordering_open: ordering.open,
+    last_order_warning: ordering.last_order_warning,
+    success: true,
+  };
+}
+
+export async function GET(request: Request) {
+  const scope = new URL(request.url).searchParams.get("scope");
   try {
-    const [values, ordering] = await Promise.all([
-      SettingsModel.object(),
-      SettingsModel.orderingWindow(),
-    ]);
-    const todaySchedule = ordering.schedule.find((day) => day.day === ordering.today);
-    return Response.json({
-      settings: {
-        cafe_name: values.cafe_name || "Merrylane Cafe",
-        cafe_location: values.cafe_location || "Lipa City, Batangas",
-        wifi_ssid: values.wifi_ssid || "MERLYLANE-WIFI",
-        gcash_number: values.gcash_number || "0917 123 4567",
-        gcash_name: values.gcash_name || "Merrylane Cafe",
-        gcash_qr_data_url: values.gcash_qr_data_url || "",
-        ordering_closed: values.ordering_closed === "true",
-        last_order_time:
-          ordering.last_order_at ||
-          todaySchedule?.last_order ||
-          values.last_order_time ||
-          "21:00",
-        opening_time: todaySchedule?.start || values.opening_time || "09:00",
-        closing_time: todaySchedule?.end || values.closing_time || "22:00",
-        service_charge_pct: Number(values.service_charge_pct || 0),
-        vat_inclusive: values.vat_inclusive !== "false",
-        days_operating:
-          values.days_operating ||
-          "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday",
-        weekly_schedule: ordering.schedule,
-        facebook_url: values.facebook_url || "",
-        twitter_url: values.twitter_url || "",
-        tiktok_url: values.tiktok_url || "",
-        instagram_url: values.instagram_url || "",
-        social_media_enabled: values.social_media_enabled !== "false",
+    // Polling clients only need the live ordering window. Skipping the full
+    // payload keeps the (potentially ~1 MB) GCash QR data URL off their wire.
+    if (scope === "ordering") {
+      const ordering = await readOrderingWindow();
+      return Response.json(
+        {
+          ordering_open: ordering.open,
+          last_order_warning: ordering.last_order_warning,
+          success: true,
+        },
+        {
+          headers: {
+            "Cache-Control": "private, max-age=5, stale-while-revalidate=10",
+          },
+        }
+      );
+    }
+
+    const body = await cached("settings:full", 10_000, async () =>
+      JSON.stringify(await buildSettingsPayload())
+    );
+    return new Response(body, {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "private, max-age=5, stale-while-revalidate=10",
       },
-      ordering_open: ordering.open,
-      last_order_warning: ordering.last_order_warning,
-      success: true,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    if (scope === "ordering") {
+      console.warn("Ordering status is temporarily unavailable.", error);
+      return Response.json(
+        { error: "Ordering status is temporarily unavailable.", success: false },
+        { status: 503, headers: { "Cache-Control": "no-store" } }
+      );
+    }
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not load the settings."), success: false },
       { status: 500 }
     );
   }
@@ -85,6 +124,10 @@ export async function PATCH(request: Request) {
     if (auth.error) return auth.error;
 
     const body = await request.json();
+    if (Object.prototype.hasOwnProperty.call(body, "weekly_schedule")) {
+      const error = weeklyScheduleError(body.weekly_schedule);
+      if (error) return Response.json({ error, success: false }, { status: 400 });
+    }
     if (
       Object.prototype.hasOwnProperty.call(body, "gcash_qr_data_url") &&
       !isValidGcashQr(body.gcash_qr_data_url)
@@ -94,6 +137,29 @@ export async function PATCH(request: Request) {
           error: "GCash QR must be a PNG, JPG, or WebP image no larger than 1 MB.",
           success: false,
         },
+        { status: 400 }
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "service_charge_pct")) {
+      const raw = body.service_charge_pct;
+      const pct =
+        raw === "" || raw === null || raw === undefined
+          ? 0
+          : parseServiceChargePct(raw, Number.NaN);
+      if (!Number.isFinite(pct)) {
+        return Response.json(
+          { error: "Service charge must be a number from 0 to 100.", success: false },
+          { status: 400 }
+        );
+      }
+      body.service_charge_pct = pct;
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(body, "vat_inclusive") &&
+      typeof body.vat_inclusive !== "boolean"
+    ) {
+      return Response.json(
+        { error: "Choose whether prices include VAT.", success: false },
         { status: 400 }
       );
     }
@@ -122,6 +188,15 @@ export async function PATCH(request: Request) {
       SettingsModel.orderingWindow(),
       SettingsModel.get("weekly_schedule"),
     ]);
+    if (body.weekly_schedule === undefined && body.last_order_time !== undefined) {
+      const today = previousWindow.schedule.find((day) => day.day === previousWindow.today);
+      if (!validLastOrder(body.last_order_time, body.opening_time ?? today?.start, body.closing_time ?? today?.end)) {
+        return Response.json(
+          { error: "Last order must be between opening and closing, before the shop closes.", success: false },
+          { status: 400 }
+        );
+      }
+    }
     let previousWeeklySchedule: unknown = null;
     try {
       previousWeeklySchedule = previousWeeklyScheduleRaw
@@ -182,14 +257,15 @@ export async function PATCH(request: Request) {
       });
     }
 
+    invalidateCache("settings");
     return Response.json({
       success: true,
       message: "Settings saved.",
       ordering_open: await SettingsModel.isOrderingOpen(),
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not save the settings."), success: false },
       { status: 500 }
     );
   }

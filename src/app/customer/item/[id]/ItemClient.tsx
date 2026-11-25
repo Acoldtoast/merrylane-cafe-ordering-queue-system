@@ -10,18 +10,31 @@ import { useFeedback } from "@/components/Feedback";
 import { useCustomer } from "@/components/CustomerProvider";
 import type { MenuExtra, MenuItem, MenuVariant } from "@/lib/types";
 import { peso } from "@/lib/format";
+import { CUSTOMER_ITEM_LIMIT_MESSAGE, remainingCustomerQuantity } from "@/lib/customerQuantity";
+import { useQuantityLimitWarning } from "@/lib/useQuantityLimitWarning";
+
+type FormValues = {
+  selectedVariants: Record<string, number>;
+  selectedExtras: number[];
+  sugarLevel: string;
+  note: string;
+  quantity: number;
+};
 
 export function ItemClient({
   item,
   initialTable,
   editKey = null,
+  vatInclusive = true,
 }: {
   item: MenuItem;
   initialTable: number;
   editKey?: string | null;
+  vatInclusive?: boolean;
 }) {
   const router = useRouter();
   const feedback = useFeedback();
+  const { warningKey, warn } = useQuantityLimitWarning<number>();
   const { setTable, addItem, updateCartItem, items, ready, orderType } = useCustomer();
 
   useEffect(() => {
@@ -37,55 +50,67 @@ export function ItemClient({
     return Array.from(map.entries());
   }, [item.variants]);
 
-  const [selectedVariants, setSelectedVariants] = useState<Record<string, number>>(
-    () => {
-      const initial: Record<string, number> = {};
-      for (const [type, variants] of groups) {
-        if (variants[0]) initial[type] = variants[0].id;
-      }
-      return initial;
-    }
+  const cartItem = editKey
+    ? items.find((entry) => entry.key === editKey)
+    : undefined;
+  const editLoaded = !editKey || ready;
+  const editMissing = Boolean(
+    editKey && ready && (!cartItem || cartItem.menuItemId !== item.id)
   );
-  const [selectedExtras, setSelectedExtras] = useState<number[]>([]);
-  const [sugarLevel, setSugarLevel] = useState("50%");
-  const [note, setNote] = useState("");
-  const [quantity, setQuantity] = useState(1);
-  const [editLoaded, setEditLoaded] = useState(!editKey);
-  const [editMissing, setEditMissing] = useState(false);
-  const [editBaseline, setEditBaseline] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!editKey || !ready) return;
-    const cartItem = items.find((entry) => entry.key === editKey);
-    if (!cartItem || cartItem.menuItemId !== item.id) {
-      setEditMissing(true);
-      setEditLoaded(true);
-      return;
-    }
-    const selected: Record<string, number> = {};
-    for (const [type, variants] of groups) {
-      const selectedVariant = variants.find((variant) =>
-        (cartItem.variantIds || [cartItem.variant?.id || 0]).includes(variant.id)
-      );
-      if (selectedVariant) selected[type] = selectedVariant.id;
-    }
-    setSelectedVariants(selected);
-    setSelectedExtras(cartItem.extras.map((extra) => extra.id));
-    setSugarLevel(cartItem.sugarLevel || "50%");
-    setNote(cartItem.note || "");
-    setQuantity(cartItem.quantity);
-    setEditBaseline(
-      JSON.stringify({
-        selectedVariants: selected,
+  /*
+   * The form's initial value is the cart line being edited, or the item's own
+   * defaults. Until the visitor changes a field the values stay derived, so the
+   * edit is loaded from the cart without an effect copying it into state — and
+   * it picks up the cart as soon as the provider has hydrated.
+   */
+  const baseForm = useMemo<FormValues>(() => {
+    if (cartItem && cartItem.menuItemId === item.id) {
+      const fromCart: Record<string, number> = {};
+      for (const [type, variants] of groups) {
+        const selectedVariant = variants.find((variant) =>
+          (cartItem.variantIds || [cartItem.variant?.id || 0]).includes(variant.id)
+        );
+        if (selectedVariant) fromCart[type] = selectedVariant.id;
+      }
+      return {
+        selectedVariants: fromCart,
         selectedExtras: cartItem.extras.map((extra) => extra.id),
         sugarLevel: cartItem.sugarLevel || "50%",
         note: cartItem.note || "",
         quantity: cartItem.quantity,
-      })
-    );
-    setEditMissing(false);
-    setEditLoaded(true);
-  }, [editKey, groups, item.id, items, ready]);
+      };
+    }
+    const defaults: Record<string, number> = {};
+    for (const [type, variants] of groups) {
+      if (variants[0]) defaults[type] = variants[0].id;
+    }
+    return {
+      selectedVariants: defaults,
+      selectedExtras: [],
+      sugarLevel: "50%",
+      note: "",
+      quantity: 1,
+    };
+  }, [cartItem, groups, item.id]);
+
+  const [form, setForm] = useState<FormValues | null>(null);
+  const {
+    selectedVariants,
+    selectedExtras,
+    sugarLevel,
+    note,
+    quantity: requestedQuantity,
+  } = form ?? baseForm;
+
+  const updateForm = (patch: (current: FormValues) => Partial<FormValues>) => {
+    setForm((current) => {
+      const next = current ?? baseForm;
+      return { ...next, ...patch(next) };
+    });
+  };
+
+  const editBaseline = editKey ? JSON.stringify(baseForm) : null;
 
   const isDrink =
     item.category_name === "Coffee" || item.category_name === "Non-Coffee";
@@ -107,12 +132,11 @@ export function ItemClient({
   const cartQuantityElsewhere = items
     .filter((entry) => entry.menuItemId === item.id && entry.key !== editKey)
     .reduce((sum, entry) => sum + entry.quantity, 0);
-  const maxQuantity =
-    stockLimit === null
-      ? Number.POSITIVE_INFINITY
-      : Math.max(0, stockLimit - cartQuantityElsewhere);
+  const maxQuantity = remainingCustomerQuantity(stockLimit, cartQuantityElsewhere);
+  const quantity = Math.min(requestedQuantity, Math.max(1, maxQuantity));
+  const orderAllowance = remainingCustomerQuantity(null, cartQuantityElsewhere);
   const outOfStock = item.stock_status === "out";
-  const allInCart = !outOfStock && Number.isFinite(maxQuantity) && maxQuantity <= 0;
+  const allInCart = !outOfStock && maxQuantity <= 0;
   const soldOut = outOfStock || allInCart;
   const editHasChanges =
     !editKey ||
@@ -124,25 +148,24 @@ export function ItemClient({
       quantity,
     }) !== editBaseline;
 
-  useEffect(() => {
-    if (maxQuantity === Number.POSITIVE_INFINITY) return;
-    setQuantity((current) => Math.min(current, Math.max(1, maxQuantity)));
-  }, [maxQuantity]);
-
   const unitPrice =
     Number(item.price) +
     activeVariants.reduce((sum, variant) => sum + Number(variant.price_modifier), 0) +
     activeExtras.reduce((sum, extra) => sum + Number(extra.price_modifier), 0);
 
   const toggleExtra = (extra: MenuExtra) => {
-    setSelectedExtras((current) =>
-      current.includes(extra.id)
-        ? current.filter((id) => id !== extra.id)
-        : [...current, extra.id]
-    );
+    updateForm((current) => ({
+      selectedExtras: current.selectedExtras.includes(extra.id)
+        ? current.selectedExtras.filter((id) => id !== extra.id)
+        : [...current.selectedExtras, extra.id],
+    }));
   };
 
   const addToOrder = () => {
+    if (quantity > orderAllowance) {
+      warn(item.id);
+      return;
+    }
     if (soldOut) {
       feedback.warning(
         outOfStock
@@ -158,7 +181,7 @@ export function ItemClient({
       return;
     }
     if (stockLimit !== null && quantity > maxQuantity) {
-      setQuantity(Math.max(1, maxQuantity));
+      updateForm(() => ({ quantity: Math.max(1, maxQuantity) }));
       feedback.warning(`Only ${stockLimit} ${item.name} today`, {
         eyebrow: "That's all we have",
         message:
@@ -304,7 +327,9 @@ export function ItemClient({
           <p className="item-desc">{item.description}</p>
           <div className="item-price-line">
             <strong key={unitPrice}>{peso(unitPrice)}</strong>
-            <span>VAT inclusive · made to order</span>
+            <span>
+              {vatInclusive ? "VAT inclusive" : "Prices exclude VAT"} · made to order
+            </span>
           </div>
 
           {item.stock_status === "low" && (
@@ -346,9 +371,11 @@ export function ItemClient({
                       name={type}
                       checked={selectedVariants[type] === variant.id}
                       onChange={() =>
-                        setSelectedVariants((current) => ({
-                          ...current,
-                          [type]: variant.id,
+                        updateForm((current) => ({
+                          selectedVariants: {
+                            ...current.selectedVariants,
+                            [type]: variant.id,
+                          },
                         }))
                       }
                     />
@@ -377,7 +404,7 @@ export function ItemClient({
                       type="radio"
                       name="sugar-level"
                       checked={sugarLevel === level}
-                      onChange={() => setSugarLevel(level)}
+                      onChange={() => updateForm(() => ({ sugarLevel: level }))}
                     />
                     <span>{level}</span>
                   </label>
@@ -423,7 +450,7 @@ export function ItemClient({
                 id="item-note"
                 className="textarea"
                 value={note}
-                onChange={(event) => setNote(event.target.value)}
+                onChange={(event) => updateForm(() => ({ note: event.target.value }))}
                 placeholder="Less ice, extra hot, no straw — anything we should know?"
                 maxLength={180}
               />
@@ -434,7 +461,7 @@ export function ItemClient({
             <div className="qty-control">
               <button
                 type="button"
-                onClick={() => setQuantity((current) => Math.max(1, current - 1))}
+                onClick={() => updateForm(() => ({ quantity: Math.max(1, quantity - 1) }))}
                 aria-label="Decrease quantity"
               >
                 <Icon name="minus" size={13} />
@@ -442,8 +469,11 @@ export function ItemClient({
               <span>{quantity}</span>
               <button
                 type="button"
-                onClick={() => setQuantity((current) => current + 1)}
-                disabled={quantity >= maxQuantity}
+                 onClick={() => {
+                   if (quantity >= orderAllowance) warn(item.id);
+                   else updateForm(() => ({ quantity: Math.min(quantity + 1, maxQuantity) }));
+                 }}
+                 disabled={outOfStock || (quantity >= maxQuantity && maxQuantity < orderAllowance)}
                 aria-label="Increase quantity"
               >
                 <Icon name="plus" size={13} />
@@ -454,18 +484,22 @@ export function ItemClient({
               className="btn btn-primary"
               onClick={addToOrder}
               disabled={
-                Boolean(editKey && (!editLoaded || !editHasChanges)) || soldOut
+                 Boolean(editKey && (!editLoaded || !editHasChanges)) ||
+                 outOfStock || (allInCart && orderAllowance > 0)
               }
             >
               {outOfStock
                 ? "Sold out today"
-                : allInCart
-                  ? "All left in your cart"
+                 : allInCart && orderAllowance > 0
+                   ? "All left in your cart"
                   : editKey
                     ? "Save changes"
                     : "Add to cart"}
               {!soldOut && <span>{peso(unitPrice * quantity)}</span>}
             </button>
+          </div>
+          <div className="quantity-limit-warning" role="status">
+            {warningKey === item.id ? CUSTOMER_ITEM_LIMIT_MESSAGE : ""}
           </div>
         </section>
       </div>

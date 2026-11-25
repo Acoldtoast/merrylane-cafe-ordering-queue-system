@@ -1,19 +1,19 @@
 import { UserModel, verifyPassword } from "@/lib/models";
-import { getAdminIdleTimeoutMinutes, getUser } from "@/lib/auth";
+import { getAdminIdleTimeoutMinutes, getJwtSecret, getUser, getUserAuthStatus } from "@/lib/auth";
 import {
   clearDeviceLoginFailures,
   clearUserAuthSecurity,
+  clearUsernameLoginFailures,
   getDeviceLoginRestriction,
+  getUsernameLoginRestriction,
   recordDeviceLoginFailure,
+  recordUsernameLoginFailure,
 } from "@/lib/authSecurity";
 import { randomUUID } from "node:crypto";
 import { SignJWT } from "jose";
 import { NextResponse, type NextRequest } from "next/server";
 import { logActivity } from "@/lib/activityLog";
 import { getLoginDeviceContext, setLoginDeviceCookie } from "@/lib/loginDevice";
-
-const JWT_SECRET =
-  process.env.JWT_SECRET || "merrylane-secret-change-me-in-production";
 
 function formatCooldownDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
@@ -72,56 +72,80 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const restriction = await getDeviceLoginRestriction(loginDevice.id);
-    if (restriction.status === "cooldown") {
+    // Track failures by username as well as by device: the device cookie can
+    // be rotated by an attacker, but the guessed username cannot.
+    const loginId = username.trim().toLowerCase();
+    await UserModel.ensureColumns();
+    const deviceRestriction = await getDeviceLoginRestriction(loginDevice.id);
+    const usernameRestriction = await getUsernameLoginRestriction(loginId);
+    const activeCooldown =
+      deviceRestriction.status === "cooldown"
+        ? deviceRestriction
+        : usernameRestriction.status === "cooldown"
+          ? usernameRestriction
+          : null;
+    if (activeCooldown) {
       return respond(
         {
           error: cooldownMessage(
-            restriction.retryAfterSeconds,
-            restriction.untilNextDay
+            activeCooldown.retryAfterSeconds,
+            activeCooldown.untilNextDay
           ),
-          failed_attempts: restriction.failedAttempts,
-          retry_after_seconds: restriction.retryAfterSeconds,
-          until_next_day: restriction.untilNextDay === true,
+          failed_attempts: activeCooldown.failedAttempts,
+          retry_after_seconds: activeCooldown.retryAfterSeconds,
+          until_next_day: activeCooldown.untilNextDay === true,
           success: false,
         },
         {
           status: 429,
-          headers: { "Retry-After": String(restriction.retryAfterSeconds) },
+          headers: { "Retry-After": String(activeCooldown.retryAfterSeconds) },
         }
       );
     }
 
-    const user = await UserModel.byUsername(username.trim());
+    const user = await UserModel.byUsername(loginId);
     if (
       !user ||
       user.is_active === 0 ||
       (user.role !== "admin" && user.role !== "staff") ||
       !verifyPassword(password, user.password_hash)
     ) {
-      const failure = await recordDeviceLoginFailure(loginDevice.id);
-      if (failure.status === "cooldown") {
+      // Record the failure against both identifiers before responding.
+      // Record failures one at a time: PGlite runs a single connection, so
+      // concurrent transactions on the same client conflict.
+      const deviceFailure = await recordDeviceLoginFailure(loginDevice.id);
+      const usernameFailure = await recordUsernameLoginFailure(loginId);
+      const cooldown =
+        deviceFailure.status === "cooldown"
+          ? deviceFailure
+          : usernameFailure.status === "cooldown"
+            ? usernameFailure
+            : null;
+      if (cooldown) {
         return respond(
           {
             error: cooldownMessage(
-              failure.retryAfterSeconds,
-              failure.untilNextDay
+              cooldown.retryAfterSeconds,
+              cooldown.untilNextDay
             ),
-            failed_attempts: failure.failedAttempts,
-            retry_after_seconds: failure.retryAfterSeconds,
-            until_next_day: failure.untilNextDay === true,
+            failed_attempts: cooldown.failedAttempts,
+            retry_after_seconds: cooldown.retryAfterSeconds,
+            until_next_day: cooldown.untilNextDay === true,
             success: false,
           },
           {
             status: 429,
-            headers: { "Retry-After": String(failure.retryAfterSeconds) },
+            headers: { "Retry-After": String(cooldown.retryAfterSeconds) },
           }
         );
       }
       return respond(
         {
           error: "Those credentials don't match our records.",
-          failed_attempts: failure.failedAttempts,
+          failed_attempts: Math.max(
+            deviceFailure.failedAttempts,
+            usernameFailure.failedAttempts
+          ),
           success: false,
         },
         { status: 401 }
@@ -150,7 +174,9 @@ export async function POST(request: NextRequest) {
     if (maxAge > 0) {
       tokenBuilder.setExpirationTime(Math.floor(Date.now() / 1000) + maxAge);
     }
-    const token = await tokenBuilder.sign(new TextEncoder().encode(JWT_SECRET));
+    const token = await tokenBuilder.sign(
+      new TextEncoder().encode(getJwtSecret())
+    );
 
     logActivity(user, {
       area: "Access",
@@ -163,6 +189,7 @@ export async function POST(request: NextRequest) {
     });
     await UserModel.recordLogin(user.id);
     await clearDeviceLoginFailures(loginDevice.id);
+    await clearUsernameLoginFailures(loginId);
     await clearUserAuthSecurity(user.id);
 
     const response = respond({
@@ -205,7 +232,9 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: Request) {
   const area = new URL(request.url).searchParams.get("area");
   const expectedRole = area === "admin" || area === "staff" ? area : undefined;
-  const user = expectedRole ? await getUser(request, expectedRole) : await getUser(request);
+  const user = expectedRole === "staff"
+    ? (await getUserAuthStatus(request, "staff", true, true)).user
+    : expectedRole ? await getUser(request, expectedRole) : await getUser(request);
   if (user) {
     await UserModel.recordLogout(user.id);
     logActivity(user, {

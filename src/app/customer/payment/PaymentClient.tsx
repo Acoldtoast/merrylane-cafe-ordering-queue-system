@@ -1,16 +1,17 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "@/components/Icons";
-import { useFeedback } from "@/components/Feedback";
 import { CustomerPageSkeleton } from "@/components/CustomerPageSkeleton";
 import { useCustomer } from "@/components/CustomerProvider";
 import type { CartItem, Order } from "@/lib/types";
 import { peso, orderTypeLabel } from "@/lib/format";
 import { orderItemMeta } from "@/lib/orderItems";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
+import { usePolling } from "@/lib/usePolling";
 
 const GCASH_CHECKOUT_DRAFT_KEY = "merrylane.gcash-checkout.v1";
 
@@ -26,6 +27,77 @@ interface CheckoutQuote {
   total: number;
 }
 
+interface XenditPaymentState {
+  status: string;
+  checkoutUrl: string | null;
+  mobileUrl: string | null;
+  qrCodeDataUrl: string | null;
+  qrIsPaymentQr: boolean;
+  testMode: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseXenditPayment(value: unknown): XenditPaymentState | null {
+  if (!isRecord(value)) {
+    throw new Error("Xendit returned an invalid payment response.");
+  }
+  if (value.payment === null) return null;
+  if (!isRecord(value.payment) || typeof value.payment.status !== "string") {
+    throw new Error("Xendit returned an invalid payment response.");
+  }
+
+  const { checkoutUrl, mobileUrl, qrCodeDataUrl } = value.payment;
+  if (
+    (checkoutUrl !== null && typeof checkoutUrl !== "string") ||
+    (mobileUrl !== null && typeof mobileUrl !== "string") ||
+    (qrCodeDataUrl !== null && typeof qrCodeDataUrl !== "string") ||
+    typeof value.payment.qrIsPaymentQr !== "boolean" ||
+    typeof value.payment.testMode !== "boolean"
+  ) {
+    throw new Error("Xendit returned incomplete payment options.");
+  }
+  if (typeof checkoutUrl === "string" && !checkoutUrl.startsWith("https://")) {
+    throw new Error("Xendit returned an insecure checkout link.");
+  }
+  if (
+    typeof mobileUrl === "string" &&
+    !mobileUrl.startsWith("https://") &&
+    !mobileUrl.startsWith("gcash:")
+  ) {
+    throw new Error("Xendit returned an unsupported GCash app link.");
+  }
+  if (
+    typeof qrCodeDataUrl === "string" &&
+    !qrCodeDataUrl.startsWith("data:image/png;base64,")
+  ) {
+    throw new Error("Xendit returned an invalid checkout QR code.");
+  }
+
+  return {
+    status: value.payment.status,
+    checkoutUrl,
+    mobileUrl,
+    qrCodeDataUrl,
+    qrIsPaymentQr: value.payment.qrIsPaymentQr,
+    testMode: value.payment.testMode,
+  };
+}
+
+async function readXenditPayment(response: Response) {
+  const payload: unknown = await response.json();
+  if (!response.ok || !isRecord(payload) || payload.success !== true) {
+    throw new Error(
+      isRecord(payload) && typeof payload.error === "string"
+        ? payload.error
+        : "Could not load Xendit payment options."
+    );
+  }
+  return parseXenditPayment(payload);
+}
+
 export function PaymentClient({
   orderId,
   initialTable,
@@ -36,7 +108,6 @@ export function PaymentClient({
   balancePayment?: boolean;
 }) {
   const router = useRouter();
-  const feedback = useFeedback();
   const {
     setTable,
     table,
@@ -53,16 +124,27 @@ export function PaymentClient({
   const [checkoutQuote, setCheckoutQuote] = useState<CheckoutQuote | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [proof, setProof] = useState("");
-  const [proofName, setProofName] = useState("");
-  const [reference, setReference] = useState("");
+  const [paymentRefreshError, setPaymentRefreshError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [submitAttempted, setSubmitAttempted] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [gcash, setGcash] = useState("0917 123 4567");
-  const [gcashName, setGcashName] = useState("Merrylane Cafe");
-  const [gcashQr, setGcashQr] = useState("");
-  const isNewCheckout = !balancePayment && !orderId;
+  const [payment, setPayment] = useState<XenditPaymentState | null>(null);
+  const [createdOrderId, setCreatedOrderId] = useState(0);
+  const completionHandled = useRef(false);
+  const autoStartAttempted = useRef(false);
+  const activeOrderId = orderId || createdOrderId;
+  const isNewCheckout = !balancePayment && !activeOrderId;
+  const hasPendingManualOrderProof =
+    !balancePayment &&
+    order?.payment_status === "pending" &&
+    Boolean(order.payment_proof_url);
+  const hasPendingBalancePayment = Boolean(
+    order?.balance_payments?.some((payment) => payment.status === "pending")
+  );
+  const preflightError =
+    isNewCheckout && ready && cartItems.length === 0
+      ? "Your cart is empty. Return to checkout to choose your items."
+      : balancePayment && !activeOrderId
+        ? "We couldn't find that order."
+        : "";
 
   useEffect(() => {
     setTable(initialTable);
@@ -72,35 +154,8 @@ export function PaymentClient({
     if (isNewCheckout) {
       if (!ready) return;
       if (cartItems.length === 0) {
-        setError("Your cart is empty. Return to checkout to choose your items.");
-        setLoading(false);
         return;
       }
-
-      let draft: GcashCheckoutDraft;
-      try {
-        const saved = sessionStorage.getItem(GCASH_CHECKOUT_DRAFT_KEY);
-        const parsed = saved ? JSON.parse(saved) : null;
-        if (
-          !parsed ||
-          typeof parsed.customerName !== "string" ||
-          !parsed.customerName.trim() ||
-          typeof parsed.remarks !== "string" ||
-          (parsed.orderType !== "dine_in" && parsed.orderType !== "take_out")
-        ) {
-          throw new Error("Your checkout details are missing. Return to checkout.");
-        }
-        draft = parsed;
-      } catch (cause: unknown) {
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "Your checkout details are missing. Return to checkout."
-        );
-        setLoading(false);
-        return;
-      }
-      setCheckoutDraft(draft);
 
       const requestItems = cartItems.map((item: CartItem) => ({
         menuItemId: item.menuItemId,
@@ -110,9 +165,27 @@ export function PaymentClient({
         sugarLevel: item.sugarLevel || undefined,
         note: item.note || undefined,
       }));
-      Promise.all([
-        fetchPortalApi("/api/settings").then((response) => response.json()),
-        fetchPortalApi("/api/orders", {
+      Promise.resolve()
+        .then(() => {
+          const saved = sessionStorage.getItem(GCASH_CHECKOUT_DRAFT_KEY);
+          const parsed = saved ? JSON.parse(saved) : null;
+          if (
+            !parsed ||
+            typeof parsed.customerName !== "string" ||
+            !parsed.customerName.trim() ||
+            typeof parsed.remarks !== "string" ||
+            (parsed.orderType !== "dine_in" && parsed.orderType !== "take_out")
+          ) {
+            throw new Error(
+              "Your checkout details are missing. Return to checkout."
+            );
+          }
+          const draft: GcashCheckoutDraft = parsed;
+          setCheckoutDraft(draft);
+          return draft;
+        })
+        .then((draft) =>
+          fetchPortalApi("/api/orders", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -124,25 +197,21 @@ export function PaymentClient({
             remarks: draft.remarks,
             items: requestItems,
           }),
-        }).then(async (response) => {
+          })
+        )
+        .then(async (response) => {
           const data = await response.json();
           if (!response.ok || !data.success) {
             throw new Error(data.error || "Could not check the GCash amount.");
           }
           return data;
-        }),
-      ])
-        .then(([settingsData, quoteData]) => {
+        })
+        .then((quoteData) => {
           setCheckoutQuote({
             subtotal: Number(quoteData.subtotal),
             service_charge: Number(quoteData.service_charge),
             total: Number(quoteData.total),
           });
-          if (settingsData.settings) {
-            setGcash(settingsData.settings.gcash_number || "0917 123 4567");
-            setGcashName(settingsData.settings.gcash_name || "Merrylane Cafe");
-            setGcashQr(settingsData.settings.gcash_qr_data_url || "");
-          }
         })
         .catch((cause: unknown) => {
           setError(
@@ -155,42 +224,44 @@ export function PaymentClient({
       return;
     }
 
-    if (!orderId) {
-      setError("We couldn't find that order.");
-      setLoading(false);
+    if (!activeOrderId) {
       return;
     }
     Promise.all([
-      fetchPortalApi(`/api/orders/${orderId}`).then((res) => res.json()),
-      fetchPortalApi("/api/settings").then((res) => res.json()),
+      fetchPortalApi(`/api/orders/${activeOrderId}`, { cache: "no-store" }),
+      fetchPortalApi(
+        `/api/orders/${activeOrderId}/xendit-payment?payment_kind=${
+          balancePayment ? "balance" : "order"
+        }&include_qr=1`,
+        { cache: "no-store" }
+      ),
     ])
-      .then(([orderData, settingsData]) => {
-        if (!orderData.order) throw new Error(orderData.error || "Order not found.");
+      .then(async ([orderResponse, paymentResponse]) => {
+        const orderData = await orderResponse.json();
+        if (!orderResponse.ok || !orderData.order) {
+          throw new Error(orderData.error || "Order not found.");
+        }
+        const paymentData = await readXenditPayment(paymentResponse);
         setOrder(orderData.order);
-        setReference(balancePayment ? "" : orderData.order.payment_reference || "");
+        if (paymentData) setPayment(paymentData);
         if (orderData.order.status === "cancelled") {
-          router.replace(`/customer/status?id=${orderId}&table=${initialTable}`);
+          router.replace(`/customer/status?id=${activeOrderId}&table=${initialTable}`);
           return;
         }
-        if (!balancePayment && orderData.order.payment_proof_url) {
-          setProof(orderData.order.payment_proof_url);
-          setProofName("Uploaded receipt");
-        }
         if (balancePayment && Number(orderData.order.balance_due || 0) <= 0) {
-          router.replace(`/customer/status?id=${orderId}&table=${initialTable}`);
+          router.replace(`/customer/status?id=${activeOrderId}&table=${initialTable}`);
         } else if (!balancePayment && orderData.order.payment_status === "verified") {
-          router.replace(`/customer/status?id=${orderId}&table=${initialTable}`);
-        }
-        if (settingsData.settings) {
-          setGcash(settingsData.settings.gcash_number || "0917 123 4567");
-          setGcashName(settingsData.settings.gcash_name || "Merrylane Cafe");
-          setGcashQr(settingsData.settings.gcash_qr_data_url || "");
+          router.replace(`/customer/status?id=${activeOrderId}&table=${initialTable}`);
         }
       })
-      .catch((err) => setError(err.message))
+      .catch((cause: unknown) =>
+        setError(
+          cause instanceof Error ? cause.message : "Could not load the order."
+        )
+      )
       .finally(() => setLoading(false));
   }, [
-    orderId,
+    activeOrderId,
     initialTable,
     router,
     balancePayment,
@@ -200,194 +271,243 @@ export function PaymentClient({
     orderType,
   ]);
 
-  const handleFile = (file: File | null) => {
-    if (!file) return;
-    if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type)) {
-      feedback.warning("That file won't work", {
-        message: "Choose a JPG, PNG, WebP, or GIF image of your GCash receipt.",
-      });
-      return;
-    }
-    if (file.size > 3 * 1024 * 1024) {
-      feedback.warning("That screenshot is too large", {
-        message: "Choose an image under 3 MB so it sends quickly.",
-      });
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      setProof(String(reader.result || ""));
-      setProofName(file.name);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const copyNumber = async () => {
-    try {
-      await navigator.clipboard.writeText(gcash.replace(/\s/g, ""));
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
-    } catch {
-      feedback.warning("Copy it manually", {
-        message: `Select the GCash number (${gcash}) and copy it from the screen.`,
-      });
-    }
-  };
-
-  const submit = async () => {
-    setSubmitAttempted(true);
+  const startPayment = useCallback(async () => {
+    if (submitting) return;
     if (isNewCheckout && (!checkoutDraft || !checkoutQuote)) {
-      feedback.warning("Checkout is not ready", {
-        message: "Return to checkout and try again before sending your receipt.",
-      });
+      setError("Checkout is not ready. Return to checkout and try again.");
       return;
     }
-    if (!proof) {
-      feedback.warning("We need to see the payment", {
-        message: "Add a clear screenshot of your GCash receipt before sending it for review.",
-      });
+    if (payment?.status === "pending" || payment?.status === "creating") {
+      setError("This Xendit checkout is already active. Use the QR or GCash link below.");
       return;
     }
-    if (!reference.trim()) {
-      feedback.warning("One detail is missing", {
-        message: "Type the GCash reference number shown on your receipt.",
-        details: orderId
-          ? [{ label: "Order", value: `#${String(orderId).padStart(3, "0")}` }]
-          : undefined,
-      });
+    if (hasPendingManualOrderProof || hasPendingBalancePayment) {
+      setError("This payment is already waiting for review. You do not need to submit it again.");
       return;
     }
     setSubmitting(true);
-    const amount = order
-      ? balancePayment
-        ? order.balance_due || 0
-        : order.total
-      : checkoutQuote?.total || 0;
-    const result = await feedback.run(
-      async () => {
-        const response = await fetchPortalApi(
-          balancePayment
-            ? `/api/orders/${orderId}/balance-payments`
-            : isNewCheckout
-              ? "/api/orders"
-              : `/api/orders/${orderId}/pay`,
-          {
+    setError("");
+    setPaymentRefreshError("");
+    try {
+      let checkoutOrderId = activeOrderId;
+      if (!checkoutOrderId) {
+        const response = await fetchPortalApi("/api/orders", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(
-              isNewCheckout
-                ? {
-                    table_number: initialTable,
-                    order_type: checkoutDraft?.orderType,
-                    payment_method: "gcash",
-                    customer_name: checkoutDraft?.customerName,
-                    remarks: checkoutDraft?.remarks,
-                    items: cartItems.map((item) => ({
-                      menuItemId: item.menuItemId,
-                      quantity: item.quantity,
-                      variantIds:
-                        item.variantIds ||
-                        (item.variant ? [item.variant.id] : []),
-                      addonIds: item.extras.map((extra) => extra.id),
-                      sugarLevel: item.sugarLevel || undefined,
-                      note: item.note || undefined,
-                    })),
-                    payment_proof_url: proof,
-                    payment_reference: reference,
-                  }
-                : balancePayment
-                  ? {
-                      payment_method: "gcash",
-                      payment_proof_url: proof,
-                      payment_reference: reference,
-                    }
-                  : {
-                      payment_proof_url: proof,
-                      payment_reference: reference,
-                    }
-            ),
-          }
-        );
+            body: JSON.stringify({
+              table_number: initialTable,
+              order_type: checkoutDraft?.orderType,
+              payment_method: "gcash",
+              customer_name: checkoutDraft?.customerName,
+              remarks: checkoutDraft?.remarks,
+              items: cartItems.map((item) => ({
+                menuItemId: item.menuItemId,
+                quantity: item.quantity,
+                variantIds: item.variantIds || (item.variant ? [item.variant.id] : []),
+                addonIds: item.extras.map((extra) => extra.id),
+                sugarLevel: item.sugarLevel || undefined,
+                note: item.note || undefined,
+              })),
+            }),
+        });
         const data = await response.json();
         if (!response.ok || !data.success) {
-          throw new Error(data.error || "Could not submit the payment proof.");
+            throw new Error(data.error || "Could not create the order.");
         }
-        if (
-          isNewCheckout &&
-          (!Number.isSafeInteger(Number(data.orderId)) || Number(data.orderId) <= 0)
-        ) {
-          throw new Error("The order was submitted but its confirmation was missing.");
+        checkoutOrderId = Number(data.orderId);
+        if (!Number.isSafeInteger(checkoutOrderId) || checkoutOrderId <= 0) {
+            throw new Error("The order was created but its ID was missing.");
         }
-        return data;
-      },
-      {
-        loading: {
-          title: "Sending your receipt…",
-          message: "A staff member will check it against the GCash account.",
-        },
-        success: (data) => ({
-          eyebrow: balancePayment ? "Balance sent" : "Receipt sent",
-          title: "Payment proof submitted",
-          message:
-            "We verify payments manually, usually within a few minutes. Keep this page handy.",
-          duration: 3400,
-          details: [
-            {
-              label: "Order",
-              value: `#${String(
-                data.orderNumber ??
-                  data.order?.order_number ??
-                  order?.order_number ??
-                  orderId
-              ).padStart(3, "0")}`,
-            },
-            { label: "Amount", value: peso(amount) },
-            { label: "Reference", value: reference.trim() },
-          ],
-        }),
+        setCreatedOrderId(checkoutOrderId);
+        setLastOrderId(checkoutOrderId);
+        setLoading(true);
+        router.replace(
+            `/customer/payment?id=${checkoutOrderId}&table=${initialTable}`
+        );
       }
-    );
-    if (result.ok) {
-      if (isNewCheckout && result.result) {
-        const newOrderId = Number(result.result.orderId);
-        setLastOrderId(newOrderId);
+
+      const response = await fetchPortalApi(
+        `/api/orders/${checkoutOrderId}/xendit-payment`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              payment_kind: balancePayment ? "balance" : "order",
+            }),
+        }
+      );
+      const newPayment = await readXenditPayment(response);
+      if (!newPayment?.checkoutUrl) {
+        throw new Error("Xendit did not return checkout options.");
+      }
+      setPayment(newPayment);
+
+      if (!balancePayment) {
+        clearCart();
+        try {
+            sessionStorage.removeItem(GCASH_CHECKOUT_DRAFT_KEY);
+        } catch (cause) {
+            console.warn("Could not clear the saved GCash checkout details.", cause);
+        }
+      }
+    } catch (cause: unknown) {
+      setError(
+        cause instanceof Error ? cause.message : "Could not start GCash checkout."
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }, [
+    activeOrderId,
+    balancePayment,
+    cartItems,
+    checkoutDraft,
+    checkoutQuote,
+    clearCart,
+    hasPendingBalancePayment,
+    hasPendingManualOrderProof,
+    initialTable,
+    isNewCheckout,
+    payment?.status,
+    router,
+    setLastOrderId,
+    submitting,
+  ]);
+
+  const autoStartReady =
+    isNewCheckout
+      ? Boolean(checkoutDraft && checkoutQuote)
+      : Boolean(
+          order &&
+            !payment &&
+            !hasPendingManualOrderProof &&
+            (balancePayment
+              ? Number(order.balance_due || 0) > 0 &&
+                order.payment_status === "verified" &&
+                !hasPendingBalancePayment
+              : order.payment_method === "gcash" &&
+                order.payment_status !== "verified")
+        );
+
+  useEffect(() => {
+    if (
+      !autoStartReady ||
+      loading ||
+      error ||
+      preflightError ||
+      submitting ||
+      payment ||
+      autoStartAttempted.current
+    ) {
+      return;
+    }
+
+    autoStartAttempted.current = true;
+    void startPayment();
+  }, [
+    autoStartReady,
+    error,
+    loading,
+    payment,
+    preflightError,
+    startPayment,
+    submitting,
+  ]);
+
+  const refreshPaymentStatus = useCallback(async () => {
+    if (!activeOrderId || payment?.status !== "pending") return;
+    try {
+      const kind = balancePayment ? "balance" : "order";
+      const paymentResponse = await fetchPortalApi(
+        `/api/orders/${activeOrderId}/xendit-payment?payment_kind=${kind}&refresh=1`,
+        { cache: "no-store" }
+      );
+      const latestPayment = await readXenditPayment(paymentResponse);
+      if (!latestPayment) {
+        throw new Error("The Xendit checkout for this order could not be found.");
+      }
+      setPayment((current) => ({
+        ...latestPayment,
+        qrCodeDataUrl:
+          latestPayment.qrCodeDataUrl || current?.qrCodeDataUrl || null,
+      }));
+
+      const orderResponse = await fetchPortalApi(
+        `/api/orders/${activeOrderId}`,
+        { cache: "no-store" }
+      );
+      const orderData = await orderResponse.json();
+      if (!orderResponse.ok || !orderData.order) {
+        throw new Error(orderData.error || "Could not refresh the order.");
+      }
+      setOrder(orderData.order);
+      setPaymentRefreshError("");
+
+      const paymentComplete = balancePayment
+        ? Number(orderData.order.balance_due || 0) <= 0
+        : orderData.order.payment_status === "verified";
+      if (!paymentComplete || completionHandled.current) return;
+
+      completionHandled.current = true;
+      if (!balancePayment) {
         clearCart();
         try {
           sessionStorage.removeItem(GCASH_CHECKOUT_DRAFT_KEY);
-        } catch (error) {
-          console.warn("Could not clear the saved GCash checkout details.", error);
+        } catch (cause) {
+          console.warn("Could not clear the saved GCash checkout details.", cause);
         }
-        router.push(`/customer/confirm?id=${newOrderId}&table=${initialTable}`);
-      } else {
-        router.push(
-          balancePayment
-            ? `/customer/status?id=${orderId}&table=${initialTable}`
-            : `/customer/confirm?id=${orderId}&table=${initialTable}`
-        );
+        setLastOrderId(activeOrderId);
       }
-    } else {
-      setSubmitting(false);
+      router.replace(`/customer/status?id=${activeOrderId}&table=${initialTable}`);
+    } catch (cause: unknown) {
+      setPaymentRefreshError(
+        cause instanceof Error
+          ? cause.message
+          : "Could not refresh payment status."
+      );
+      throw cause;
     }
-  };
+  }, [
+    activeOrderId,
+    balancePayment,
+    clearCart,
+    initialTable,
+    payment?.status,
+    router,
+    setLastOrderId,
+  ]);
+
+  usePolling(refreshPaymentStatus, 5_000, {
+    enabled: Boolean(activeOrderId && payment?.status === "pending"),
+    immediate: false,
+    resources: ["orders", "payments"],
+  });
 
   const amountDue = order
     ? balancePayment
       ? order.balance_due || 0
       : order.total
     : checkoutQuote?.total || 0;
-  const canReturnToCheckout =
-    isNewCheckout ||
-    (!balancePayment &&
-      order?.payment_status === "pending" &&
-      !order.payment_proof_url);
+  const canReturnToCheckout = isNewCheckout;
+  const canRetryCreation =
+    Boolean(error) &&
+    !balancePayment &&
+    (Boolean(isNewCheckout && checkoutDraft && checkoutQuote) ||
+      createdOrderId > 0);
+  const canRetryPayment =
+    (Boolean(error) ||
+      payment?.status === "failed" ||
+      payment?.status === "expired") &&
+    !["pending", "creating", "succeeded", "succeeded_unapplied", "mismatched"].includes(
+      payment?.status || ""
+    ) &&
+    !hasPendingManualOrderProof &&
+    !hasPendingBalancePayment &&
+    !(balancePayment && order?.payment_status !== "verified");
   const displayOrderType =
     order?.order_type || checkoutDraft?.orderType || orderType;
 
-  if (loading) {
-    return <CustomerPageSkeleton />;
-  }
-
-  if (error && !order) {
+  if ((error || preflightError) && !order) {
     return (
       <div className="state-page">
         <div className="state-card">
@@ -395,7 +515,17 @@ export function PaymentClient({
             <Icon name="alert" />
           </div>
           <h1>{isNewCheckout ? "GCash checkout isn't ready." : "We lost that order."}</h1>
-          <p>{error}</p>
+          <p>{error || preflightError}</p>
+          {canRetryCreation && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={submitting}
+              onClick={() => void startPayment()}
+            >
+              {submitting ? "Preparing GCash checkout…" : "Try GCash again"}
+            </button>
+          )}
           <Link
             href={
               isNewCheckout
@@ -409,6 +539,10 @@ export function PaymentClient({
         </div>
       </div>
     );
+  }
+
+  if (loading) {
+    return <CustomerPageSkeleton />;
   }
 
   if (!order && !isNewCheckout) {
@@ -433,10 +567,10 @@ export function PaymentClient({
       <Link
         href={
           balancePayment
-            ? `/customer/status?id=${orderId}&table=${initialTable}`
+            ? `/customer/status?id=${activeOrderId}&table=${initialTable}`
             : canReturnToCheckout
               ? `/customer/cart?table=${initialTable}`
-              : `/customer/status?id=${orderId}&table=${initialTable}`
+              : `/customer/status?id=${activeOrderId}&table=${initialTable}`
         }
         className="back-link"
         aria-disabled={submitting}
@@ -458,200 +592,129 @@ export function PaymentClient({
               : `Pay with GCash · Table ${String(initialTable).padStart(2, "0")}`}
         </span>
         <h1>{balancePayment ? "Pay the added balance." : "Pay with GCash."}</h1>
-        <p>
-          {balancePayment
-            ? "This payment covers only the additional items added by staff. Upload its receipt for a separate review."
-            : "Scan the QR or send to our number, then upload a clear screenshot. We verify payments manually, usually within a few minutes."}
-        </p>
       </div>
 
-      {error && <div className="error-strip" style={{ marginBottom: 12 }}>{error}</div>}
-      {balancePayment &&
-        order?.balance_payments?.some((payment) => payment.status === "pending") && (
-          <div className="payment-note" style={{ marginBottom: 12 }}>
-            <Icon name="clock" />
-            <span>
-              Your additional GCash payment is waiting for staff review. You do not need
-              to submit it again.
-            </span>
-          </div>
-        )}
+      {error && (
+        <div className="error-strip" role="alert" style={{ marginBottom: 12 }}>
+          {error}
+        </div>
+      )}
+      {paymentRefreshError && (
+        <div className="error-strip" role="alert" style={{ marginBottom: 12 }}>
+          We couldn’t refresh the Xendit payment status: {paymentRefreshError}.
+          Retrying automatically.
+        </div>
+      )}
+      {(hasPendingManualOrderProof || hasPendingBalancePayment) && (
+        <div className="payment-note" style={{ marginBottom: 12 }}>
+          <Icon name="clock" />
+          <span>
+            This payment is already waiting for staff review. You do not need to
+            submit it again.
+          </span>
+        </div>
+      )}
 
       <div className="pay-layout">
         <section className="card pay-form-card">
           <div className="gcash-amount">
             <div>
-              <small>Exact amount</small>
+              <small>{balancePayment ? "Balance due" : "Amount to pay"}</small>
               <strong>{peso(amountDue)}</strong>
             </div>
-            <span className="gcash-mark">G</span>
+            <Image
+              src="/gcash-logo.png"
+              alt="GCash"
+              width={33}
+              height={33}
+              className="gcash-mark"
+            />
           </div>
 
-          <div className="qr-shell">
-            <div className="qr-frame">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={gcashQr || "/api/qr/gcash"}
-                alt="Merrylane Cafe GCash QR code"
-              />
-            </div>
-            <div className="qr-cafe">{gcashName}</div>
-            <div className="qr-number">{gcash}</div>
-            <p>
-              Open GCash → Scan QR → enter{" "}
-              {peso(amountDue)} → confirm.
-              <br />
-              Keep the receipt for your reference.
-            </p>
-            <button
-              type="button"
-              className="btn btn-soft btn-sm"
-              style={{ marginTop: 9 }}
-              onClick={copyNumber}
-              disabled={
-                balancePayment &&
-                Boolean(order?.balance_payments?.some((payment) => payment.status === "pending"))
-              }
-            >
-              <Icon name={copied ? "check" : "card"} className="icon-sm" />
-              {copied ? "Number copied" : "Copy GCash number"}
-            </button>
-          </div>
-
-          <div className="mt-3">
-            <div className="section-title">
-              <div className="section-head-left">
-                <span className="section-index">02</span>
-                <div>
-                  <h2 style={{ fontSize: 18 }}>Upload your receipt</h2>
-                  <p>JPG, PNG or screenshot · under 3 MB</p>
-                </div>
-              </div>
-            </div>
-            {proof ? (
-              <div className="upload-preview">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={proof} alt="GCash receipt preview" />
-                <div className="upload-preview-bar">
-                  <span>
-                    <Icon name="check-circle" className="icon-sm" /> {proofName || "Receipt attached"}
-                  </span>
-                  <button
-                    type="button"
-                    className="text-link"
-                    onClick={() => {
-                      setProof("");
-                      setProofName("");
-                    }}
+          {payment?.status === "pending" && (
+            <>
+              <div className="qr-shell" style={{ marginTop: 18 }}>
+                {payment.qrCodeDataUrl ? (
+                  <div className="qr-frame">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={payment.qrCodeDataUrl}
+                      alt={
+                        payment.qrIsPaymentQr
+                          ? "Xendit GCash payment QR code"
+                          : "QR code to open Xendit's secure GCash checkout"
+                      }
+                    />
+                  </div>
+                ) : (
+                  <p role="alert">Xendit did not provide a QR code for this checkout.</p>
+                )}
+                {payment.mobileUrl && (
+                  <a
+                    href={payment.mobileUrl}
+                    className="btn btn-primary btn-sm"
                   >
-                    Change
-                  </button>
-                </div>
+                    <Icon name="arrow-right" className="icon-sm" />
+                    Open GCash app
+                  </a>
+                )}
+                {payment.checkoutUrl && (
+                  <a
+                    href={payment.checkoutUrl}
+                    className="btn btn-soft btn-sm"
+                    style={{ marginTop: 8 }}
+                  >
+                    Open secure checkout
+                  </a>
+                )}
               </div>
-            ) : (
-              <label
-                className="upload-zone"
-                aria-invalid={submitAttempted && !proof}
-              >
-                <input
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp,image/gif"
-                  aria-invalid={submitAttempted && !proof}
-                  onChange={(event) => {
-                    handleFile(event.target.files?.[0] || null);
-                    event.currentTarget.value = "";
-                  }}
-                />
-                <span className="upload-icon">
-                  <Icon name="upload" size={17} />
-                </span>
-                <strong>Attach a screenshot</strong>
-                <p>Tap to choose a photo or screenshot from your device</p>
-              </label>
-            )}
-            {submitAttempted && !proof && (
-              <span className="field-error">
-                Attach your GCash receipt before submitting.
+            </>
+          )}
+          {payment && ["failed", "expired"].includes(payment.status) && (
+            <div className="error-strip" role="alert" style={{ marginTop: 18 }}>
+              This Xendit checkout {payment.status}. Start a new checkout to try again.
+            </div>
+          )}
+          {payment?.status === "succeeded" && (
+            <div className="payment-note" role="status" style={{ marginTop: 18 }}>
+              <Icon name="check-circle" />
+              <span>
+                Xendit confirmed your payment. Opening your order status…
               </span>
+            </div>
+          )}
+          {payment &&
+            ["mismatched", "succeeded_unapplied"].includes(payment.status) && (
+              <div className="error-strip" role="alert" style={{ marginTop: 18 }}>
+                Xendit reported a payment that could not be matched to this order.
+                Please ask a staff member to check it before paying again.
+              </div>
             )}
-            <div className="field mt-2">
-              <label className="label" htmlFor="reference">
-                GCash reference number <span className="muted">(required)</span>
-              </label>
-              <input
-                id="reference"
-                className="input"
-                value={reference}
-                onChange={(event) => {
-                  setReference(event.target.value);
-                }}
-                placeholder="e.g. 2048 0319 7350"
-                inputMode="numeric"
-                required
-                aria-invalid={submitAttempted && !reference.trim()}
-                aria-describedby={
-                  submitAttempted && !reference.trim()
-                    ? "reference-error"
-                    : undefined
-                }
-              />
-              {submitAttempted && !reference.trim() && (
-                <span className="field-error" id="reference-error">
-                  Enter the reference number shown on your receipt.
-                </span>
+          {(submitting || canRetryPayment) && (
+            <div className="pay-footer">
+              {submitting ? (
+                <div className="payment-preparing" role="status" aria-live="polite">
+                  <span
+                    className="spinner"
+                    style={{ width: 15, height: 15 }}
+                  />
+                  Preparing GCash checkout…
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={submitting}
+                  onClick={() => void startPayment()}
+                >
+                  {payment?.status === "failed" || payment?.status === "expired"
+                    ? "Try GCash again"
+                    : "Retry GCash checkout"}{" "}
+                  <Icon name="arrow-right" className="icon-sm" />
+                </button>
               )}
             </div>
-          </div>
-
-          <div className="payment-note">
-            <Icon name="info" />
-            <span>
-              After you submit the receipt and reference, a staff member will check
-              the payment. You&apos;ll see the queue number as soon as it&apos;s confirmed.
-            </span>
-          </div>
-
-          <div className="pay-footer">
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={
-                submitting ||
-                (balancePayment &&
-                  Boolean(order?.balance_payments?.some((payment) => payment.status === "pending")))
-              }
-              onClick={submit}
-            >
-              {submitting ? (
-                <>
-                  <span className="spinner spinner-light" style={{ width: 15, height: 15 }} />
-                  Submitting proof…
-                </>
-              ) : (
-                <>
-                  {balancePayment ? "Submit additional payment" : "Submit payment proof"}{" "}
-                  <Icon name="arrow-right" className="icon-sm" />
-                </>
-              )}
-            </button>
-            {!balancePayment && (
-              <Link
-                href={
-                  canReturnToCheckout
-                    ? `/customer/cart?table=${initialTable}`
-                    : `/customer/status?id=${orderId}&table=${initialTable}`
-                }
-                className="btn btn-soft"
-                aria-disabled={submitting}
-                onClick={(event) => {
-                  if (submitting) event.preventDefault();
-                }}
-              >
-                <Icon name="chevron-left" className="icon-sm" />
-                {canReturnToCheckout ? "Back to checkout" : "Back to order"}
-              </Link>
-            )}
-          </div>
+          )}
         </section>
 
         <aside className="card pay-side">

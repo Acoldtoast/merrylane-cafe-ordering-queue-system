@@ -1,22 +1,13 @@
-/**
- * Database adapter backed by PGlite (PostgreSQL compiled to WASM).
- *
- * The app keeps a single PGlite instance per process. PGlite is asynchronous,
- * so every statement returns a promise; callers must `await` queries.
- *
- * Database directory: data/merrylane-pglite (created on first run).
- * This system uses PGlite (PostgreSQL compiled to WASM) exclusively.
- * All data access goes through PGlite. All new integrations must use PGlite.
- */
-
+import { PostgresDatabase } from "./postgres";
 import path from "node:path";
 import { PGliteDatabase } from "./pglite";
+import type { Database } from "./types";
 
 declare global {
-  var __merrylaneDb: PGliteDatabase | undefined;
+  var __merrylaneDb: Database | undefined;
 }
 
-let _db: PGliteDatabase | null = null;
+let _db: Database | null = null;
 
 export function getDbPath(): string {
   const override = process.env.MERRYLANE_DB_DIR;
@@ -26,13 +17,27 @@ export function getDbPath(): string {
   return path.join(process.cwd(), "data", "merrylane-pglite");
 }
 
-export function getDb(): PGliteDatabase {
+export function isUsingSupabaseDatabase(): boolean {
+  return Boolean(process.env.DATABASE_URL?.trim());
+}
+
+export function getDb(): Database {
   if (typeof globalThis !== "undefined" && globalThis.__merrylaneDb) {
     return globalThis.__merrylaneDb;
   }
   if (_db) return _db;
 
-  _db = PGliteDatabase.open(getDbPath());
+  const connectionString = process.env.DATABASE_URL?.trim();
+  if (connectionString) {
+    _db = PostgresDatabase.open(connectionString);
+  } else {
+    if (process.env.VERCEL === "1") {
+      throw new Error(
+        "DATABASE_URL is required on Vercel. Configure the Supabase PostgreSQL connection string in the deployment environment."
+      );
+    }
+    _db = PGliteDatabase.open(getDbPath());
+  }
 
   if (typeof globalThis !== "undefined") {
     globalThis.__merrylaneDb = _db;
@@ -51,4 +56,5 @@ export async function closeDb(): Promise<void> {
   }
 }
 
+export type { Database, DatabaseStatement, RunResult } from "./types";
 export type { PGliteDatabase };

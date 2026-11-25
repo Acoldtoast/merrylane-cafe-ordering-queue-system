@@ -7,14 +7,19 @@ import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
 } from "react";
 import type { CartExtra, CartItem } from "@/lib/types";
+import { limitSavedCart, remainingCustomerQuantity } from "@/lib/customerQuantity";
 
 const CART_KEY = "merrylane.cart.v2";
 const TABLE_KEY = "merrylane.table";
 const ORDER_TYPE_KEY = "merrylane.order-type";
 const LAST_ORDER_KEY = "merrylane.last-order";
 const LEGACY_ORDER_KEY = "merrylane.legacy-order";
+
+const DEFAULT_TABLE = 7;
+const DEFAULT_ORDER_TYPE = "dine_in" as const;
 
 interface AddItemInput {
   menuItemId: number;
@@ -50,6 +55,23 @@ interface CustomerContextValue {
   ready: boolean;
 }
 
+interface RestoredState {
+  table: number;
+  orderType: "dine_in" | "take_out";
+  items: CartItem[];
+  lastOrderId: number | null;
+  legacyOrderId: number | null;
+}
+
+/** What the server renders, and what the first client render must match. */
+const EMPTY_RESTORED: RestoredState = {
+  table: DEFAULT_TABLE,
+  orderType: DEFAULT_ORDER_TYPE,
+  items: [],
+  lastOrderId: null,
+  legacyOrderId: null,
+};
+
 const CustomerContext = createContext<CustomerContextValue | null>(null);
 
 function itemKey(input: AddItemInput) {
@@ -64,58 +86,111 @@ function itemKey(input: AddItemInput) {
   ].join(":");
 }
 
-export function CustomerProvider({ children }: { children: React.ReactNode }) {
-  const [table, setTableState] = useState(7);
-  const [orderType, setOrderTypeState] = useState<"dine_in" | "take_out">("dine_in");
-  const [items, setItems] = useState<CartItem[]>([]);
-  const [lastOrderId, setLastOrderIdState] = useState<number | null>(null);
-  const [legacyOrderId, setLegacyOrderId] = useState<number | null>(null);
-  const [ready, setReady] = useState(false);
+function quantityElsewhere(items: CartItem[], menuItemId: number, key?: string) {
+  return items.reduce((sum, item) =>
+    item.menuItemId === menuItemId && item.key !== key ? sum + item.quantity : sum, 0);
+}
 
-  useEffect(() => {
-    try {
-      // A table number in the URL always wins — it comes from the table's QR
-      // code, so it must never be overridden by a previously visited table.
-      const urlTable = Number(
-        new URLSearchParams(window.location.search).get("table") || 0
-      );
-      const storedTable = Number(localStorage.getItem(TABLE_KEY) || 0);
-      if (urlTable > 0) {
-        const normalized = Math.max(1, Math.floor(urlTable));
-        setTableState(normalized);
-        localStorage.setItem(TABLE_KEY, String(normalized));
-      } else if (storedTable > 0) {
-        setTableState(storedTable);
-      }
+function storedPositiveNumber(key: string): number {
+  const value = Number(localStorage.getItem(key) || 0);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
 
-      const storedType = localStorage.getItem(ORDER_TYPE_KEY);
-      if (storedType === "take_out" || storedType === "dine_in") {
-        setOrderTypeState(storedType);
-      }
-
-      const storedCart = localStorage.getItem(CART_KEY);
-      if (storedCart) {
-        const parsed = JSON.parse(storedCart);
-        if (Array.isArray(parsed)) setItems(parsed);
-      }
-
-      const storedOrder = Number(localStorage.getItem(LAST_ORDER_KEY) || 0);
-      if (storedOrder > 0) setLastOrderIdState(storedOrder);
-
-      const storedLegacyOrder = Number(
-        localStorage.getItem(LEGACY_ORDER_KEY) || 0
-      );
-      if (storedLegacyOrder > 0) {
-        setLegacyOrderId(storedLegacyOrder);
-      } else if (storedOrder > 0) {
-        setLegacyOrderId(storedOrder);
-        localStorage.setItem(LEGACY_ORDER_KEY, String(storedOrder));
-      }
-    } catch {
-      // Ignore malformed local storage.
+/**
+ * Read the visitor's saved state once per mount. A table number in the URL wins
+ * because it comes from that table's QR code, so a previously visited table can
+ * never override it.
+ */
+function readRestoredState(): RestoredState {
+  try {
+    const urlTable = Number(
+      new URLSearchParams(window.location.search).get("table") || 0
+    );
+    const storedTable = storedPositiveNumber(TABLE_KEY);
+    let table = DEFAULT_TABLE;
+    if (urlTable > 0) {
+      table = Math.max(1, Math.floor(urlTable));
+      localStorage.setItem(TABLE_KEY, String(table));
+    } else if (storedTable > 0) {
+      table = storedTable;
     }
-    setReady(true);
-  }, []);
+
+    const storedType = localStorage.getItem(ORDER_TYPE_KEY);
+    const orderType =
+      storedType === "take_out" || storedType === "dine_in"
+        ? storedType
+        : DEFAULT_ORDER_TYPE;
+
+    let items: CartItem[] = [];
+    const storedCart = localStorage.getItem(CART_KEY);
+    if (storedCart) {
+      const parsed = JSON.parse(storedCart);
+      if (Array.isArray(parsed)) items = limitSavedCart<CartItem>(parsed);
+    }
+
+    const lastOrderId = storedPositiveNumber(LAST_ORDER_KEY) || null;
+    const storedLegacyOrder = storedPositiveNumber(LEGACY_ORDER_KEY);
+    if (!storedLegacyOrder && lastOrderId) {
+      localStorage.setItem(LEGACY_ORDER_KEY, String(lastOrderId));
+    }
+
+    return {
+      table,
+      orderType,
+      items,
+      lastOrderId,
+      legacyOrderId: storedLegacyOrder || lastOrderId,
+    };
+  } catch {
+    // Ignore malformed or unavailable local storage.
+    return EMPTY_RESTORED;
+  }
+}
+
+const subscribeToHydration = () => () => {};
+
+/**
+ * False while the server HTML is still hydrating, true afterwards. Keeping the
+ * server snapshot false makes the first client render identical to the server
+ * markup; the saved cart arrives on the render right after hydration, so no
+ * effect has to copy it into state.
+ */
+function useHydrated(): boolean {
+  return useSyncExternalStore(
+    subscribeToHydration,
+    () => true,
+    () => false
+  );
+}
+
+export function CustomerProvider({ children }: { children: React.ReactNode }) {
+  /*
+   * Storage is only read once the server markup has hydrated. The server
+   * snapshot stays false so the first client render still matches it; the saved
+   * state arrives on the render right after, without an effect copying it in.
+   */
+  const ready = useHydrated();
+  const restored = useMemo(
+    () => (ready ? readRestoredState() : EMPTY_RESTORED),
+    [ready]
+  );
+
+  /* What the visitor changed since then, layered over the saved state. */
+  const [changes, setChanges] = useState<Partial<RestoredState>>({});
+  const { table, orderType, items, lastOrderId, legacyOrderId } = {
+    ...restored,
+    ...changes,
+  };
+
+  const setCart = useCallback(
+    (update: (current: CartItem[]) => CartItem[]) => {
+      setChanges((current) => ({
+        ...current,
+        items: update(current.items ?? restored.items),
+      }));
+    },
+    [restored.items]
+  );
 
   useEffect(() => {
     if (!ready) return;
@@ -128,21 +203,21 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
 
   const setTable = useCallback((next: number) => {
     const normalized = Math.max(1, Math.floor(next) || 1);
-    setTableState(normalized);
+    setChanges((current) => ({ ...current, table: normalized }));
     try {
       localStorage.setItem(TABLE_KEY, String(normalized));
     } catch {}
   }, []);
 
   const setOrderType = useCallback((next: "dine_in" | "take_out") => {
-    setOrderTypeState(next);
+    setChanges((current) => ({ ...current, orderType: next }));
     try {
       localStorage.setItem(ORDER_TYPE_KEY, next);
     } catch {}
   }, []);
 
   const setLastOrderId = useCallback((id: number | null) => {
-    setLastOrderIdState(id);
+    setChanges((current) => ({ ...current, lastOrderId: id }));
     try {
       if (id) localStorage.setItem(LAST_ORDER_KEY, String(id));
       else localStorage.removeItem(LAST_ORDER_KEY);
@@ -158,18 +233,21 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
       Number(input.variant?.priceModifier || 0) +
       input.extras.reduce((sum, extra) => sum + Number(extra.price_modifier), 0);
 
-    setItems((current) => {
+    setCart((current) => {
       const existing = current.find((item) => item.key === key);
+      const stockLimit = input.stockLimit === undefined ? existing?.stockLimit : limit;
+      const quantity = Math.min(
+        Math.max(1, input.quantity),
+        remainingCustomerQuantity(stockLimit, quantityElsewhere(current, input.menuItemId))
+      );
+      if (!quantity) return current;
       if (existing) {
-        const merged = existing.quantity + Math.max(1, input.quantity);
-        const nextQuantity =
-          limit === null ? merged : Math.min(merged, Math.max(1, limit));
         return current.map((item) =>
           item.key === key
             ? {
                 ...item,
-                quantity: nextQuantity,
-                stockLimit: limit ?? item.stockLimit ?? null,
+                quantity: existing.quantity + quantity,
+                stockLimit: stockLimit ?? null,
               }
             : item
         );
@@ -187,45 +265,43 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
           extras: input.extras,
           sugarLevel: input.sugarLevel || null,
           note: input.note?.trim() || null,
-          quantity: Math.max(1, input.quantity),
+          quantity,
           unitPrice,
           stockLimit: limit,
         },
       ];
     });
-  }, []);
+  }, [setCart]);
 
   const setQuantity = useCallback((key: string, quantity: number) => {
-    setItems((current) =>
+    setCart((current) =>
       quantity <= 0
         ? current.filter((item) => item.key !== key)
         : current.map((item) => {
             if (item.key !== key) return item;
-            const requested = Math.max(1, quantity);
             return {
               ...item,
-              quantity:
-                item.stockLimit === null || item.stockLimit === undefined
-                  ? requested
-                  : Math.min(requested, Math.max(1, item.stockLimit)),
+              quantity: quantity <= item.quantity ? quantity : Math.max(item.quantity, Math.min(
+                quantity, remainingCustomerQuantity(item.stockLimit, quantityElsewhere(current, item.menuItemId, key))
+              )),
             };
           })
     );
-  }, []);
+  }, [setCart]);
 
   const setStockLimits = useCallback((limits: Record<number, number | null>) => {
-    setItems((current) =>
+    setCart((current) =>
       current.map((item) =>
         Object.prototype.hasOwnProperty.call(limits, item.menuItemId)
           ? { ...item, stockLimit: limits[item.menuItemId] }
           : item
       )
     );
-  }, []);
+  }, [setCart]);
 
   const updateCartItem = useCallback(
     (key: string, input: AddItemInput) => {
-      setItems((current) => {
+      setCart((current) => {
         const item = current.find((entry) => entry.key === key);
         if (!item) return current;
 
@@ -242,6 +318,11 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
           input.stockLimit === undefined
             ? item.stockLimit ?? null
             : input.stockLimit;
+        const quantity = Math.min(
+          Math.max(1, input.quantity),
+          remainingCustomerQuantity(stockLimit, quantityElsewhere(current, input.menuItemId, key))
+        );
+        if (!quantity) return current;
         const updatedItem: CartItem = {
           ...item,
           key: nextKey,
@@ -254,10 +335,7 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
           extras: input.extras,
           sugarLevel: input.sugarLevel || null,
           note: input.note?.trim() || null,
-          quantity:
-            stockLimit === null
-              ? Math.max(1, input.quantity)
-              : Math.min(Math.max(1, input.quantity), Math.max(1, stockLimit)),
+          quantity,
           unitPrice,
           stockLimit,
         };
@@ -272,10 +350,7 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
               const merged = entry.quantity + updatedItem.quantity;
               return {
                 ...entry,
-                quantity:
-                  stockLimit === null
-                    ? merged
-                    : Math.min(merged, Math.max(1, stockLimit)),
+                quantity: merged,
                 stockLimit,
               };
             });
@@ -285,14 +360,17 @@ export function CustomerProvider({ children }: { children: React.ReactNode }) {
         );
       });
     },
-    []
+    [setCart]
   );
 
   const removeItem = useCallback((key: string) => {
-    setItems((current) => current.filter((item) => item.key !== key));
-  }, []);
+    setCart((current) => current.filter((item) => item.key !== key));
+  }, [setCart]);
 
-  const clearCart = useCallback(() => setItems([]), []);
+  const clearCart = useCallback(() => {
+    setCart(() => []);
+    setOrderType("dine_in");
+  }, [setCart, setOrderType]);
 
   const count = useMemo(
     () => items.reduce((sum, item) => sum + item.quantity, 0),

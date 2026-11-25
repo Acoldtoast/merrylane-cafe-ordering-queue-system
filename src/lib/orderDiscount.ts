@@ -19,6 +19,10 @@ export interface DiscountableOrderItem {
   category_name: string;
 }
 
+export function normalizeDiscountId(idNumber: string): string {
+  return idNumber.trim().normalize("NFKC").toLowerCase();
+}
+
 const DISCOUNT_RATE = 0.2;
 const roundMoney = (amount: number) => Math.round(amount * 100) / 100;
 

@@ -134,7 +134,8 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     .prepare(
       `SELECT COUNT(*) AS order_count,
               COALESCE(SUM(total), 0) AS revenue,
-              COALESCE(AVG(total), 0) AS average_order_value
+              COALESCE(AVG(total), 0) AS average_order_value,
+              COUNT(*) FILTER (WHERE discount_amount > 0) AS discounted_orders
        FROM orders o
        WHERE o.status IN (${SALES_STATUSES}) AND o.ready_at IS NOT NULL
          AND o.payment_status = 'verified'
@@ -144,6 +145,7 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     order_count: number;
     revenue: number;
     average_order_value: number;
+    discounted_orders: number;
   };
   const previous = await db
     .prepare(
@@ -386,8 +388,9 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
               ELSE MAX(0, CAST((julianday('now','localtime') - julianday(o.created_at)) * 1440 AS INTEGER))
             END AS elapsed_minutes
      FROM orders o
-     WHERE o.status IN ('pending','payment_pending','confirmed','preparing')
-       AND o.payment_status != 'rejected'
+     WHERE o.status IN ('pending','payment_pending')
+       AND o.payment_status = 'pending'
+       AND (o.payment_method <> 'gcash' OR o.payment_proof_url IS NOT NULL)
        AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
      ORDER BY o.created_at ASC LIMIT 50`
   )
@@ -402,6 +405,32 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
   status: string;
   elapsed_minutes: number;
   }[];
+  try {
+    const { syncXenditPaymentStatus } = await import("@/lib/xenditPayments");
+    const isProduction = process.env.NODE_ENV === "production";
+    const secretKey = isProduction ? process.env.XENDIT_SECRET_KEY : process.env.XENDIT_TEST_SECRET_KEY;
+    if (!secretKey) throw new Error("Xendit secret key is not configured.");
+    const pendingXenditOrders = await db
+      .prepare(
+        `SELECT DISTINCT o.id
+         FROM orders o
+         JOIN xendit_payment_requests x ON x.order_id = o.id
+         WHERE o.payment_method = 'gcash' AND o.payment_status = 'pending'
+           AND x.status = 'pending' AND x.payment_request_id IS NOT NULL
+         LIMIT 20`
+      )
+      .all() as { id: number }[];
+    for (const row of pendingXenditOrders) {
+      try {
+        await syncXenditPaymentStatus(row.id, "order", secretKey);
+      } catch {
+        // Keep the analytics page usable if Xendit is unavailable.
+      }
+    }
+  } catch {
+    // Xendit is not configured; leave existing payment states untouched.
+  }
+
   const pendingGcash = await db
   .prepare(
     `SELECT o.id, o.total, o.created_at,
@@ -411,7 +440,8 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
               THEN 1 ELSE 0 END AS inline_proof,
             MAX(0, CAST((julianday('now','localtime') - julianday(o.created_at)) * 1440 AS INTEGER)) AS elapsed_minutes
      FROM orders o
-     WHERE o.payment_method = 'gcash' AND o.payment_status = 'pending'
+      WHERE o.payment_method = 'gcash' AND o.payment_status = 'pending'
+        AND o.payment_proof_url IS NOT NULL
        AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?${orderFilters.sql}
      ORDER BY o.created_at ASC LIMIT 50`
   )
@@ -469,8 +499,10 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
             stock_status, stock_note
      FROM menu_items
      WHERE is_active = 1 AND stock_tracking_enabled = 1
-       AND stock_status IN ('out','low')
-     ORDER BY CASE stock_status WHEN 'out' THEN 0 ELSE 1 END, stock_count, name`
+       AND stock_count IS NOT NULL
+     ORDER BY CASE WHEN stock_status = 'out' OR stock_count = 0 THEN 0
+                  WHEN low_stock_threshold > 0 AND stock_count <= low_stock_threshold THEN 1
+                  ELSE 2 END, stock_count, name`
   )
   .all() as {
   menu_item_id: number;
@@ -622,8 +654,8 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
     classification: !hasSales
       ? "No sales"
       : popular
-        ? aboveAverageRevenue ? "Star" : "Plowhorse"
-        : aboveAverageRevenue ? "Puzzle" : "Dog",
+        ? aboveAverageRevenue ? "Star" : "Workhorse"
+        : aboveAverageRevenue ? "Opportunity" : "Underperformer",
   };
   });
   const selectedOrderCount = Number(summary.order_count);
@@ -661,7 +693,7 @@ async function reportFor(filters: ReportFilters, includePaymentProofs = true) {
       cancelled_orders: orders.filter((order) => order.status === "cancelled")
         .length,
       average_wait_minutes: Number(waitStats.average_wait_minutes),
-      pending_payment_verifications: Number(paymentVerificationCounts.pending || 0),
+      discounted_orders: Number(summary.discounted_orders || 0),
       average_rating: Number(averageRating.average_rating),
       review_count: Number(averageRating.review_count),
       items_out_of_stock: Number(itemsOutOfStock.count),
@@ -799,6 +831,8 @@ export async function GET(request: Request) {
   try {
     const auth = await requireAdmin(request);
     if (auth.error) return auth.error;
+
+    await (await import("@/lib/xenditPayments")).ensureXenditPaymentTable();
 
     const params = new URL(request.url).searchParams;
     const start = params.get("from") || undefined;

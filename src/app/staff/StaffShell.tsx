@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { Suspense, lazy, useEffect } from "react";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { PortalShell } from "@/components/PortalShell";
 import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { staffNav } from "@/components/portalNav";
@@ -36,6 +36,15 @@ const StaffRequestsRoute = lazy(() =>
     default: StaffRequestsClient,
   }))
 );
+const StaffProfileRoute = lazy(() =>
+  import("./profile/StaffProfileClient").then(({ StaffProfileClient }) => ({ default: StaffProfileClient }))
+);
+const StaffFaceCheck = lazy(() =>
+  import("./StaffFaceCheck").then(({ StaffFaceCheck }) => ({ default: StaffFaceCheck }))
+);
+const StaffPasswordChange = lazy(() =>
+  import("./StaffPasswordChange").then(({ StaffPasswordChange }) => ({ default: StaffPasswordChange }))
+);
 
 function manilaDate() {
   const parts = new Intl.DateTimeFormat("en", {
@@ -51,9 +60,10 @@ function manilaDate() {
 }
 
 function metaFor(pathname: string) {
+  if (pathname.startsWith("/staff/profile")) return { title: "My profile.", contextLabel: "Service · Account", contextTitle: "My profile" };
   if (pathname === "/staff") {
     return {
-      title: "Every order, in its place.",
+      title: "Order queue.",
       contextLabel: "Service · Order board",
       contextTitle: "Live order queue",
     };
@@ -81,7 +91,7 @@ function metaFor(pathname: string) {
   }
   if (pathname.startsWith("/staff/sales")) {
     return {
-      title: "Sales.",
+      title: "",
       contextLabel: "Service · Sales",
       contextTitle: "Sales",
     };
@@ -103,6 +113,31 @@ function metaFor(pathname: string) {
 export function StaffShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const meta = metaFor(pathname);
+  const [faceStatus, setFaceStatus] = useState<"loading" | "allowed" | "required" | "unenrolled" | "password" | "error">("loading");
+  const refreshFaceStatus = useCallback(async () => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await fetch("/api/auth/face-check", { cache: "no-store" });
+        const data = await response.json();
+        if (response.status === 401) { window.location.assign(`/login?next=/staff${data.reason === "face_reset" ? "&reason=face_reset" : ""}`); return; }
+        if (!response.ok || !data.success) throw new Error("Could not check verification status.");
+        setFaceStatus(data.password_change_required ? "password" : data.required ? data.enrolled ? "required" : "unenrolled" : "allowed");
+        return;
+      } catch {
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 500));
+        else setFaceStatus("error");
+      }
+    }
+  }, []);
+  useEffect(() => {
+    void (async () => {
+      await refreshFaceStatus();
+    })();
+    const onRequired = () => { void refreshFaceStatus(); };
+    window.addEventListener("staff-face-required", onRequired);
+    const timer = window.setInterval(() => { void refreshFaceStatus(); }, 10000);
+    return () => { window.removeEventListener("staff-face-required", onRequired); window.clearInterval(timer); };
+  }, [refreshFaceStatus]);
   useEffect(() => {
     const title = pathname === "/staff"
       ? "Order board"
@@ -133,8 +168,16 @@ export function StaffShell({ children }: { children: React.ReactNode }) {
     routeContent = <StaffSalesRoute />;
   } else if (pathname.startsWith("/staff/stock")) {
     routeContent = <StaffStockRoute />;
+  } else if (pathname.startsWith("/staff/profile")) {
+    routeContent = <StaffProfileRoute />;
   }
 
+  if (faceStatus === "loading") return <PortalPageSkeleton area="staff" />;
+  if (faceStatus === "error") return <main className="card"><p role="alert">Could not check face verification status.</p><button type="button" className="btn btn-primary" onClick={() => { void refreshFaceStatus(); }}>Try again</button></main>;
+  if (faceStatus === "password") return <main className="card" style={{ maxWidth: 560, margin: "3rem auto", padding: "1.5rem" }}><Suspense fallback={<PortalPageSkeleton area="staff" />}><StaffPasswordChange onChanged={refreshFaceStatus} /></Suspense></main>;
+  if (faceStatus === "required" || faceStatus === "unenrolled") {
+    return <Suspense fallback={<PortalPageSkeleton area="staff" />}><StaffFaceCheck enrolled={faceStatus === "required"} onVerified={refreshFaceStatus} /></Suspense>;
+  }
   return (
     <PortalShell
       area="staff"

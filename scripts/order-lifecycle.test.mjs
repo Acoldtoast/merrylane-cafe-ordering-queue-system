@@ -1,12 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  needsPaymentReview,
   preparationEtaHasPassed,
   preparationMinutesElapsed,
   preparationReminderLevel,
   readyMinutesElapsed,
   readyReminderLevel,
+  staffCanCompleteServedOrder,
 } from "../src/lib/orderLifecycle.ts";
+
+test("only submitted GCash receipts and counter orders need payment review", () => {
+  const gcash = {
+    status: "payment_pending",
+    payment_status: "pending",
+    payment_method: "gcash",
+    payment_proof_url: null,
+  };
+  assert.equal(needsPaymentReview(gcash), false);
+  assert.equal(needsPaymentReview({ ...gcash, payment_proof_url: "receipt" }), true);
+  assert.equal(needsPaymentReview({ ...gcash, payment_status: "verified" }), false);
+  assert.equal(needsPaymentReview({ ...gcash, payment_method: "counter", status: "pending" }), true);
+});
 
 test("preparation duration stays anchored to the preparing timestamp", () => {
   const order = {
@@ -20,6 +35,15 @@ test("preparation duration stays anchored to the preparing timestamp", () => {
     preparationMinutesElapsed(order, Date.parse("2026-11-15T00:00:00.000Z")),
     3690
   );
+});
+
+test("staff completion is available only after one hour for paid served orders", () => {
+  const order = { status: "ready", payment_status: "verified", ready_at: "2026-11-15 08:00:00" };
+  assert.equal(staffCanCompleteServedOrder(order, Date.parse("2026-11-15T00:59:59Z")), false);
+  assert.equal(staffCanCompleteServedOrder(order, Date.parse("2026-11-15T01:00:00Z")), true);
+  assert.equal(staffCanCompleteServedOrder({ ...order, payment_status: "pending" }, Date.parse("2026-11-15T02:00:00Z")), false);
+  assert.equal(staffCanCompleteServedOrder({ ...order, ready_at: null }, Date.parse("2026-11-15T02:00:00Z")), false);
+  assert.equal(staffCanCompleteServedOrder({ ...order, status: "completed" }, Date.parse("2026-11-15T02:00:00Z")), false);
 });
 
 test("preparation duration falls back for older orders without preparing_at", () => {

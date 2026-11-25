@@ -1,5 +1,5 @@
 import { createHash, randomInt } from "node:crypto";
-import { getDb, type PGliteDatabase } from "./db";
+import { getDb, type Database } from "./db";
 import { ActivityModel, hashPassword, verifyPassword } from "./models";
 
 const RECOVERY_CODE_TTL_MS = 5 * 60 * 1000;
@@ -40,7 +40,17 @@ const AUTH_SECURITY_TABLE = `
   ALTER TABLE login_device_security
     ADD COLUMN IF NOT EXISTS failed_attempts_in_stage INTEGER NOT NULL DEFAULT 0;
   CREATE INDEX IF NOT EXISTS login_device_security_last_failed_at
-    ON login_device_security(last_failed_at)
+    ON login_device_security(last_failed_at);
+  CREATE TABLE IF NOT EXISTS username_login_security (
+    username TEXT PRIMARY KEY,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    failed_attempts_in_stage INTEGER NOT NULL DEFAULT 0,
+    cooldown_minutes INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    last_failed_at TEXT NOT NULL
+  );
+  ALTER TABLE username_login_security
+    ADD COLUMN IF NOT EXISTS failed_attempts_in_stage INTEGER NOT NULL DEFAULT 0;
 `;
 
 interface AdminAuthSecurityRow {
@@ -82,7 +92,7 @@ export interface PasswordResetOptions {
   now?: Date;
 }
 
-const readyByDatabase = new WeakMap<PGliteDatabase, Promise<void>>();
+const readyByDatabase = new WeakMap<Database, Promise<void>>();
 
 async function ensureTable(): Promise<void> {
   const db = getDb();
@@ -98,7 +108,7 @@ async function ensureTable(): Promise<void> {
 }
 
 async function ensureRow(
-  db: PGliteDatabase,
+  db: Database,
   userId: number
 ): Promise<AdminAuthSecurityRow> {
   await db
@@ -213,7 +223,7 @@ export function isPastManilaShopClose(
 }
 
 async function ensureDeviceRow(
-  db: PGliteDatabase,
+  db: Database,
   deviceId: string,
   now: Date
 ): Promise<DeviceAuthSecurityRow> {
@@ -235,7 +245,7 @@ async function ensureDeviceRow(
 }
 
 async function removeExpiredDeviceRows(
-  db: PGliteDatabase,
+  db: Database,
   now: Date
 ): Promise<void> {
   const cutoff = new Date(now.getTime() - DEVICE_SECURITY_RETENTION_MS);
@@ -245,7 +255,7 @@ async function removeExpiredDeviceRows(
 }
 
 async function resetExpiredNextDayLock(
-  db: PGliteDatabase,
+  db: Database,
   row: DeviceAuthSecurityRow,
   now: Date
 ): Promise<DeviceAuthSecurityRow> {
@@ -445,6 +455,172 @@ export async function clearDeviceLoginFailures(deviceId: string): Promise<void> 
     .run(hashDeviceId(deviceId));
 }
 
+interface UsernameLoginSecurityRow {
+  username: string;
+  failed_attempts: number;
+  failed_attempts_in_stage: number;
+  cooldown_minutes: number;
+  locked_until: string | null;
+  last_failed_at: string;
+}
+
+async function ensureUsernameRow(
+  db: Database,
+  username: string,
+  now: Date
+): Promise<UsernameLoginSecurityRow> {
+  await db
+    .prepare(
+      `INSERT INTO username_login_security (username, last_failed_at)
+       VALUES (?, ?)
+       ON CONFLICT (username) DO NOTHING`
+    )
+    .run(username, now.toISOString());
+  let row = (await db
+    .prepare(
+      `SELECT * FROM username_login_security
+       WHERE username = ?`
+    )
+    .get(username)) as unknown as UsernameLoginSecurityRow;
+  const lockedUntil = row.locked_until ? new Date(row.locked_until).getTime() : NaN;
+  const lastFailure = new Date(row.last_failed_at);
+  if (Number(row.cooldown_minutes) >= MAX_COOLDOWN_MINUTES &&
+      Number.isFinite(lockedUntil) &&
+      lockedUntil === getNextManilaMidnight(lastFailure).getTime() &&
+      lockedUntil <= now.getTime()) {
+    await db.prepare(
+      `UPDATE username_login_security
+       SET failed_attempts = 0, failed_attempts_in_stage = 0,
+           cooldown_minutes = 0, locked_until = NULL
+       WHERE username = ? AND locked_until = ?`
+    ).run(username, row.locked_until);
+    row = (await db.prepare(
+      "SELECT * FROM username_login_security WHERE username = ?"
+    ).get(username)) as unknown as UsernameLoginSecurityRow;
+  }
+  return row;
+}
+
+export async function getUsernameLoginRestriction(
+  username: string,
+  now = new Date()
+): Promise<DeviceLoginRestriction> {
+  await ensureTable();
+  const db = getDb();
+  const row = await ensureUsernameRow(db, username, now);
+  const cooldown = getCooldown(row, now);
+  if (cooldown) return cooldown;
+  return { status: "allowed" as const, failedAttempts: Number(row.failed_attempts) };
+}
+
+export async function recordUsernameLoginFailure(
+  username: string,
+  now = new Date()
+): Promise<DeviceLoginRestriction> {
+  await ensureTable();
+  const db = getDb();
+  let cooldownStarted: number | null = null;
+  const result = await db.transaction(async (transaction) => {
+    const row = await ensureUsernameRow(transaction, username, now);
+    const failedAttempts = Number(row.failed_attempts);
+    const failedAttemptsInStage = Number(row.failed_attempts_in_stage);
+    const currentCooldown = Number(row.cooldown_minutes);
+    const cooldown = getCooldown(row, now);
+    if (cooldown) return cooldown;
+
+    const nextFailedAttempts = failedAttempts + 1;
+    const isInitialStreak = currentCooldown === 0;
+    const shouldAllowFailure = isInitialStreak
+      ? nextFailedAttempts < LOGIN_FAILURES_BEFORE_COOLDOWN
+      : failedAttemptsInStage + 1 < LOGIN_FAILURES_PER_COOLDOWN;
+    if (shouldAllowFailure) {
+      await transaction
+        .prepare(
+          `UPDATE username_login_security
+           SET failed_attempts = ?, failed_attempts_in_stage = ?,
+               last_failed_at = ?
+           WHERE username = ?`
+        )
+        .run(
+          nextFailedAttempts,
+          isInitialStreak ? 0 : failedAttemptsInStage + 1,
+          now.toISOString(),
+          username
+        );
+      return { status: "allowed" as const, failedAttempts: nextFailedAttempts };
+    }
+
+    if (currentCooldown >= MAX_COOLDOWN_MINUTES) {
+      const lockedUntil = getNextManilaMidnight(now);
+      cooldownStarted = MAX_COOLDOWN_MINUTES;
+      await transaction
+        .prepare(
+          `UPDATE username_login_security
+           SET failed_attempts = ?, cooldown_minutes = ?,
+               failed_attempts_in_stage = 0, locked_until = ?,
+               last_failed_at = ?
+           WHERE username = ?`
+        )
+        .run(
+          nextFailedAttempts,
+          MAX_COOLDOWN_MINUTES,
+          lockedUntil.toISOString(),
+          now.toISOString(),
+          username
+        );
+      return {
+        status: "cooldown" as const,
+        failedAttempts: nextFailedAttempts,
+        retryAfterSeconds: Math.max(
+          1,
+          Math.ceil((lockedUntil.getTime() - now.getTime()) / 1000)
+        ),
+        untilNextDay: true as const,
+      };
+    }
+
+    const nextCooldown = COOLDOWN_MINUTES.find(
+      (minutes) => minutes > currentCooldown
+    );
+    cooldownStarted = nextCooldown ?? MAX_COOLDOWN_MINUTES;
+    const lockedUntil = new Date(
+      now.getTime() + cooldownStarted * 60 * 1000
+    ).toISOString();
+    await transaction
+      .prepare(
+        `UPDATE username_login_security
+         SET failed_attempts = ?, cooldown_minutes = ?,
+             failed_attempts_in_stage = 0, locked_until = ?,
+             last_failed_at = ?
+         WHERE username = ?`
+      )
+      .run(
+        nextFailedAttempts,
+        cooldownStarted,
+        lockedUntil,
+        now.toISOString(),
+        username
+      );
+    return {
+      status: "cooldown" as const,
+      failedAttempts: nextFailedAttempts,
+      retryAfterSeconds: cooldownStarted * 60,
+    };
+  });
+
+  if (cooldownStarted !== null) {
+    await logDeviceCooldown(result.failedAttempts, cooldownStarted);
+  }
+  return result;
+}
+
+export async function clearUsernameLoginFailures(username: string): Promise<void> {
+  await ensureTable();
+  await getDb()
+    .prepare("DELETE FROM username_login_security WHERE username = ?")
+    .run(username);
+}
+
 export async function clearUserAuthSecurity(userId: number): Promise<void> {
   await ensureTable();
   await getDb()
@@ -544,7 +720,7 @@ type RecoveryCodeVerification =
   | { status: "invalid_code" };
 
 async function verifyRecoveryCode(
-  transaction: PGliteDatabase,
+  transaction: Database,
   userId: number,
   code: string,
   now: Date

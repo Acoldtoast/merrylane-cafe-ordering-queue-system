@@ -92,7 +92,9 @@ export function AdminActivityClient() {
   );
 
   useEffect(() => {
-    void fetchPage(1, false);
+    void (async () => {
+      await fetchPage(1, false);
+    })();
   }, [fetchPage]);
 
   const refreshLatest = useCallback(() => {

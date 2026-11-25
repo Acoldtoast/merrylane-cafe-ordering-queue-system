@@ -6,6 +6,17 @@ export const STAFF_BOARD_ACTIVE_STATUSES = [
   "ready",
 ] as const satisfies readonly OrderStatus[];
 
+export function needsPaymentReview(
+  order: Pick<Order, "payment_status" | "status" | "payment_method" | "payment_proof_url">
+): boolean {
+  if (order.payment_status !== "pending") return false;
+  if (order.payment_method === "gcash") {
+    return order.status === "payment_pending" && Boolean(order.payment_proof_url);
+  }
+  return ["counter", "cash"].includes(order.payment_method) &&
+    ["pending", "payment_pending"].includes(order.status);
+}
+
 function timestamp(value: string | null | undefined): number | null {
   if (!value) return null;
   const normalized = value.includes("T") ? value : value.replace(" ", "T");
@@ -79,4 +90,17 @@ export function readyReminderLevel(
   if (elapsed >= 120) return 3;
   if (elapsed >= 60) return 2;
   return 1;
+}
+
+export function staffCanCompleteServedOrder(
+  order: Pick<Order, "status" | "payment_status" | "ready_at">,
+  now = Date.now()
+): boolean {
+  if (order.status !== "ready" || order.payment_status !== "verified" || !order.ready_at) return false;
+  const value = order.ready_at.trim();
+  const localManila = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(" ", "T")}+08:00`
+    : value;
+  const servedAt = Date.parse(localManila);
+  return Number.isFinite(servedAt) && now - servedAt >= 60 * 60 * 1000;
 }

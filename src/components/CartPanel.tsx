@@ -7,6 +7,8 @@ import { CoffeeArt, artKindForCategory } from "./CoffeeArt";
 import { Icon } from "./Icons";
 import { useCustomer } from "./CustomerProvider";
 import { peso } from "@/lib/format";
+import { CUSTOMER_ITEM_LIMIT, CUSTOMER_ITEM_LIMIT_MESSAGE, remainingCustomerQuantity } from "@/lib/customerQuantity";
+import { useQuantityLimitWarning } from "@/lib/useQuantityLimitWarning";
 
 export function CartPanel({
   variant = "rail",
@@ -17,6 +19,7 @@ export function CartPanel({
 }) {
   const router = useRouter();
   const [navigating, setNavigating] = useState(false);
+  const { warningKey, warn } = useQuantityLimitWarning<string>();
   const {
     items,
     count,
@@ -25,6 +28,10 @@ export function CartPanel({
     removeItem,
     table,
   } = useCustomer();
+  const quantities = new Map<number, number>();
+  for (const item of items) {
+    quantities.set(item.menuItemId, (quantities.get(item.menuItemId) ?? 0) + item.quantity);
+  }
 
   return (
     <aside className={`cart-rail ${variant === "page" ? "cart-rail-page" : ""}`}>
@@ -104,15 +111,23 @@ export function CartPanel({
                           type="button"
                           aria-label="Increase quantity"
                           disabled={
-                            item.stockLimit !== null &&
-                            item.stockLimit !== undefined &&
-                            item.quantity >= item.stockLimit
+                            (quantities.get(item.menuItemId) ?? 0) < CUSTOMER_ITEM_LIMIT &&
+                            remainingCustomerQuantity(item.stockLimit, quantities.get(item.menuItemId) ?? 0) === 0
                           }
-                          onClick={() => setQuantity(item.key, item.quantity + 1)}
+                          onClick={() => {
+                            if ((quantities.get(item.menuItemId) ?? 0) >= CUSTOMER_ITEM_LIMIT) {
+                              warn(item.key);
+                            } else {
+                              setQuantity(item.key, item.quantity + 1);
+                            }
+                          }}
                         >
                           <Icon name="plus" size={11} />
                         </button>
                       </div>
+                    </div>
+                    <div className="quantity-limit-warning" role="status">
+                      {warningKey === item.key ? CUSTOMER_ITEM_LIMIT_MESSAGE : ""}
                     </div>
                   </div>
                 </div>
@@ -156,13 +171,6 @@ export function CartPanel({
                   </>
                 )}
               </button>
-              <div className="cart-panel-note">
-                <Icon name="info" />
-                <span>
-                  You can review your order, add a note, and choose a payment
-                  method before sending it to the counter.
-                </span>
-              </div>
             </>
           ) : null}
         </div>

@@ -1,7 +1,15 @@
 import { UserModel, verifyPassword } from "@/lib/models";
+import { randomInt } from "node:crypto";
 import { requireAdmin } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
 import { usernameForAccount } from "@/lib/usernames";
+import { validDutyHours } from "@/lib/dutyHoursValidation";
+import {
+  areStaffIdDetailsPassing,
+  checkStaffIdDetails,
+} from "@/lib/staffIdChecks";
+import { getDb } from "@/lib/db";
+import { encryptStaffIdentityImages, ensureStaffIdentityTable, findDuplicateStaffIdentity, isUniqueViolation, parseStaffIdentityImages, staffIdentityFingerprint, staffIdentityVerificationTokenFingerprint, verifyStaffIdentityVerificationToken } from "@/lib/staffIdentityRegistration";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -81,13 +89,18 @@ export async function POST(request: Request) {
       );
     }
     const body = rawBody;
-    const { name, email, role, password } = body;
+    const { name, email, role } = body;
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const password = role === "staff"
+      ? Array.from({ length: 6 }, () => alphabet[randomInt(alphabet.length)]).join("")
+      : body.password;
     if (!validProfileFields(body)) {
       return Response.json(
         { error: "Contact number, address, or duty hours exceed the allowed length.", success: false },
         { status: 400 }
       );
     }
+    if (!validDutyHours(body.duty_hours)) return Response.json({ error: "Duty end time must be later than the start time on the same day.", success: false }, { status: 400 });
     const emailValue = typeof email === "string" ? email.trim() : "";
     if (
       typeof name !== "string" ||
@@ -101,15 +114,21 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    if (emailValue && !validEmail(emailValue)) {
+    if ((role === "staff" && !emailValue) || (emailValue && !validEmail(emailValue))) {
       return Response.json(
-        { error: "Enter a valid email address, or leave it blank.", success: false },
+        { error: "Enter a valid recovery email address for staff.", success: false },
         { status: 400 }
       );
     }
-    if (password.trim().length < 6) {
+    if (role === "staff" && (typeof body.contact_number !== "string" || !body.contact_number.trim())) {
+      return Response.json({ error: "Enter the staff member’s contact number.", success: false }, { status: 400 });
+    }
+    if (role === "staff" && (typeof body.duty_hours !== "string" || !body.duty_hours.trim())) {
+      return Response.json({ error: "Choose both a start time and an end time.", success: false }, { status: 400 });
+    }
+    if (password.trim().length < 6 || password.length > 128) {
       return Response.json(
-        { error: "Use a password with at least 6 characters.", success: false },
+        { error: "Use a password with at least 6 characters and no more than 128 characters.", success: false },
         { status: 400 }
       );
     }
@@ -118,6 +137,41 @@ export async function POST(request: Request) {
         { error: "Choose a valid account role.", success: false },
         { status: 400 }
       );
+    }
+    let encryptedIdentity: string | undefined;
+    let encryptedIdentityDetails: string | null = null;
+    let identityFingerprint: string | null = null;
+    let identityVerificationTokenFingerprint: string | null = null;
+    if (role === "staff") {
+      const images = parseStaffIdentityImages(body.identity);
+      if (!images) return Response.json({ error: "Provide valid ID and front, left and right face images (JPEG or PNG, up to 2 MB each).", success: false }, { status: 400 });
+      await ensureStaffIdentityTable();
+      const detail = body.identity_details;
+      if (body.identity_details_reviewed !== true) return Response.json({ error: "Confirm that you reviewed the ID type and details before creating the account.", success: false }, { status: 400 });
+      if (!isRecord(detail) || Object.keys(detail).some((key) => !["name", "number", "birth_date", "expiration_date"].includes(key)) || typeof detail.name !== "string" || !detail.name.trim() || detail.name.length > 120 || typeof detail.number !== "string" || !detail.number.trim() || detail.number.length > 80 || typeof detail.birth_date !== "string" || typeof detail.expiration_date !== "string") return Response.json({ error: "Review and enter the name, ID number, and expiration date from the document before creating the account.", success: false }, { status: 400 });
+      if (!areStaffIdDetailsPassing(checkStaffIdDetails({ name: detail.name, number: detail.number, birth_date: detail.birth_date, expiration_date: detail.expiration_date }, name.trim(), images.id_type ?? ""))) return Response.json({ error: "Every ID detail check must pass, including the ID number format and a valid, current expiration date where required.", success: false }, { status: 409 });
+      if (await findDuplicateStaffIdentity(null, images.id_type ?? "", detail.number)) return Response.json({ error: "This ID number is already attached to another staff account. The account was not created.", success: false }, { status: 409 });
+      let verificationTokenValid = false;
+      const verificationToken = body.identity_verification_token;
+      if (typeof verificationToken !== "string") return Response.json({ error: "ID and face verification is missing. Scan the ID and face before creating this account.", success: false }, { status: 409 });
+      try {
+        verificationTokenValid = verifyStaffIdentityVerificationToken(
+          verificationToken,
+          images,
+          name.trim()
+        );
+      } catch {
+        return Response.json({ error: "Staff identity verification is not configured. Set STAFF_IDENTITY_ENCRYPTION_KEY (at least 32 characters) in the server environment.", success: false }, { status: 503 });
+      }
+      if (!verificationTokenValid) return Response.json({ error: "ID and face verification is missing, expired, or no longer matches these images. Scan the ID and face again.", success: false }, { status: 409 });
+      identityVerificationTokenFingerprint = staffIdentityVerificationTokenFingerprint(verificationToken);
+      try {
+        encryptedIdentity = encryptStaffIdentityImages(images);
+        encryptedIdentityDetails = encryptStaffIdentityImages({ name: detail.name.trim(), number: detail.number.trim(), birth_date: detail.birth_date, expiration_date: detail.expiration_date });
+        identityFingerprint = staffIdentityFingerprint(images.id_type ?? "", detail.number);
+      } catch {
+        return Response.json({ error: "Staff identity storage is not configured. Set STAFF_IDENTITY_ENCRYPTION_KEY (at least 32 characters) in the server environment, then restart the app.", success: false }, { status: 503 });
+      }
     }
     const reason = typeof body.reason === "string" ? body.reason.trim() : "";
     if (role === "admin") {
@@ -152,17 +206,50 @@ export async function POST(request: Request) {
       );
     }
 
-    const id = await UserModel.create({
+    const createUser = () => UserModel.create({
       name: name.trim(),
       username,
       email: emailValue,
       role,
-      password: password.trim(),
+      password,
       contact_number:
         typeof body.contact_number === "string" ? body.contact_number : null,
       address: typeof body.address === "string" ? body.address : null,
       duty_hours: typeof body.duty_hours === "string" ? body.duty_hours : null,
     });
+    const id = await getDb().transaction(async () => {
+      if (encryptedIdentity) {
+        const tokenFingerprint = identityVerificationTokenFingerprint;
+        if (!tokenFingerprint) throw new Error("Staff identity verification is missing.");
+        const claimedToken = await getDb()
+          .prepare("INSERT INTO staff_identity_verification_tokens (token_fingerprint, expires_at) VALUES (?, CURRENT_TIMESTAMP + INTERVAL '10 minutes') ON CONFLICT (token_fingerprint) DO NOTHING")
+          .run(tokenFingerprint);
+        if (!claimedToken.changes) return null;
+      }
+
+      const userId = await createUser();
+      if (role === "staff") {
+        await getDb().prepare("UPDATE users SET must_change_password = 1 WHERE id = ?").run(userId);
+      }
+      const savedUser = await UserModel.byUsername(username);
+      if (
+        !savedUser ||
+        savedUser.id !== userId ||
+        savedUser.role !== role ||
+        savedUser.is_active === 0 ||
+        !verifyPassword(password, savedUser.password_hash)
+      ) {
+        throw new Error("The new account could not be confirmed in the database. No account was created.");
+      }
+
+      if (encryptedIdentity) {
+        await getDb()
+          .prepare("INSERT INTO staff_identity_registrations (user_id, encrypted_images, status, encrypted_details, details_fingerprint) VALUES (?, ?, 'verified', ?, ?)")
+          .run(userId, encryptedIdentity, encryptedIdentityDetails, identityFingerprint);
+      }
+      return userId;
+    });
+    if (id === null) return Response.json({ error: "This ID and face verification was already used. Scan the ID and face again.", success: false }, { status: 409 });
     logActivity(auth.user, {
       area: "Accounts",
       action: "account.created",
@@ -170,8 +257,14 @@ export async function POST(request: Request) {
       entity_type: "user",
       entity_id: id,
     });
-    return Response.json({ id, username, success: true });
+    return Response.json({ id, username, ...(role === "staff" ? { temporary_password: password } : {}), success: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (error: unknown) {
+    if (isUniqueViolation(error)) {
+      return Response.json(
+        { error: "This ID number is already attached to another staff account. The account was not created.", success: false },
+        { status: 409 }
+      );
+    }
     return Response.json(
       {
         error: error instanceof Error ? error.message : "Could not create account.",
@@ -230,6 +323,10 @@ export async function PATCH(request: Request) {
         { error: "Administrator accounts cannot be managed from Staff Management.", success: false },
         { status: 403 }
       );
+    }
+    if (body.duty_hours !== undefined && body.duty_hours !== target.duty_hours && !validDutyHours(body.duty_hours)) return Response.json({ error: "Duty end time must be later than the start time on the same day.", success: false }, { status: 400 });
+    if (body.email !== undefined && String(body.email).trim() !== "" && !validEmail(body.email)) {
+      return Response.json({ error: "Staff must have a valid recovery email.", success: false }, { status: 400 });
     }
     if (id === auth.user!.id && body.is_active === false) {
       return Response.json(

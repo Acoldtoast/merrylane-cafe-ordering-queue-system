@@ -19,8 +19,15 @@ export default async function ItemPage({
   const table = Math.max(1, Number(query.table) || 7);
 
   let ordering: OrderingWindow | null = null;
+  let vatInclusive = true;
   try {
-    ordering = await SettingsModel.orderingWindow();
+    // One database round trip for both settings reads on this page load.
+    const [window, vat] = await Promise.all([
+      SettingsModel.orderingWindow(),
+      SettingsModel.get("vat_inclusive"),
+    ]);
+    ordering = window;
+    vatInclusive = vat !== "false";
   } catch {
     // Keep customizing available if settings cannot be read.
   }
@@ -35,6 +42,7 @@ export default async function ItemPage({
       item={JSON.parse(JSON.stringify(item))}
       initialTable={table}
       editKey={query.edit || null}
+      vatInclusive={vatInclusive}
     />
   );
 }

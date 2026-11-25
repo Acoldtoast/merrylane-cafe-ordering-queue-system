@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
-import { FeedbackProvider } from "@/components/Feedback";
+import { FeedbackProvider } from "@/components/FeedbackProvider";
 
 export const metadata: Metadata = {
   title: {

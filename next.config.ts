@@ -10,7 +10,7 @@ const nextConfig: NextConfig = {
   devIndicators: false,
   // PGlite ships WASM + Node filesystem helpers that must not be bundled by
   // webpack; bundling rewrites its `import.meta.url` paths into URL objects.
-  serverExternalPackages: ["nodemailer", "@electric-sql/pglite"],
+  serverExternalPackages: ["nodemailer", "@electric-sql/pglite", "pg"],
   // Webpack instead of Turbopack (PGlite/WASM junction point bug on Windows)
   webpack: (config) => {
     return config;

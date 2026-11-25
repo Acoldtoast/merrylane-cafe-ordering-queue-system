@@ -7,7 +7,7 @@ import {
   getStaffIdleTimeoutMinutes,
   isAdminIdleTimeoutMinutes,
   isStaffIdleTimeoutMinutes,
-  JWT_SECRET,
+  getJwtSecret,
   requireAdmin,
   STAFF_IDLE_TIMEOUT_OPTIONS,
 } from "@/lib/auth";
@@ -18,6 +18,8 @@ import {
 } from "@/lib/models";
 import { logActivity } from "@/lib/activityLog";
 import { startAutoBackupScheduler } from "@/lib/autoBackup";
+import { invalidateCache } from "@/lib/serverCache";
+import { faceDutySettings, invalidateFaceDutySettingsCache } from "@/lib/staffFaceAccess";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -49,6 +51,7 @@ export async function GET(request: Request) {
     tiktokUrl,
     instagramUrl,
     socialMediaEnabled,
+    faceDuty,
   ] = await Promise.all([
     SettingsModel.get(notificationEmailKey(auth.user.id)),
     getAdminIdleTimeoutMinutes(),
@@ -60,6 +63,7 @@ export async function GET(request: Request) {
     SettingsModel.get("tiktok_url"),
     SettingsModel.get("instagram_url"),
     SettingsModel.get("social_media_enabled"),
+    faceDutySettings(),
   ]);
 
   return Response.json(
@@ -82,6 +86,8 @@ export async function GET(request: Request) {
       tiktok_url: tiktokUrl || "",
       instagram_url: instagramUrl || "",
       social_media_enabled: socialMediaEnabled !== "false",
+      staff_face_check_enabled: faceDuty.enabled,
+      staff_face_duty_hours: faceDuty.hours,
       idle_timeout_options: ADMIN_IDLE_TIMEOUT_OPTIONS,
       staff_idle_timeout_options: STAFF_IDLE_TIMEOUT_OPTIONS,
       success: true,
@@ -124,6 +130,8 @@ export async function PATCH(request: Request) {
       "tiktok_url",
       "instagram_url",
       "social_media_enabled",
+      "staff_face_check_enabled",
+      "staff_face_duty_hours",
     ]);
     if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
       return Response.json(
@@ -150,7 +158,15 @@ export async function PATCH(request: Request) {
       body,
       "staff_idle_timeout_minutes"
     );
-    if (!updatesProfile && !hasIdleTimeout && !hasStaffIdleTimeout) {
+    const hasFaceEnabled = Object.prototype.hasOwnProperty.call(body, "staff_face_check_enabled");
+    const hasFaceHours = Object.prototype.hasOwnProperty.call(body, "staff_face_duty_hours");
+    if (hasFaceEnabled && typeof body.staff_face_check_enabled !== "boolean") {
+      return Response.json({ error: "Choose whether staff face checking is enabled.", success: false }, { status: 400 });
+    }
+    if (hasFaceHours && (typeof body.staff_face_duty_hours !== "number" || !Number.isInteger(body.staff_face_duty_hours) || body.staff_face_duty_hours < 1 || body.staff_face_duty_hours > 24)) {
+      return Response.json({ error: "Duty hours must be a whole number from 1 to 24.", success: false }, { status: 400 });
+    }
+    if (!updatesProfile && !hasIdleTimeout && !hasStaffIdleTimeout && !hasFaceEnabled && !hasFaceHours) {
       return Response.json(
         { error: "Choose a setting to update.", success: false },
         { status: 400 }
@@ -178,16 +194,22 @@ export async function PATCH(request: Request) {
         { status: 400 }
       );
     }
-    if (
-      personalEmail !== undefined &&
-      personalEmail !== "" &&
-      (personalEmail.length > 254 ||
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personalEmail))
-    ) {
-      return Response.json(
-        { error: "Enter a valid email address, or leave it blank.", success: false },
-        { status: 400 }
-      );
+    if (hasPersonalEmail) {
+      if (!personalEmail) {
+        return Response.json(
+          { error: "Enter your personal email address.", success: false },
+          { status: 400 }
+        );
+      }
+      if (
+        personalEmail.length > 254 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personalEmail)
+      ) {
+        return Response.json(
+          { error: "Enter a valid personal email address.", success: false },
+          { status: 400 }
+        );
+      }
     }
     if (
       hasIdleTimeout &&
@@ -267,6 +289,9 @@ export async function PATCH(request: Request) {
         String(body.staff_idle_timeout_minutes)
       );
     }
+    if (hasFaceEnabled) await SettingsModel.set("staff_face_check_enabled", String(body.staff_face_check_enabled));
+    if (hasFaceHours) await SettingsModel.set("staff_face_duty_hours", String(body.staff_face_duty_hours));
+    if (hasFaceEnabled || hasFaceHours) invalidateFaceDutySettingsCache();
     const hasStaffIdleWarning = Object.prototype.hasOwnProperty.call(
       body,
       "staff_idle_warning_minutes"
@@ -319,6 +344,7 @@ export async function PATCH(request: Request) {
         String(!!body.social_media_enabled)
       );
     }
+    invalidateCache("settings");
 
     let sessionId = account.session_id || null;
     if (newPassword) {
@@ -389,7 +415,7 @@ export async function PATCH(request: Request) {
         .setIssuedAt()
         .setExpirationTime(Math.floor(Date.now() / 1000) + maxAge);
       const token = await tokenBuilder.sign(
-        new TextEncoder().encode(JWT_SECRET)
+        new TextEncoder().encode(getJwtSecret())
       );
       response.cookies.set("auth-admin-token", token, {
         httpOnly: true,
@@ -427,6 +453,15 @@ export async function PATCH(request: Request) {
             ? "Never"
             : `${staffIdleTimeoutMinutes} minutes`
         }`,
+        entity_type: "settings",
+        entity_id: null,
+      });
+    }
+    if (hasFaceEnabled || hasFaceHours) {
+      logActivity(auth.user, {
+        area: "Settings",
+        action: "settings.updated",
+        summary: "Updated staff face verification settings",
         entity_type: "settings",
         entity_id: null,
       });

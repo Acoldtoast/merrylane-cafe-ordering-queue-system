@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { staffNav } from "@/components/portalNav";
+import { useCallback, useMemo, useState } from "react";
+import { useConfirmDialog } from "@/components/ConfirmDialog";
 import { Icon } from "@/components/Icons";
 import { PortalPageSkeleton } from "@/components/PortalPageSkeleton";
 import { OrderDiscountDetails } from "@/components/OrderDiscountDetails";
@@ -31,6 +31,7 @@ import {
   preparationReminderLevel,
   readyMinutesElapsed,
   readyReminderLevel,
+  staffCanCompleteServedOrder,
   STAFF_BOARD_ACTIVE_STATUSES,
 } from "@/lib/orderLifecycle";
 import { fetchPortalApi } from "@/lib/portalPrefetch";
@@ -85,6 +86,7 @@ function paymentBadgeClass(order: Order) {
 function canAddCharges(order: Order) {
   return (
     ["pending", "payment_pending", "confirmed", "preparing"].includes(order.status) &&
+    order.payment_status !== "verified" &&
     !(order.balance_payments || []).some((payment) => payment.status === "pending") &&
     !(
       order.payment_method === "gcash" &&
@@ -109,6 +111,14 @@ function canAddMenuItem(order: Order) {
 
 function preparingMinutes(order: Order): number | null {
   return preparationMinutesElapsed(order);
+}
+
+function isStaleUnpaidOrder(order: Order): boolean {
+  return (
+    (order.status === "pending" || order.status === "payment_pending") &&
+    Date.now() - new Date(order.created_at.replace(" ", "T")).getTime() >
+      5 * 60000
+  );
 }
 
 function isOverduePreparingOrder(order: Order): boolean {
@@ -168,6 +178,7 @@ function readyClock(minutes: string) {
 
 export function StaffBoardClient() {
   const feedback = useFeedback();
+  const { confirm, dialog: confirmDialog } = useConfirmDialog();
   const [orders, setOrders] = useState<Order[]>([]);
   const [addons, setAddons] = useState<Addon[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
@@ -193,7 +204,10 @@ export function StaffBoardClient() {
     orderId: number;
     value: string;
   } | null>(null);
-  const [etaDraft, setEtaDraft] = useState("15");
+  const [etaDraftState, setEtaDraftState] = useState<{
+    orderId: number | null;
+    value: string;
+  }>({ orderId: null, value: "15" });
   const [addonTarget, setAddonTarget] = useState<{
     order: Order;
     item: OrderItem;
@@ -228,27 +242,13 @@ export function StaffBoardClient() {
 
   const load = useCallback(async () => {
     try {
-      const [ordersRes, addonsRes, menuRes, requestsRes] = await Promise.all([
-        fetchPortalApi("/api/orders?board=1", { cache: "no-store" }),
-        fetchPortalApi("/api/addons", { cache: "no-store" }),
-        fetchPortalApi("/api/menu", { cache: "no-store" }),
-        fetchPortalApi("/api/waiter", { cache: "no-store" }),
-      ]);
+      const ordersRes = await fetchPortalApi("/api/orders?board=1", { cache: "no-cache" });
       const data = await ordersRes.json();
-      const addonData = await addonsRes.json();
-      const menuData = await menuRes.json();
-      const requestsData = await requestsRes.json();
       if (!ordersRes.ok || !data.success) {
         throw new Error(data.error || "Unable to load orders.");
       }
-      if (!requestsRes.ok || !requestsData.success) {
-        throw new Error(requestsData.error || "Unable to load customer follow-ups.");
-      }
       const fresh: Order[] = data.orders || [];
       setOrders(fresh);
-      setAddons(addonData.addons || []);
-      setMenuItems(menuData.items || []);
-      setWaiterRequests(requestsData.requests || []);
       if (data.stats) setStats(data.stats);
       setDetail((current) =>
         current ? fresh.find((order) => order.id === current.id) || null : null
@@ -264,14 +264,47 @@ export function StaffBoardClient() {
     }
   }, []);
 
-  usePolling(load, 10000, { resources: ["menu", "orders", "requests", "waiter"] });
+  const loadRequests = useCallback(async () => {
+    const response = await fetchPortalApi("/api/waiter", { cache: "no-cache" });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || "Unable to load customer follow-ups.");
+    }
+    setWaiterRequests(data.requests || []);
+  }, []);
 
-  useEffect(() => {
-    if (!detail) return;
-    setEtaDraft(String(detail.prep_minutes ?? 15));
-    // Only reset when switching to another order, not on every poll update.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail?.id]);
+  // Menu and add-ons change rarely. Fetching them on the 10-second order loop
+  // re-sent the whole catalog (including images) to every staff screen.
+  const loadCatalog = useCallback(async () => {
+    try {
+      const [addonsRes, menuRes] = await Promise.all([
+        fetchPortalApi("/api/addons", { cache: "no-cache" }),
+        fetchPortalApi("/api/menu", { cache: "no-cache" }),
+      ]);
+      const addonData = await addonsRes.json();
+      const menuData = await menuRes.json();
+      if (addonsRes.ok && addonData.success) setAddons(addonData.addons || []);
+      if (menuRes.ok && menuData.success) setMenuItems(menuData.items || []);
+    } catch (err: unknown) {
+      console.warn("Unable to refresh the menu catalog.", err);
+    }
+  }, []);
+
+  usePolling(load, 10000, { resources: ["orders", "payments"] });
+  usePolling(loadRequests, 10000, { enabled: !loading, resources: ["requests", "waiter"] });
+  usePolling(loadCatalog, 60000, { enabled: !loading, resources: ["menu"] });
+
+  /*
+   * The draft belongs to one order, so it is derived from that order instead of
+   * being reset by an effect: switching orders shows that order's own time, and
+   * a poll update for the same order keeps whatever the staff member typed.
+   */
+  const etaDraft =
+    etaDraftState.orderId === (detail?.id ?? null)
+      ? etaDraftState.value
+      : String(detail?.prep_minutes ?? 15);
+  const setEtaDraft = (value: string) =>
+    setEtaDraftState({ orderId: detail?.id ?? null, value });
 
   const patchOrder = async (
     order: Order,
@@ -393,12 +426,14 @@ export function StaffBoardClient() {
       accepting,
       {
         payment_status: "verified",
-        prep_minutes: minutes,
+        status: accepting.payment_method === "gcash" ? "confirmed" : "preparing",
         ...(accepting.payment_method === "counter"
-          ? { cash_received: counterCashAmount }
+          ? { cash_received: counterCashAmount, prep_minutes: minutes }
           : {}),
       },
-      `Payment verified · ${code(accepting)} is preparing`
+      accepting.payment_method === "gcash"
+        ? `Payment verified · ${code(accepting)} is ready for preparation`
+        : `Payment verified · ${code(accepting)} is preparing`
     );
     if (updated) setAccepting(null);
   };
@@ -826,6 +861,12 @@ export function StaffBoardClient() {
   const boardLanes = useMemo(
     () => [
       {
+        key: "confirmed",
+        title: "Ready to prepare",
+        tone: "preparing",
+        orders: orders.filter((order) => order.status === "confirmed"),
+      },
+      {
         key: "preparing",
         title: "Preparing",
         tone: "preparing",
@@ -893,7 +934,6 @@ export function StaffBoardClient() {
       <div className="followup-sidebar-head">
         <div>
           <span className="followup-label">Follow-up orders</span>
-          <p>Customers who asked for an update</p>
         </div>
         <strong>{followUpRequests.length}</strong>
       </div>
@@ -995,10 +1035,29 @@ export function StaffBoardClient() {
         <button
           type="button"
           className="btn btn-primary"
-          disabled={busyId === order.id}
-          onClick={() => updateOrder(order, { status: "preparing" })}
+          disabled={
+            busyId === order.id ||
+            (detail?.id === order.id &&
+              (etaDraft.trim() === "" ||
+                !Number.isFinite(Number(etaDraft)) ||
+                Number(etaDraft) < 1 ||
+                Number(etaDraft) > 240))
+          }
+          onClick={async () => {
+            if (detail?.id !== order.id) {
+              setDetail(order);
+              return;
+            }
+            const updated = await patchOrder(
+              order,
+              { status: "preparing", prep_minutes: Number(etaDraft) },
+              `${code(order)} is preparing`
+            );
+            if (updated) setDetail(null);
+          }}
         >
-          <Icon name="coffee" className="icon-sm" /> Start preparing
+          <Icon name="coffee" className="icon-sm" />{" "}
+          {detail?.id === order.id ? "Start preparing" : "Set prep time"}
         </button>
       )}
       {order.status === "preparing" && (
@@ -1012,9 +1071,24 @@ export function StaffBoardClient() {
         </button>
       )}
       {order.status === "ready" && (
-        <span className="served-waiting-label">
-          <Icon name="clock" className="icon-sm" /> Waiting for customer
-        </span>
+        staffCanCompleteServedOrder(order) ? (
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={busyId === order.id}
+            onClick={async () => {
+              if (await confirm(`Confirm ${code(order)} was received and mark it complete?`)) {
+                void updateOrder(order, { status: "completed" });
+              }
+            }}
+          >
+            <Icon name="check" className="icon-sm" /> Mark complete
+          </button>
+        ) : (
+          <span className="served-waiting-label">
+            <Icon name="clock" className="icon-sm" /> Waiting for customer
+          </span>
+        )
       )}
       {(order.status === "completed" || order.status === "cancelled") && (
         <span className="order-time">
@@ -1150,7 +1224,9 @@ export function StaffBoardClient() {
                           <span>
                             {order.status === "preparing" && order.estimated_ready_at
                               ? `ETA ${clockTime(order.estimated_ready_at)}`
-                              : order.status === "preparing"
+                              : order.status === "confirmed"
+                                ? "Ready to prepare"
+                                : order.status === "preparing"
                                 ? "Preparing"
                                 : "Serving · awaiting customer"}
                           </span>
@@ -1195,10 +1271,7 @@ export function StaffBoardClient() {
         <div className="staff-orders">
           {filtered.map((order) => {
             const overdue = isOverduePreparingOrder(order);
-            const stale =
-              (order.status === "pending" || order.status === "payment_pending") &&
-              Date.now() - new Date(order.created_at.replace(" ", "T")).getTime() >
-                5 * 60000;
+            const stale = isStaleUnpaidOrder(order);
             return (
               <article
                 className={`order-card ${
@@ -1517,7 +1590,7 @@ export function StaffBoardClient() {
                 ))}
               </div>
 
-              {detail.payment_method === "gcash" && (
+              {detail.payment_method === "gcash" && detail.payment_proof_url && (
                 <div className="order-detail-receipt">
                   <div className="flex-between">
                     <strong>GCash receipt</strong>
@@ -1525,15 +1598,11 @@ export function StaffBoardClient() {
                       Ref {detail.payment_reference || "—"}
                     </span>
                   </div>
-                  {detail.payment_proof_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={detail.payment_proof_url}
-                      alt={`GCash receipt for order ${detail.id}`}
-                    />
-                  ) : (
-                    <p className="order-time">No receipt uploaded yet.</p>
-                  )}
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={detail.payment_proof_url}
+                    alt={`GCash receipt for order ${detail.id}`}
+                  />
                 </div>
               )}
 
@@ -1619,7 +1688,9 @@ export function StaffBoardClient() {
 
               {["confirmed", "preparing"].includes(detail.status) && (
                 <div className="eta-editor">
-                  <span className="label">Adjust prep time</span>
+                  <span className="label">
+                    {detail.status === "confirmed" ? "Preparation time" : "Adjust prep time"}
+                  </span>
                   <div className="option-pills">
                     {PREP_OPTIONS.map((minutes) => (
                       <label className="option-pill" key={minutes}>
@@ -1637,7 +1708,7 @@ export function StaffBoardClient() {
                     <input
                       className="input"
                       type="number"
-                      min={0}
+                      min={1}
                       max={240}
                       value={etaDraft}
                       onChange={(event) => setEtaDraft(event.target.value)}
@@ -1887,58 +1958,60 @@ export function StaffBoardClient() {
                 )}
               </section>
 
-              <section className="order-accept-prep">
-                <div className="order-accept-panel-heading">
-                  <div>
-                    <h3>Preparation time</h3>
-                    <p>Set an estimated ready time</p>
+              {accepting.payment_method === "counter" && (
+                <section className="order-accept-prep">
+                  <div className="order-accept-panel-heading">
+                    <div>
+                      <h3>Preparation time</h3>
+                      <p>Set an estimated ready time</p>
+                    </div>
+                    <Icon name="clock" className="icon-sm" />
                   </div>
-                  <Icon name="clock" className="icon-sm" />
-                </div>
-                <div className="order-accept-prep-options">
-                  {PREP_OPTIONS.map((minutes) => (
-                    <label className="option-pill" key={minutes}>
+                  <div className="order-accept-prep-options">
+                    {PREP_OPTIONS.map((minutes) => (
+                      <label className="option-pill" key={minutes}>
+                        <input
+                          type="radio"
+                          name="prep-minutes"
+                          checked={Number(prepMinutes) === minutes}
+                          onChange={() => setPrepMinutes(String(minutes))}
+                        />
+                        <span>{minutes} min</span>
+                      </label>
+                    ))}
+                    <label className="option-pill">
                       <input
                         type="radio"
                         name="prep-minutes"
-                        checked={Number(prepMinutes) === minutes}
-                        onChange={() => setPrepMinutes(String(minutes))}
+                        checked={!PREP_OPTIONS.includes(Number(prepMinutes))}
+                        onChange={() => setPrepMinutes("18")}
                       />
-                      <span>{minutes} min</span>
+                      <span>Custom</span>
                     </label>
-                  ))}
-                  <label className="option-pill">
+                  </div>
+                  {!PREP_OPTIONS.includes(Number(prepMinutes)) && (
                     <input
-                      type="radio"
-                      name="prep-minutes"
-                      checked={!PREP_OPTIONS.includes(Number(prepMinutes))}
-                      onChange={() => setPrepMinutes("18")}
+                      className="input"
+                      type="number"
+                      min={0}
+                      max={240}
+                      value={prepMinutes}
+                      onChange={(event) => setPrepMinutes(event.target.value)}
+                      placeholder="Minutes"
                     />
-                    <span>Custom</span>
-                  </label>
-                </div>
-                {!PREP_OPTIONS.includes(Number(prepMinutes)) && (
-                  <input
-                    className="input"
-                    type="number"
-                    min={0}
-                    max={240}
-                    value={prepMinutes}
-                    onChange={(event) => setPrepMinutes(event.target.value)}
-                    placeholder="Minutes"
-                  />
-                )}
-                <div className="order-accept-ready-time">
-                  <Icon name="clock" className="icon-sm" />
-                  <span>
-                    Ready around <strong>{readyClock(prepMinutes)}</strong>
-                  </span>
-                </div>
-                <div className="order-detail-eta-summary">
-                  Accepting confirms payment, assigns the next queue number, and starts
-                  the customer&apos;s prep timer.
-                </div>
-              </section>
+                  )}
+                  <div className="order-accept-ready-time">
+                    <Icon name="clock" className="icon-sm" />
+                    <span>
+                      Ready around <strong>{readyClock(prepMinutes)}</strong>
+                    </span>
+                  </div>
+                  <div className="order-detail-eta-summary">
+                    Accepting confirms payment, assigns the next queue number, and
+                    starts the customer&apos;s prep timer.
+                  </div>
+                </section>
+              )}
             </div>
             <div className="modal-foot">
               <button type="button" className="btn btn-outline" onClick={() => setAccepting(null)}>
@@ -2260,6 +2333,7 @@ export function StaffBoardClient() {
           </div>
         </div>
       )}
+    {confirmDialog}
     </>
   );
 }

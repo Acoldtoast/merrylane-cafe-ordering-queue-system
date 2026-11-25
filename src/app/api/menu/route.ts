@@ -1,12 +1,14 @@
 import {
   AddonModel,
-  CategoryModel,
   MenuItemModel,
   normalizeVariantGroups,
 } from "@/lib/models";
 import { requireAdmin } from "@/lib/auth";
 import { menuImageValidationError } from "@/lib/menuImage";
 import { logActivity } from "@/lib/activityLog";
+import { invalidateCache } from "@/lib/serverCache";
+import { readMenuCatalog } from "@/lib/portalReadData";
+import { errorMessage } from "@/lib/errorMessage";
 
 export async function GET(request: Request) {
   try {
@@ -18,14 +20,17 @@ export async function GET(request: Request) {
       if (auth.error) return auth.error;
     }
 
-    const items = includeInactive
-      ? await MenuItemModel.all()
-      : await MenuItemModel.allActive();
-    const categories = await CategoryModel.all();
-    return Response.json({ categories, items, success: true });
-  } catch (error: any) {
+    const payload = await readMenuCatalog(includeInactive);
+    return Response.json(payload, {
+      headers: {
+        "Cache-Control": includeInactive
+          ? "private, no-store"
+          : "private, max-age=5, stale-while-revalidate=20",
+      },
+    });
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not save the menu changes."), success: false },
       { status: 500 }
     );
   }
@@ -81,9 +86,9 @@ export async function POST(request: Request) {
     if (body.variants !== undefined) {
       try {
         variants = normalizeVariantGroups(body.variants);
-      } catch (error: any) {
+      } catch (error: unknown) {
         return Response.json(
-          { error: error.message, success: false },
+          { error: errorMessage(error, "Could not save the menu changes."), success: false },
           { status: 400 }
         );
       }
@@ -113,14 +118,15 @@ export async function POST(request: Request) {
       entity_type: "menu_item",
       entity_id: id,
     });
+    invalidateCache("menu");
     return Response.json({
       id,
       item: await MenuItemModel.byId(id),
       success: true,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not save the menu changes."), success: false },
       { status: 500 }
     );
   }

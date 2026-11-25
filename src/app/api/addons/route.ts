@@ -1,6 +1,8 @@
 import { AddonModel } from "@/lib/models";
+import { errorMessage } from "@/lib/errorMessage";
 import { requireAdmin } from "@/lib/auth";
 import { logActivity } from "@/lib/activityLog";
+import { cached, invalidateCache } from "@/lib/serverCache";
 
 export async function GET(request: Request) {
   try {
@@ -12,13 +14,24 @@ export async function GET(request: Request) {
       if (auth.error) return auth.error;
     }
 
-    return Response.json({
-      addons: await AddonModel.all(includeInactive),
-      success: true,
+    const payload = await cached(
+      `menu:addons:${includeInactive ? "all" : "active"}`,
+      30_000,
+      async () => ({
+        addons: await AddonModel.all(includeInactive),
+        success: true,
+      })
+    );
+    return Response.json(payload, {
+      headers: {
+        "Cache-Control": includeInactive
+          ? "private, no-store"
+          : "private, max-age=15, stale-while-revalidate=30",
+      },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return Response.json(
-      { error: error.message, success: false },
+      { error: errorMessage(error, "Could not load add-ons."), success: false },
       { status: 500 }
     );
   }
@@ -51,18 +64,19 @@ export async function POST(request: Request) {
       entity_type: "addon",
       entity_id: id,
     });
+    invalidateCache("menu");
     return Response.json({
       id,
       addon: await AddonModel.byId(id),
       success: true,
     });
-  } catch (error: any) {
-    const duplicate = /UNIQUE/i.test(error.message || "");
+  } catch (error: unknown) {
+    const duplicate = /UNIQUE/i.test(errorMessage(error, ""));
     return Response.json(
       {
         error: duplicate
           ? "An add-on with that name already exists."
-          : error.message,
+          : errorMessage(error, "Could not save the add-on."),
         success: false,
       },
       { status: duplicate ? 409 : 500 }
