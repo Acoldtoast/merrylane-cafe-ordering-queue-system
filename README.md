@@ -2,10 +2,10 @@
 
 A complete, self-contained ordering system for Merrylane Cafe, built with **Next.js 16 (App Router)**,
 **React 19**, and a local **PGlite** (PostgreSQL compiled to WebAssembly) database. Everything runs
-locally — no external database server, image host, or payment gateway is required.
+locally — no external database server or image host is required. GCash checkout uses Xendit.
 
 It implements the SAD proposal: table QR ordering, item customization, dine-in/take-out, GCash or
-counter payment with receipt upload and staff verification, queue tracking, waiter calls, stock
+counter payment, automatic Xendit payment confirmation, queue tracking, waiter calls, stock
 control, ordering hours, reviews with a promo-image export, a staff panel, an admin dashboard with
 sales forecasting and scheduled email reports, and a cafe Wi-Fi gate.
 
@@ -19,6 +19,23 @@ npm run dev     # http://localhost:3112
 ```
 
 The dev server binds to `0.0.0.0`, so it is reachable from a phone on the same network.
+
+### HTTPS for the phone camera
+
+Stop the existing dev server first; never run two servers against the same PGlite
+directory. Then run `npm run dev:https` and open the printed HTTPS address on
+the phone connected to the same Wi-Fi. This development-only command chooses
+the current network address for Next.js's certificate. Next.js may download
+`mkcert` and ask for permission to install its local certificate authority on
+the computer.
+
+The phone must separately trust that authority and grant camera permission.
+Use only `rootCA.pem` from the CA location shown by Next.js; never copy or share
+`rootCA-key.pem`. Installing a CA grants it broad trust: do this only on devices
+you control and remove that trust after the demonstration. A browser warning
+alone does not establish a secure camera context. If the Wi-Fi address changes,
+restart the HTTPS server and open the newly printed address. This is not a
+production HTTPS setup.
 
 ### Environment
 
@@ -40,34 +57,63 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 | --- | --- | --- |
 | `JWT_SECRET` | yes | Signs session JWTs. Without it the app falls back to an insecure development default. |
 | `SMTP_PASSWORD_ENCRYPTION_KEY` | no | Encrypts stored SMTP passwords. Falls back to `JWT_SECRET` when unset. |
+| `DATABASE_URL` | for hosted PostgreSQL | Server-only PostgreSQL connection string. When set, the app uses this database instead of local PGlite. Required on Vercel. |
 | `MERRYLANE_DB_DIR` | no | Absolute path of the PGlite directory. Defaults to `data/merrylane-pglite`. |
+| `XENDIT_TEST_SECRET_KEY` | for test payments | Server-side Xendit test key; always used outside production, even if a live key is also configured. |
+| `XENDIT_SECRET_KEY` | for live payments | Server-side Xendit live key. Production never falls back to a test key. |
+| `XENDIT_WEBHOOK_TOKEN` | for GCash | The callback verification token configured for the Xendit webhook. |
+| `APP_URL` | for GCash | Public HTTPS origin in production; localhost or a private IPv4 address over HTTP is allowed for test demos. Do not include a path. |
+| `STAFF_IDENTITY_ENCRYPTION_KEY` | for the staff face check | At least 32 characters. Encrypts the stored staff face photos. Without it, face enrollment and the face check return 503. |
+| `FACEPP_API_KEY` | for the staff face check | Face++ API key. Without both Face++ values the face check is disabled and staff cannot check in. |
+| `FACEPP_API_SECRET` | for the staff face check | Face++ API secret. Keep it server-side. |
+| `FACEPP_API_REGION` | no | Face++ region: `US` (default), `CN` or `SG`. An unknown value makes the face check report that verification is unavailable. |
+
+#### Xendit GCash setup
+
+1. For a local demo, add `XENDIT_TEST_SECRET_KEY`, a private `XENDIT_WEBHOOK_TOKEN`, and
+   `APP_URL=http://localhost:3112` to `.env.local`. For phone testing on the same Wi-Fi, open the app
+   using the computer's current private IPv4 address and port; the test checkout uses that same address
+   for its return. Non-production environments always use the test
+   key; they never fall back to the live key. Keep the payment page open while testing: local Xendit
+   status polling checks Xendit because it cannot send webhooks to a private address. Some provider or
+   mobile-browser flows may require a public HTTPS address even in test mode.
+2. For production, configure `XENDIT_SECRET_KEY`, the callback token, and a public HTTPS `APP_URL`.
+   In the Xendit dashboard, configure the Payment Requests v3 payment status webhook to
+   `https://<your-public-domain>/api/webhooks/xendit`, using the same callback token.
+3. Restart the app after changing environment variables. Keep secret keys server-side; never put
+   them in browser code or share them in chat.
+
+The payment page shows a QR that opens Xendit's hosted GCash checkout and, when Xendit supplies one,
+a direct GCash app link. This is not a direct QRPh payment code. Keep the payment page open during a
+local test so it can check Xendit's test status; in production, the authenticated webhook confirms
+the successful payment. Neither the browser's return URL nor opening the checkout marks an order as
+paid.
 
 ### Database
 
-All data lives in `data/merrylane-pglite`. The directory is opened (and created if missing) on the
-first request, so there is no migrate or seed command. Schema upgrades — new columns, indexes, and
-helper tables — are applied automatically by the models the first time a route needs them.
+By default, local development stores data in `data/merrylane-pglite`. When `DATABASE_URL` is set,
+the app instead connects to that hosted PostgreSQL database. Vercel requires `DATABASE_URL` and will
+fail clearly if it is missing; configure it as a server-side environment variable in Vercel.
+Schema upgrades — new columns, indexes, and helper tables — are applied by the models when needed.
 
 The database is **not** in version control: it holds customer orders, payment proofs, and password
 hashes. To set up a fresh checkout, copy a PGlite directory (or a snapshot from `data/backups`) into
 `data/merrylane-pglite`, or point `MERRYLANE_DB_DIR` at an existing copy.
 
-PGlite is the only database. The app reads and writes it through `src/lib/db/`, and all new tables
-and queries use native PostgreSQL syntax.
+The app reads and writes through `src/lib/db/`. Local development uses PGlite; hosted deployments
+can use PostgreSQL. All new tables and queries must use PostgreSQL-compatible syntax. The local
+directory is not a backup of a hosted database, and existing PGlite data must be migrated separately.
+See [MIGRATION_CHANGES.md](./MIGRATION_CHANGES.md) for a file-by-file summary of the Supabase
+migration changes and validation.
 
 ### Accounts
 
-Sign-in uses the account **username**, not an email address. The development database currently
-holds these two accounts, and the login screen has one-tap buttons that fill them in:
-
-| Role          | Username           | Password   | Name            | Lands on |
-| ------------- | ------------------ | ---------- | --------------- | -------- |
-| Administrator | `admin-merrylane`  | `admin123` | Kirsten Baromma | `/admin` |
-| Staff         | `angelu-merrylane` | `staff123` | Angelu Macaraig | `/staff` |
-
-Add or edit accounts under **Admin → Staff management**, and change these passwords before any real
-use. A personal email address is **optional** and is used only for password recovery. An account with
+Sign-in uses the account **username**, not an email address. A fresh database creates an administrator
+account; change its default password before any real use. Add or edit accounts under **Admin → Staff
+management**. A personal email address is **optional** and is used only for password recovery. An account with
 no saved email still works normally; a password reset for it has to be done by an administrator.
+For new staff, the system generates a six-character temporary password and shows it once after account
+creation. Share it privately; the staff member must replace it at first sign-in before accessing the portal.
 
 ### Open it on a phone
 
@@ -115,7 +161,7 @@ of waiting for a second API request.
 | `/customer/menu?table=N` | Server-rendered menu, categories, search, live stock |
 | `/customer/item/[id]?table=N` | Size, temperature, milk, extras, quantity |
 | `/customer/cart?table=N` | Order review, dine-in/take-out, payment choice |
-| `/customer/payment?id=N` | GCash QR, receipt upload, reference number (`&balance=1` for an added balance) |
+| `/customer/payment?id=N` | Xendit GCash checkout QR and app link (`&balance=1` for an added balance) |
 | `/customer/confirm?id=N` | Order received |
 | `/customer/status?id=N` | Live queue number, customer name and status (auto-refresh), with an ETA-triggered follow-up request while preparing |
 | `/customer/orders` | Guest order history for this browser, with links back to each live order |
@@ -180,17 +226,19 @@ pending ──▶ payment_pending ──▶ confirmed ──▶ preparing ──
 ```
 
 - **Counter** orders start as `pending` and are confirmed by staff at the counter.
-- **GCash** orders start as `payment_pending`; the customer uploads a receipt and reference number,
-  then staff verify it in `/staff/payments`. Verifying sets `payment_status = verified`, starts
-  preparation, and assigns the next queue number (max + 1, so numbers never repeat).
+- **GCash** orders start as `payment_pending`; the customer pays through Xendit's hosted checkout.
+  Production's authenticated webhook (or local development's authenticated Xendit status lookup)
+  verifies the successful PHP GCash payment and amount before setting `payment_status = verified`,
+  starting preparation, and assigning the next queue number. Legacy manually submitted receipts, if
+  present, remain available for staff review in `/staff/payments`.
 - Staff mark an order served when it is handed over. An expired preparation ETA raises increasingly
   urgent staff reminders and offers an ETA update; it does not mark the order served automatically.
   Served orders remain open until the customer confirms receipt, with staff follow-up reminders
   instead of automatic completion.
 - Staff can add menu items and catalog add-ons until the order is ready. Added charges do not alter
   the amount already paid: the order shows an outstanding balance that can be collected at the
-  counter or submitted as a separate GCash receipt. Separate GCash receipts remain pending until
-  staff review them; each collection and decision is stored in the `order_balance_payments` ledger.
+  counter or paid through a separate Xendit GCash checkout. Successful callbacks are stored as
+  verified entries in the `order_balance_payments` ledger.
 - Customers can request an update from their live order status page while an order is confirmed,
   preparing, or ready. These requests appear in the staff orderboard follow-up sidebar and stay there
   until staff resolve them; they are separate from unpaid orders and payment review.
@@ -211,21 +259,43 @@ saved in the same browser, but older orders cannot be reliably assigned to a gue
 
 ## Database
 
-The app stores everything in `data/merrylane-pglite`, a local [PGlite](https://pglite.dev/)
-(PostgreSQL compiled to WebAssembly) database. Tables, columns, and indexes use native PostgreSQL
-syntax.
+Local development stores data in `data/merrylane-pglite`, a local [PGlite](https://pglite.dev/)
+(PostgreSQL compiled to WebAssembly) database. Set `DATABASE_URL` to use hosted PostgreSQL instead.
+Tables, columns, and indexes use PostgreSQL syntax.
 
-- The database directory can be relocated with `MERRYLANE_DB_DIR`.
-- The connection runs with `TIME ZONE 'Asia/Manila'`, matching the cafe's reporting day.
-- A daily auto-backup copies the directory into `data/backups/` (kept out of version control).
-  The scheduler starts once the admin settings route is opened in a server session.
+- The local database directory can be relocated with `MERRYLANE_DB_DIR`.
+- Database connections use `TIME ZONE 'Asia/Manila'`, matching the cafe's reporting day.
+- In local PGlite mode, a daily auto-backup copies the database directory into `data/backups/`
+  (kept out of version control). Hosted-database backups must be configured in Supabase; the app
+  does not copy hosted data into the Vercel filesystem.
 - Schema upgrades are applied automatically by the models; there is no separate migrate command.
+
+### Copying local data to Supabase
+
+Keep the app stopped while taking a snapshot and running the migration. Copy
+`.env.migrate.example` to `.env.migrate.local` and set `SUPABASE_MIGRATION_URL` to the Supabase
+PostgreSQL connection string. The local file is ignored by Git and must not be shared.
+
+Run `npm run migrate:supabase:check` to inspect the local source without connecting to Supabase.
+Then run `npm run migrate:supabase` to create the app tables, copy records, restore ID sequences,
+and verify row counts. The script refuses to overwrite existing public tables and uses one
+transaction so failed migrations roll back. After verifying the destination, configure
+`DATABASE_URL` in the hosting environment.
 
 ### Backups and restore
 
-Backups are plain PGlite directories. To restore, stop the app, replace `data/merrylane-pglite` with a
-backup directory, and start the app again. Never edit files inside a database directory while the app
-is running.
+Backups are plain PGlite directories. A backup runs automatically the first time the app starts each
+day, and the newest 14 are kept.
+
+To restore, stop the app and run `npm run db:restore` (newest backup) or
+`npm run db:restore backup-20261123-012550` (a specific one). The script refuses to run while the app
+is still listening, keeps the previous directory as `data/merrylane-pglite.broken-<timestamp>`, and
+puts it back if the backup cannot be opened. Never edit files inside a database directory while the
+app is running.
+
+If the app cannot open its database (errors mentioning a checkpoint record or `Aborted()`), the
+database directory was most likely left half-written by a hard shutdown. Restore a backup with
+`npm run db:restore`; a backup taken before the corruption loses only what happened after it.
 
 ---
 
@@ -280,7 +350,7 @@ Notes:
 
 - The build uses webpack (`next build --webpack`) to match development; Turbopack is not used because
   of a Windows/WASM issue with the database toolchain.
-- `npm install` applies a small Next.js 16.4.3 development-only guard that ignores late React debug
+- `npm install` applies a small Next.js 16.4.6 development-only guard that ignores late React debug
   chunks after their stream closes, preventing a Next dev-overlay error. Restart `npm run dev` after
   installing dependencies or applying this patch.
 - Production builds use `.next-production` so they do not overwrite a running development server's
@@ -301,7 +371,8 @@ Notes:
 
 Never commit any of the following — `.gitignore` already blocks them:
 
-- `.env` / `.env.local` and any other environment file (only `.env.example` is tracked).
+- `.env` / `.env.local` and any other environment file (only scrubbed `.env.example` and
+  `.env.migrate.example` templates are tracked).
 - The database: `data/` (PGlite files, auto-backups, restore scratch directories). It contains
   customer orders, payment receipts, and password hashes.
 - Keys and certificates: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, SSH private keys.
